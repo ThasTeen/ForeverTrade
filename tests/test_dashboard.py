@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sqlite3
 import time
 import pytest
@@ -138,6 +139,15 @@ def test_format_currency_edge_cases():
     assert format_currency(12345.6) == "1g 23s 46c"
     assert format_currency(None) == "0g 0s 0c"
     assert format_currency("not_a_number") == "0g 0s 0c"
+
+    # Special float values & fuzzing (R39): inf, -inf, nan must not raise OverflowError
+    assert format_currency(float("inf")) in ("0c", "0g 0s 0c")
+    assert format_currency(float("-inf")) in ("0c", "0g 0s 0c")
+    assert format_currency(float("nan")) in ("0c", "0g 0s 0c")
+
+    # Booleans (R39): bool is subclass of int in Python, must return "0c", not "1c"
+    assert format_currency(True) == "0c"
+    assert format_currency(False) == "0c"
 
 
 def test_format_currency_as_html():
@@ -386,3 +396,147 @@ def test_build_standalone_dashboard_realm_filter(memory_db, tmp_path):
 
     assert "Everlook Exclusive Herb" in html_everlook
     assert "Nordanaar Exclusive Ore" not in html_everlook
+
+
+# ===========================================================================
+# 4. Task 09: Hardening & Bugfix Tests (R35, R36, R37, R39)
+# ===========================================================================
+
+def test_build_standalone_dashboard_stored_xss_protection(memory_db, tmp_path):
+    """Verify Stored XSS protection: dangerous tag payloads in item names are safely escaped (R35)."""
+    now = int(time.time())
+    xss_payload = "</script><script>alert('xss')</script>"
+    with memory_db:
+        memory_db.execute(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (999, xss_payload, 1, 7, "reagent", 5000, 0),
+        )
+        memory_db.execute(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            (999, "Everlook", 100, now),
+        )
+
+    out_file = tmp_path / "xss_test.html"
+    html_content = build_standalone_dashboard(memory_db, output_path=str(out_file))
+
+    # Raw unescaped breakout script tag MUST NOT exist in HTML
+    assert "</script><script>" not in html_content
+
+    # Safe HTML-entity escaping must be present in tables and data
+    assert ("&lt;/script&gt;&lt;script&gt;" in html_content) or ("&lt;script&gt;" in html_content)
+
+
+def test_build_standalone_dashboard_plot_decimation(memory_db, tmp_path):
+    """Verify plot optimization: downsamples price history points to <= 300 per trace (R36)."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.execute(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (888, "High Volume Herb", 1, 7, "herb", 10, 0),
+        )
+        # Insert 500 price snapshots (> 300 threshold)
+        snapshots = [
+            (888, "Everlook", 100 + (i % 20), now - (600 - i) * 60)
+            for i in range(500)
+        ]
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            snapshots,
+        )
+
+    out_file = tmp_path / "plot_decimation.html"
+    html_content = build_standalone_dashboard(memory_db, output_path=str(out_file))
+
+    # Extract Plotly traces from rendered HTML
+    match = re.search(r'Plotly\.newPlot\([^,]+,\s*(\[\{.*?\}\])\s*,\s*\{', html_content, re.DOTALL)
+    assert match is not None, "Plotly.newPlot call not found in generated HTML"
+    traces = json.loads(match.group(1))
+
+    herb_traces = [t for t in traces if t.get("name") == "High Volume Herb"]
+    assert len(herb_traces) == 1
+    # Verify points were downsampled to at most 300
+    points_count = len(herb_traces[0].get("x", []))
+    assert 0 < points_count <= 300
+
+
+def test_build_standalone_dashboard_ai_banner_step_inversion_fix(memory_db, tmp_path):
+    """Verify AI banner checklist renders action text rather than step numbers (R37)."""
+    ai_advice = {
+        "summary": "Фокус на ткани",
+        "checklist": [
+            {"action": "Купить 20 шт Linen Cloth", "step": 1},
+            {"action": "Скрафтить Heavy Woolen Cloak", "step": 2},
+        ],
+    }
+
+    out_file = tmp_path / "ai_step_fix.html"
+    html_content = build_standalone_dashboard(
+        memory_db,
+        output_path=str(out_file),
+        ai_advice=ai_advice,
+    )
+
+    # Meaningful action text must be rendered inside checklist items
+    assert "Купить 20 шт Linen Cloth" in html_content
+    assert "Скрафтить Heavy Woolen Cloak" in html_content
+    # The step number alone must NOT be the list item content
+    assert "<li>1</li>" not in html_content
+    assert "<li>2</li>" not in html_content
+
+
+def test_build_standalone_dashboard_handles_none_name(memory_db, tmp_path, monkeypatch):
+    """Verify dashboard generation and alerts gracefully handle items with name=None without AttributeError (R39)."""
+    # 1. notify_high_value_arbitrage with item name=None
+    qualifying = notify_high_value_arbitrage([{"name": None, "profit_copper": 15000}])
+    assert len(qualifying) == 1
+
+    # 2. build_standalone_dashboard with vendor arbitrage item name=None
+    monkeypatch.setattr(
+        "src.dashboard.get_vendor_arbitrage",
+        lambda conn, realm=None: [
+            {"name": None, "buyout_price": 100, "vendor_sell_price": 500, "profit_copper": 400, "realm": "Everlook", "quality": 1}
+        ],
+    )
+    # Also test crafting item name=None and anomaly item name=None
+    monkeypatch.setattr(
+        "src.dashboard.get_crafting_margins",
+        lambda conn, realm=None: [
+            {
+                "crafted_item_name": None,
+                "name": None,
+                "profession": "Blacksmithing",
+                "waylaid_crate_name": None,
+                "cost_copper": 100,
+                "revenue_copper": 200,
+                "profit_copper": 100,
+                "roi_percent": 100.0,
+                "reagents": [{"name": None, "count": 1}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "src.dashboard.get_zscore_anomalies",
+        lambda conn, realm=None: [
+            {
+                "name": None,
+                "signal": "STRONG_BUY",
+                "current_price": 100,
+                "mean_price": 200,
+                "z_score": -2.0,
+                "sample_count": 10,
+                "realm": "Everlook",
+            }
+        ],
+    )
+
+    out_file = tmp_path / "none_name_portal.html"
+    html_content = build_standalone_dashboard(memory_db, output_path=str(out_file))
+
+    assert out_file.exists()
+    assert "Unknown" in html_content
+    assert "Recipe" in html_content
+    assert "Item" in html_content

@@ -27,7 +27,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def format_currency(copper: int, as_html: bool = False) -> str:
+def format_currency(copper: Any, as_html: bool = False) -> str:
     """Format an amount of copper into WoW currency (gold, silver, copper).
 
     1g = 100s = 10000c.
@@ -35,12 +35,14 @@ def format_currency(copper: int, as_html: bool = False) -> str:
     If as_html is True: returns styled spans:
         '<span class="money-gold">1g</span> <span class="money-silver">23s</span> <span class="money-copper">45c</span>'
     """
+    if isinstance(copper, bool):
+        return "0c"
     if copper is None:
         copper = 0
     else:
         try:
             copper = int(round(float(copper)))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             copper = 0
 
     sign = "-" if copper < 0 else ""
@@ -72,9 +74,11 @@ def notify_high_value_arbitrage(
         profit = item.get("profit_copper")
         if profit is None:
             profit = item.get("profit", 0)
+        if isinstance(profit, bool):
+            profit = 0
         try:
-            profit_val = int(profit)
-        except (ValueError, TypeError):
+            profit_val = int(round(float(profit)))
+        except (ValueError, TypeError, OverflowError):
             profit_val = 0
 
         if profit_val >= threshold_copper:
@@ -93,8 +97,10 @@ def notify_high_value_arbitrage(
             format_currency(threshold_copper),
         )
         for it in qualifying:
-            name = it.get("name", "Unknown item")
-            p = it.get("profit_copper", it.get("profit", 0))
+            name = str(it.get("name") or "Unknown item")
+            p = it.get("profit_copper")
+            if p is None:
+                p = it.get("profit", 0)
             logger.info("  * [ARBITRAGE] %s -> Profit: %s", name, format_currency(p))
 
     return qualifying
@@ -106,20 +112,69 @@ def _build_price_history_chart(conn: sqlite3.Connection, realm: Optional[str] = 
 
     cursor = conn.cursor()
     try:
+        # Select top-8 most active prioritized items
         cursor.execute(
             """
-            SELECT s.item_id, i.name, s.timestamp, s.price, i.item_class, i.category
+            SELECT s.item_id
             FROM price_snapshots s
             JOIN items i ON s.item_id = i.item_id
+            LEFT JOIN recipe_reagents rr ON s.item_id = rr.reagent_item_id
             WHERE (? IS NULL OR s.realm = ?)
-            ORDER BY s.timestamp ASC
+            GROUP BY s.item_id
+            ORDER BY 
+                CASE WHEN rr.reagent_item_id IS NOT NULL 
+                       OR i.item_class IN (0, 7) 
+                       OR i.category IN ('reagent', 'raw', 'consumable', 'trade_goods', 'herb', 'ore', 'cloth') 
+                     THEN 1 ELSE 0 END DESC,
+                COUNT(s.price) DESC
+            LIMIT 8
             """,
             (realm, realm),
         )
-        rows = cursor.fetchall()
-    except Exception as e:
-        logger.warning("Could not query price_snapshots for chart: %s", e)
-        rows = []
+        top_ids = [r[0] for r in cursor.fetchall()]
+    except Exception:
+        try:
+            cursor.execute(
+                """
+                SELECT s.item_id
+                FROM price_snapshots s
+                JOIN items i ON s.item_id = i.item_id
+                WHERE (? IS NULL OR s.realm = ?)
+                GROUP BY s.item_id
+                ORDER BY 
+                    CASE WHEN i.item_class IN (0, 7) 
+                           OR i.category IN ('reagent', 'raw', 'consumable', 'trade_goods', 'herb', 'ore', 'cloth') 
+                         THEN 1 ELSE 0 END DESC,
+                    COUNT(s.price) DESC
+                LIMIT 8
+                """,
+                (realm, realm),
+            )
+            top_ids = [r[0] for r in cursor.fetchall()]
+        except Exception as e:
+            logger.warning("Could not query top items for chart: %s", e)
+            top_ids = []
+
+    rows = []
+    if top_ids:
+        try:
+            placeholders = ",".join("?" for _ in top_ids)
+            params = [realm, realm] + top_ids
+            cursor.execute(
+                f"""
+                SELECT s.item_id, i.name, s.timestamp, s.price
+                FROM price_snapshots s
+                JOIN items i ON s.item_id = i.item_id
+                WHERE (? IS NULL OR s.realm = ?)
+                  AND s.item_id IN ({placeholders})
+                ORDER BY s.timestamp ASC
+                """,
+                params,
+            )
+            rows = cursor.fetchall()
+        except Exception as e:
+            logger.warning("Could not query price_snapshots for chart: %s", e)
+            rows = []
 
     if not rows:
         fig.add_annotation(
@@ -132,42 +187,38 @@ def _build_price_history_chart(conn: sqlite3.Connection, realm: Optional[str] = 
             font=dict(size=15, color="#8b949e"),
         )
     else:
-        # Check reagent IDs for priority
-        try:
-            cursor.execute("SELECT DISTINCT reagent_item_id FROM recipe_reagents")
-            reagent_ids = {r[0] for r in cursor.fetchall()}
-        except Exception:
-            reagent_ids = set()
-
         items_map: dict[int, dict[str, Any]] = {}
         for r in rows:
-            item_id, name, ts, price, item_class, category = r[0], r[1], r[2], r[3], r[4], r[5]
+            item_id, name, ts, price = r[0], r[1], r[2], r[3]
             if item_id not in items_map:
-                is_priority = (
-                    (item_id in reagent_ids)
-                    or (item_class in (0, 7))
-                    or (category in ("reagent", "raw", "consumable", "trade_goods", "herb", "ore", "cloth"))
-                )
                 items_map[item_id] = {
-                    "name": name,
+                    "name": html.escape(str(name or "Unknown")),
                     "points": [],
-                    "priority": is_priority,
                 }
             items_map[item_id]["points"].append((ts, price))
 
-        # Sort items: prioritized first, then by snapshot count descending
-        sorted_items = sorted(
-            items_map.items(),
-            key=lambda it: (1 if it[1]["priority"] else 0, len(it[1]["points"])),
-            reverse=True,
-        )
-
-        # Plot top 8 items
-        for item_id, item_info in sorted_items[:8]:
+        # Plot top 8 items (in order of priority / activity from top_ids)
+        for item_id in top_ids:
+            if item_id not in items_map:
+                continue
+            item_info = items_map[item_id]
             points = item_info["points"]
+
+            # Decimate/downsample if more than 300 points to prevent browser SVG DOM explosion
+            if len(points) > 300:
+                step = (len(points) + 299) // 300
+                downsampled = points[::step]
+                if downsampled and downsampled[-1] != points[-1]:
+                    if len(downsampled) >= 300:
+                        downsampled[-1] = points[-1]
+                    else:
+                        downsampled.append(points[-1])
+                points = downsampled
+
             x_vals = []
             y_vals = []
             hover_texts = []
+            safe_name = item_info["name"]
             for ts, p in points:
                 try:
                     dt_str = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -175,14 +226,14 @@ def _build_price_history_chart(conn: sqlite3.Connection, realm: Optional[str] = 
                     dt_str = str(ts)
                 x_vals.append(dt_str)
                 y_vals.append(p)
-                hover_texts.append(f"{item_info['name']}<br>{format_currency(p)}")
+                hover_texts.append(f"{safe_name}<br>{format_currency(p)}")
 
             fig.add_trace(
                 go.Scatter(
                     x=x_vals,
                     y=y_vals,
                     mode="lines+markers",
-                    name=item_info["name"],
+                    name=safe_name,
                     hovertext=hover_texts,
                     hoverinfo="text+x",
                     line=dict(width=2),
@@ -219,7 +270,10 @@ def _build_price_history_chart(conn: sqlite3.Connection, realm: Optional[str] = 
         height=390,
     )
 
-    return fig.to_html(full_html=False, include_plotlyjs="cdn")
+    chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+    # Escape '</' in serialized chart data to prevent Stored XSS / script tag breakout
+    chart_html = chart_html.replace("</", r"<\/").replace(r"<\/script>", "</script>").replace(r"<\/div>", "</div>")
+    return chart_html
 
 
 def _render_ai_banner(ai_advice: Optional[Union[dict, str]]) -> str:
@@ -255,10 +309,10 @@ def _render_ai_banner(ai_advice: Optional[Union[dict, str]]) -> str:
             parts.append("<ol class='ai-checklist'>")
             for item in checklist:
                 if isinstance(item, dict):
-                    step_text = item.get("step") or item.get("action") or item.get("text") or str(item)
+                    step_text = item.get("action") or item.get("text") or str(item.get("step") or item)
                 else:
                     step_text = str(item)
-                parts.append(f"<li>{html.escape(step_text)}</li>")
+                parts.append(f"<li>{html.escape(str(step_text))}</li>")
             parts.append("</ol>")
 
         if not summary and not checklist:
@@ -317,11 +371,11 @@ def build_standalone_dashboard(
     arbitrage_rows = []
     for item in vendor_arbitrage:
         q = item.get("quality", 1)
-        name = html.escape(item.get("name", "Unknown"))
+        name = html.escape(str(item.get("name") or "Unknown"))
         buyout = item.get("buyout_price", item.get("price", 0))
         vendor_sell = item.get("vendor_sell_price", 0)
         profit = item.get("profit_copper", item.get("profit", 0))
-        item_realm = html.escape(item.get("realm") or "—")
+        item_realm = html.escape(str(item.get("realm") or "—"))
 
         arbitrage_rows.append(
             f"<tr>"
@@ -340,9 +394,9 @@ def build_standalone_dashboard(
     # 5. Build Waylaid Crates Crafting table rows
     crafting_rows = []
     for item in crafting_display:
-        name = html.escape(item.get("crafted_item_name") or item.get("name", "Recipe"))
-        profession = html.escape(item.get("profession") or "Craft")
-        crate_name = html.escape(item.get("waylaid_crate_name") or "—")
+        name = html.escape(str(item.get("crafted_item_name") or item.get("name") or "Recipe"))
+        profession = html.escape(str(item.get("profession") or "Craft"))
+        crate_name = html.escape(str(item.get("waylaid_crate_name") or "—"))
         cost = item.get("cost_copper", int(round(item.get("cost", 0))))
         revenue = item.get("revenue_copper", int(round(item.get("revenue", 0))))
         profit = item.get("profit_copper", int(round(item.get("profit", 0))))
@@ -351,7 +405,7 @@ def build_standalone_dashboard(
         # Reagents breakdown summary
         reagents = item.get("reagents", [])
         if reagents:
-            reagents_text = ", ".join(f"{r['name']} x{r['count']}" for r in reagents[:3])
+            reagents_text = ", ".join(f"{str(r.get('name') or 'Unknown')} x{r.get('count', 1)}" for r in reagents[:3])
             if len(reagents) > 3:
                 reagents_text += f" (+{len(reagents)-3})"
             reagents_html = f"<div class='reagents-subtext'>{html.escape(reagents_text)}</div>"
@@ -377,14 +431,14 @@ def build_standalone_dashboard(
     # 6. Build Price Anomalies table rows
     anomaly_rows = []
     for item in anomalies:
-        name = html.escape(item.get("name", "Item"))
-        signal = item.get("signal", "HOLD")
+        name = html.escape(str(item.get("name") or "Item"))
+        signal = str(item.get("signal") or "HOLD")
         badge_cls = "badge-buy" if "BUY" in signal else "badge-sell"
         curr_price = item.get("current_price", item.get("price", 0))
         mean_price = item.get("mean_price", item.get("mean", 0))
         z = item.get("z_score", item.get("z", 0.0))
         n = item.get("sample_count", item.get("n", 0))
-        item_realm = html.escape(item.get("realm") or "—")
+        item_realm = html.escape(str(item.get("realm") or "—"))
 
         anomaly_rows.append(
             f"<tr>"
