@@ -1,0 +1,402 @@
+"""Tests for File Watcher and ETL Pipeline (Ticket 02, R05, R06, R07, R08)."""
+
+import logging
+import os
+import sqlite3
+import threading
+import time
+
+import pytest
+from watchdog.events import FileModifiedEvent
+
+from src.database import init_db
+from src.etl import (
+    AuctionatorEventHandler,
+    ingest_price_snapshot,
+    normalize_item_id,
+    parse_auctionator_data,
+    start_watcher,
+)
+
+
+@pytest.fixture
+def memory_db():
+    """In-memory SQLite database initialized with schema."""
+    conn = init_db(":memory:")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def temp_db(tmp_path):
+    """Temporary SQLite database on disk."""
+    db_file = str(tmp_path / "test_market.db")
+    conn = init_db(db_file)
+    try:
+        yield db_file, conn
+    finally:
+        conn.close()
+
+
+class TestNormalizeItemId:
+    """Tests for item ID normalization from various raw signatures (R07)."""
+
+    def test_normalize_colon_signature(self):
+        assert normalize_item_id("2589:0:0:0:0") == 2589
+        assert normalize_item_id("12345:1:2:3") == 12345
+
+    def test_normalize_with_item_prefix(self):
+        assert normalize_item_id("item:2589:0:0:0") == 2589
+        assert normalize_item_id("item:774") == 774
+
+    def test_normalize_simple_string_and_int(self):
+        assert normalize_item_id("2589") == 2589
+        assert normalize_item_id(2589) == 2589
+
+    def test_normalize_invalid_and_edge_cases(self):
+        assert normalize_item_id(None) is None
+        assert normalize_item_id("") is None
+        assert normalize_item_id("   ") is None
+        assert normalize_item_id("unknown:invalid") is None
+        assert normalize_item_id(0) is None
+        assert normalize_item_id("0") is None
+        assert normalize_item_id("0:0:0:0") is None
+        assert normalize_item_id(-10) is None
+        assert normalize_item_id("-10:0:0") is None
+
+
+class TestParseAuctionatorData:
+    """Tests for safe Lua parsing and fallback mechanism (R06)."""
+
+    def test_parse_valid_lua_table(self, tmp_path):
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["2589:0:0:0:0"] = { ["mr"] = 1500, ["id"] = "2589" },\n'
+            '    ["1205:0:0:0:0"] = { ["mr"] = 320 }\n'
+            '  }\n'
+            '}\n'
+        )
+        lua_file = tmp_path / "Auctionator.lua"
+        lua_file.write_text(lua_content, encoding="utf-8")
+
+        data = parse_auctionator_data(str(lua_file))
+        assert isinstance(data, dict)
+        assert "Everlook" in data
+        assert "2589:0:0:0:0" in data["Everlook"]
+        assert data["Everlook"]["2589:0:0:0:0"]["mr"] == 1500
+
+    def test_parse_corrupt_primary_with_valid_bak_fallback(self, tmp_path):
+        primary_file = tmp_path / "Auctionator.lua"
+        primary_file.write_text("AUCTIONATOR_PRICE_DATABASE = { broken lua syntax [[[", encoding="utf-8")
+
+        bak_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["2589"] = { ["mr"] = 999 }\n'
+            '  }\n'
+            '}\n'
+        )
+        bak_file = tmp_path / "Auctionator.lua.bak"
+        bak_file.write_text(bak_content, encoding="utf-8")
+
+        data = parse_auctionator_data(str(primary_file))
+        assert isinstance(data, dict)
+        assert "Everlook" in data
+        assert data["Everlook"]["2589"]["mr"] == 999
+
+    def test_parse_fallback_alternate_bak_extension(self, tmp_path):
+        """Verify fallback to Auctionator.bak when Auctionator.lua.bak is absent."""
+        primary_file = tmp_path / "Auctionator.lua"
+        primary_file.write_text("corrupted", encoding="utf-8")
+
+        alt_bak_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["555"] = { ["mr"] = 333 }\n'
+            '  }\n'
+            '}\n'
+        )
+        alt_bak_file = tmp_path / "Auctionator.bak"
+        alt_bak_file.write_text(alt_bak_content, encoding="utf-8")
+
+        data = parse_auctionator_data(str(primary_file))
+        assert isinstance(data, dict)
+        assert data["Everlook"]["555"]["mr"] == 333
+
+    def test_parse_missing_primary_with_valid_bak_fallback(self, tmp_path):
+        primary_file = tmp_path / "Auctionator.lua"
+        # primary_file does not exist on disk
+
+        bak_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["774"] = { ["mr"] = 450 }\n'
+            '  }\n'
+            '}\n'
+        )
+        bak_file = tmp_path / "Auctionator.lua.bak"
+        bak_file.write_text(bak_content, encoding="utf-8")
+
+        data = parse_auctionator_data(str(primary_file))
+        assert isinstance(data, dict)
+        assert "Everlook" in data
+        assert data["Everlook"]["774"]["mr"] == 450
+
+    def test_parse_both_files_missing_raises_error(self, tmp_path):
+        missing_file = tmp_path / "NonExistent.lua"
+        with pytest.raises((FileNotFoundError, ValueError, Exception)) as exc_info:
+            parse_auctionator_data(str(missing_file))
+        assert "NonExistent.lua" in str(exc_info.value) or "not found" in str(exc_info.value).lower()
+
+    def test_parse_both_files_corrupt_raises_error(self, tmp_path):
+        primary_file = tmp_path / "Auctionator.lua"
+        primary_file.write_text("NOT LUA DATA", encoding="utf-8")
+        bak_file = tmp_path / "Auctionator.lua.bak"
+        bak_file.write_text("ALSO CORRUPTED DATA", encoding="utf-8")
+
+        with pytest.raises(Exception):
+            parse_auctionator_data(str(primary_file))
+
+    def test_parse_direct_table_literal(self, tmp_path):
+        lua_content = (
+            '{\n'
+            '  ["Everlook"] = {\n'
+            '    ["3000"] = { ["mr"] = 120 }\n'
+            '  }\n'
+            '}\n'
+        )
+        lua_file = tmp_path / "raw_table.lua"
+        lua_file.write_text(lua_content, encoding="utf-8")
+
+        data = parse_auctionator_data(str(lua_file))
+        assert isinstance(data, dict)
+        assert "Everlook" in data
+        assert data["Everlook"]["3000"]["mr"] == 120
+
+
+class TestIngestPriceSnapshot:
+    """Tests for batch ingestion, field extraction, deduplication, and logging (R07, R08)."""
+
+    def test_ingest_price_extraction_fields(self, memory_db):
+        """Verify extraction from mr, price, H..., L..., and numeric strings."""
+        raw_data = {
+            "Everlook": {
+                # 1. mr extraction
+                "2589:0:0:0:0": {"mr": 1500, "id": "2589"},
+                # 2. explicit price field
+                "1205": {"price": 320},
+                # 3. H-series high extremum
+                "774": {"H1690000000": 450},
+                # 4. L-series low extremum
+                "888": {"L1690000000": 200},
+                # 5. Direct scalar number
+                "999": 600,
+                # 6. Direct numeric string
+                "1111": "750",
+                # 7. Unmatched key with valid nested id
+                "invalid_key": {"id": "2222:0:0", "mr": 880},
+                # 8. Invalid item skipped
+                "bad_item": {"mr": 100},
+            }
+        }
+        count = ingest_price_snapshot(memory_db, raw_data, realm="Everlook", current_time=1000)
+        assert count == 7
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT item_id, price FROM price_snapshots WHERE realm = 'Everlook' ORDER BY item_id")
+        rows = dict(cur.fetchall())
+
+        assert rows[774] == 450
+        assert rows[888] == 200
+        assert rows[999] == 600
+        assert rows[1111] == 750
+        assert rows[1205] == 320
+        assert rows[2222] == 880
+        assert rows[2589] == 1500
+
+    def test_batch_insertion_performance_and_integrity(self, memory_db):
+        """Verify executemany batch insertion of multiple items with foreign key integrity."""
+        raw_items = {}
+        for item_id in range(1, 101):
+            raw_items[f"{item_id}:0:0:0:0"] = {"mr": item_id * 10}
+
+        raw_data = {"Everlook": raw_items}
+        count = ingest_price_snapshot(memory_db, raw_data, realm="Everlook", current_time=2000)
+        assert count == 100
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT COUNT(*) FROM price_snapshots WHERE realm = 'Everlook'")
+        assert cur.fetchone()[0] == 100
+
+        # Verify items table entries were auto-populated to satisfy FK constraints
+        cur.execute("SELECT COUNT(*) FROM items")
+        assert cur.fetchone()[0] >= 100
+
+    def test_deduplication_ten_minute_window(self, memory_db):
+        """Verify identical prices within 10 minutes are skipped, but price change or time elapsed inserts."""
+        raw_data_initial = {
+            "Everlook": {
+                "2589": {"mr": 1000},
+                "1205": {"mr": 500},
+            }
+        }
+        # First ingest at t = 1000: both inserted
+        t0 = 1000
+        inserted_1 = ingest_price_snapshot(
+            memory_db, raw_data_initial, realm="Everlook", dedupe_window_minutes=10, current_time=t0
+        )
+        assert inserted_1 == 2
+
+        # Second ingest at t = 1300 (5 minutes later): identical prices -> 0 inserted
+        t1 = 1300
+        inserted_2 = ingest_price_snapshot(
+            memory_db, raw_data_initial, realm="Everlook", dedupe_window_minutes=10, current_time=t1
+        )
+        assert inserted_2 == 0
+
+        # Third ingest at t = 1400 (6.6 minutes later): item 2589 changes price to 1100, 1205 unchanged
+        t2 = 1400
+        raw_data_changed = {
+            "Everlook": {
+                "2589": {"mr": 1100},
+                "1205": {"mr": 500},
+            }
+        }
+        inserted_3 = ingest_price_snapshot(
+            memory_db, raw_data_changed, realm="Everlook", dedupe_window_minutes=10, current_time=t2
+        )
+        assert inserted_3 == 1  # Only 2589 inserted
+
+        # Fourth ingest at t = 2050 (10.8 minutes after t2): 2589 unchanged at 1100, window elapsed -> inserted
+        t3 = 2050
+        inserted_4 = ingest_price_snapshot(
+            memory_db, raw_data_changed, realm="Everlook", dedupe_window_minutes=10, current_time=t3
+        )
+        assert inserted_4 == 2  # Both inserted because > 10 minutes elapsed
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT timestamp, price FROM price_snapshots WHERE item_id = 2589 ORDER BY timestamp")
+        history_2589 = cur.fetchall()
+        assert len(history_2589) == 3
+        assert [h[1] for h in history_2589] == [1000, 1100, 1100]
+
+    def test_structured_logging_to_watcher_log(self, memory_db):
+        """Verify that ingestion writes structured log entries to watcher.log."""
+        raw_data = {"Everlook": {"2589": {"mr": 1500}}}
+        log_file = "watcher.log"
+
+        count = ingest_price_snapshot(memory_db, raw_data, realm="Everlook", current_time=5000)
+        assert count == 1
+
+        assert os.path.exists(log_file)
+        with open(log_file, "r", encoding="utf-8") as f:
+            log_content = f.read()
+        assert "Ingested 1 price snapshots for realm 'Everlook'" in log_content
+
+    def test_ingest_empty_or_missing_realm(self, memory_db):
+        """Verify graceful return 0 when realm data is empty or missing."""
+        assert ingest_price_snapshot(memory_db, {}, realm="Everlook") == 0
+        assert ingest_price_snapshot(memory_db, {"OtherRealm": {}}, realm="Everlook") == 0
+
+
+class TestWatcherEngine:
+    """Tests for file system watcher and event handling (R05)."""
+
+    def test_start_watcher_creates_and_stops_cleanly_via_stop_event(self, tmp_path):
+        """Verify start_watcher launches Observer and terminates on stop_event without leaking threads."""
+        watch_dir = tmp_path / "WTF"
+        watch_dir.mkdir()
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        stop_event = threading.Event()
+        watcher_thread = threading.Thread(
+            target=start_watcher,
+            args=(str(watch_dir), db_path, "Everlook", stop_event),
+            daemon=True,
+        )
+        watcher_thread.start()
+
+        # Let the watcher start
+        time.sleep(0.15)
+        assert watcher_thread.is_alive()
+
+        # Signal stop
+        stop_event.set()
+        watcher_thread.join(timeout=3.0)
+        assert not watcher_thread.is_alive()
+
+    def test_start_watcher_returns_running_observer_without_stop_event(self, tmp_path):
+        """Verify start_watcher returns active Observer when stop_event is None."""
+        watch_dir = tmp_path / "WTF"
+        watch_dir.mkdir()
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        observer = start_watcher(str(watch_dir), db_path, "Everlook", stop_event=None)
+        try:
+            assert observer.is_alive()
+        finally:
+            observer.stop()
+            observer.join(timeout=2.0)
+        assert not observer.is_alive()
+
+    def test_start_watcher_with_direct_file_path(self, tmp_path):
+        """Verify start_watcher works when pointing directly to a file path."""
+        watch_dir = tmp_path / "SavedVariables"
+        watch_dir.mkdir()
+        file_path = str(watch_dir / "Auctionator.lua")
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        observer = start_watcher(file_path, db_path, "Everlook", stop_event=None)
+        try:
+            assert observer.is_alive()
+        finally:
+            observer.stop()
+            observer.join(timeout=2.0)
+        assert not observer.is_alive()
+
+    def test_auctionator_event_handler_triggers_etl(self, tmp_path):
+        """Verify AuctionatorEventHandler on_modified triggers ETL ingestion."""
+        watch_dir = tmp_path / "SavedVariables"
+        watch_dir.mkdir()
+        target_file = watch_dir / "Auctionator.lua"
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        handler = AuctionatorEventHandler(
+            target_filename="Auctionator.lua",
+            full_target_path=str(target_file),
+            db_path=db_path,
+            realm="Everlook",
+            debounce_seconds=0.01,
+        )
+
+        # Write valid Lua content
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["2589:0:0:0:0"] = { ["mr"] = 7777 }\n'
+            '  }\n'
+            '}\n'
+        )
+        target_file.write_text(lua_content, encoding="utf-8")
+
+        # Simulate on_modified event
+        event = FileModifiedEvent(str(target_file))
+        handler.on_modified(event)
+
+        # Check that ETL was triggered and populated the SQLite DB
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT item_id, price FROM price_snapshots WHERE realm = 'Everlook'")
+        rows = cur.fetchall()
+        conn.close()
+
+        assert len(rows) == 1
+        assert rows[0][0] == 2589
+        assert rows[0][1] == 7777

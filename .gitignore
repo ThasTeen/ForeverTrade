@@ -7,3 +7,5 @@ __pycache__/
 .DS_Store
 .autopilot/serve.*
 .autopilot/daemon.log
+watcher.log
+*.log
