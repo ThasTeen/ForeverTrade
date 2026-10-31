@@ -7,6 +7,7 @@ or deterministic heuristic fallback to produce session tactical checklists.
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import urllib.error
@@ -34,7 +35,103 @@ __all__ = [
     "build_compact_context",
     "generate_market_advice",
     "AntigravityManagerClient",
+    "_safe_int",
+    "_safe_float",
+    "_sanitize_name",
 ]
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    """Safely convert value to int, returning default on None, ValueError, or TypeError."""
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely convert value to float, returning default on None, ValueError, or TypeError."""
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _sanitize_name(name: Any, max_len: int = 64) -> str:
+    """Sanitize item names to prevent indirect prompt injection."""
+    if name is None:
+        return ""
+    cleaned = re.sub(r"[\r\n\t]", " ", str(name)).strip()
+    return cleaned[:max_len]
+
+
+def _sanitize_context(context: dict) -> dict:
+    """Return a sanitized copy of market context with cleaned item and crate names."""
+    if not isinstance(context, dict):
+        return context
+    clean_ctx = dict(context)
+    for section_key in ("vendor_arbitrage", "vendor", "waylaid_crafting", "crafting", "price_anomalies", "anomalies"):
+        items = clean_ctx.get(section_key)
+        if isinstance(items, list):
+            sanitized_items = []
+            for it in items:
+                if isinstance(it, dict):
+                    it_copy = dict(it)
+                    for name_field in ("name", "crafted_item_name", "target"):
+                        if name_field in it_copy and it_copy[name_field] is not None:
+                            it_copy[name_field] = _sanitize_name(it_copy[name_field])
+                    for crate_field in ("crate_name", "waylaid_crate_name"):
+                        if crate_field in it_copy and it_copy[crate_field] is not None:
+                            it_copy[crate_field] = _sanitize_name(it_copy[crate_field])
+                    sanitized_items.append(it_copy)
+                else:
+                    sanitized_items.append(it)
+            clean_ctx[section_key] = sanitized_items
+    return clean_ctx
+
+
+def _build_context_whitelist(context: Optional[dict]) -> set[str]:
+    """Build a whitelist of known item/recipe names and IDs from market context."""
+    whitelist: set[str] = set()
+    if not context or not isinstance(context, dict):
+        return whitelist
+    for section_key in ("vendor_arbitrage", "vendor", "waylaid_crafting", "crafting", "price_anomalies", "anomalies"):
+        items = context.get(section_key)
+        if isinstance(items, list):
+            for it in items:
+                if isinstance(it, dict):
+                    for field in ("name", "crafted_item_name", "target", "crate_name", "waylaid_crate_name"):
+                        val = it.get(field)
+                        if val:
+                            whitelist.add(str(val).strip().lower())
+                    for id_field in ("item_id", "recipe_id", "target_item_id"):
+                        val = it.get(id_field)
+                        if val is not None:
+                            val_str = str(val).strip().lower()
+                            whitelist.add(val_str)
+                            whitelist.add(f"item #{val_str}")
+                            whitelist.add(f"recipe #{val_str}")
+    return whitelist
+
+
+def _is_target_valid(target: str, whitelist: set[str]) -> bool:
+    """Validate target name/ID against whitelist."""
+    if not whitelist:
+        return True
+    t_clean = target.strip().lower()
+    if not t_clean:
+        return False
+    if t_clean in whitelist:
+        return True
+    for w in whitelist:
+        if len(w) >= 3:
+            if w in t_clean or (len(t_clean) >= 3 and t_clean in w):
+                return True
+    return False
 
 
 def build_compact_context(
@@ -53,12 +150,13 @@ def build_compact_context(
     vendor_arbitrage_raw = get_vendor_arbitrage(conn, min_profit_copper=50, realm=realm)
     top_vendor = []
     for item in vendor_arbitrage_raw[:3]:
-        buyout = int(item.get("buyout_price", item.get("price", 0)))
-        v_sell = int(item.get("vendor_sell_price", 0))
-        profit = int(item.get("profit_copper", item.get("profit", 0)))
+        buyout = _safe_int(item.get("buyout_price") if item.get("buyout_price") is not None else item.get("price"), 0)
+        v_sell = _safe_int(item.get("vendor_sell_price"), 0)
+        profit = _safe_int(item.get("profit_copper") if item.get("profit_copper") is not None else item.get("profit"), 0)
+        name = _sanitize_name(item.get("name", f"Item #{item['item_id']}"))
         top_vendor.append({
             "item_id": int(item["item_id"]),
-            "name": str(item.get("name", f"Item #{item['item_id']}")),
+            "name": name,
             "buyout_price": buyout,
             "vendor_sell_price": v_sell,
             "profit_copper": profit,
@@ -72,21 +170,24 @@ def build_compact_context(
     crafting_pool = waylaid_recipes if waylaid_recipes else crafting_raw
     top_crafting = []
     for recipe in crafting_pool[:3]:
-        cost = int(round(recipe.get("cost_copper", recipe.get("cost", 0))))
-        rev = int(round(recipe.get("revenue_copper", recipe.get("revenue", 0))))
-        profit = int(round(recipe.get("profit_copper", recipe.get("profit", 0))))
+        cost = _safe_int(round(_safe_float(recipe.get("cost_copper") if recipe.get("cost_copper") is not None else recipe.get("cost"), 0.0)))
+        rev = _safe_int(round(_safe_float(recipe.get("revenue_copper") if recipe.get("revenue_copper") is not None else recipe.get("revenue"), 0.0)))
+        profit = _safe_int(round(_safe_float(recipe.get("profit_copper") if recipe.get("profit_copper") is not None else recipe.get("profit"), 0.0)))
         roi_val = recipe.get("roi_percent")
         if roi_val is None:
-            roi_val = round(float(recipe.get("roi", 0.0)) * 100, 2)
+            roi_val = round(_safe_float(recipe.get("roi"), 0.0) * 100, 2)
         else:
-            roi_val = round(float(roi_val), 2)
+            roi_val = round(_safe_float(roi_val, 0.0), 2)
+
+        name = _sanitize_name(recipe.get("crafted_item_name") or recipe.get("name", f"Recipe #{recipe['recipe_id']}"))
+        crate_name = _sanitize_name(recipe["waylaid_crate_name"]) if recipe.get("waylaid_crate_name") else None
 
         top_crafting.append({
             "recipe_id": int(recipe["recipe_id"]),
-            "name": str(recipe.get("crafted_item_name") or recipe.get("name", f"Recipe #{recipe['recipe_id']}")),
+            "name": name,
             "profession": str(recipe.get("profession", "")),
-            "crate_name": str(recipe["waylaid_crate_name"]) if recipe.get("waylaid_crate_name") else None,
-            "waylaid_crate_name": str(recipe["waylaid_crate_name"]) if recipe.get("waylaid_crate_name") else None,
+            "crate_name": crate_name,
+            "waylaid_crate_name": crate_name,
             "cost_copper": cost,
             "revenue_copper": rev,
             "profit_copper": profit,
@@ -99,17 +200,18 @@ def build_compact_context(
     anomalies_raw = get_zscore_anomalies(conn, z_buy_threshold=-1.8, realm=realm)
     deep_drops = [
         a for a in anomalies_raw
-        if a.get("signal") == "STRONG_BUY" or float(a.get("z_score", a.get("z", 0.0))) <= -1.8
+        if a.get("signal") == "STRONG_BUY" or _safe_float(a.get("z_score") if a.get("z_score") is not None else a.get("z"), 0.0) <= -1.8
     ]
-    deep_drops.sort(key=lambda a: float(a.get("z_score", a.get("z", 0.0))))
+    deep_drops.sort(key=lambda a: _safe_float(a.get("z_score") if a.get("z_score") is not None else a.get("z"), 0.0))
     top_anomalies = []
     for item in deep_drops[:3]:
-        curr = int(item.get("current_price", item.get("price", 0)))
-        mean = round(float(item.get("mean_price", item.get("mean", 0.0))), 2)
-        z = round(float(item.get("z_score", item.get("z", 0.0))), 2)
+        curr = _safe_int(item.get("current_price") if item.get("current_price") is not None else item.get("price"), 0)
+        mean = round(_safe_float(item.get("mean_price") if item.get("mean_price") is not None else item.get("mean"), 0.0), 2)
+        z = round(_safe_float(item.get("z_score") if item.get("z_score") is not None else item.get("z"), 0.0), 2)
+        name = _sanitize_name(item.get("name", f"Item #{item['item_id']}"))
         top_anomalies.append({
             "item_id": int(item["item_id"]),
-            "name": str(item.get("name", f"Item #{item['item_id']}")),
+            "name": name,
             "current_price": curr,
             "price": curr,
             "mean_price": mean,
@@ -167,7 +269,7 @@ class AntigravityManagerClient:
             return self.generate_heuristic_advice(context)
 
         try:
-            return self._call_gemini(context)
+            return self._call_rest_api(context)
         except Exception as exc:
             logger.warning("AntigravityManagerClient: API request failed (%s). Falling back to heuristic.", exc)
             return self.generate_heuristic_advice(context)
@@ -182,8 +284,9 @@ class AntigravityManagerClient:
     def __call__(self, context: dict) -> dict:
         return self.generate_advice(context)
 
-    def _call_gemini(self, context: dict) -> dict:
-        url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+    def _call_rest_api(self, context: dict) -> dict:
+        """Execute REST call to Gemini models without leaking API key in query string."""
+        url = f"{self.base_url}/{self.model}:generateContent"
         system_prompt = (
             "Ты — тактический рыночный AI-ассистент World of Warcraft: Forever.\n"
             "На основе входного рыночного среза (вендорный арбитраж, маржинальный крафт под ящики Waylaid Crates, "
@@ -206,6 +309,7 @@ class AntigravityManagerClient:
             "}"
         )
 
+        clean_context = _sanitize_context(context)
         body = {
             "system_instruction": {
                 "parts": [{"text": system_prompt}]
@@ -213,7 +317,14 @@ class AntigravityManagerClient:
             "contents": [
                 {
                     "parts": [
-                        {"text": f"Рыночный контекст:\n{json.dumps(context, ensure_ascii=False, indent=2)}"}
+                        {
+                            "text": (
+                                "Рыночный контекст:\n"
+                                "<market_data>\n"
+                                f"{json.dumps(clean_context, ensure_ascii=False, indent=2)}\n"
+                                "</market_data>"
+                            )
+                        }
                     ]
                 }
             ],
@@ -229,6 +340,8 @@ class AntigravityManagerClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        if self.api_key:
+            req.add_header("x-goog-api-key", self.api_key)
 
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             raw_body = resp.read().decode("utf-8")
@@ -246,8 +359,11 @@ class AntigravityManagerClient:
 
         return self._format_and_validate(advice_data, fallback_context=context)
 
+    # Backward compatibility alias
+    _call_gemini = _call_rest_api
+
     def _call_agy_cli(self, context: dict) -> dict:
-        """Call local Antigravity CLI (agy) to generate market advice."""
+        """Call local Antigravity CLI (agy) to generate market advice via stdin (avoids WinError 206)."""
         system_prompt = (
             "Ты — тактический рыночный AI-ассистент World of Warcraft: Forever.\n"
             "На основе входного рыночного среза (вендорный арбитраж, маржинальный крафт под ящики Waylaid Crates, "
@@ -269,20 +385,21 @@ class AntigravityManagerClient:
             '  ]\n'
             "}"
         )
+        clean_context = _sanitize_context(context)
         prompt = (
             f"{system_prompt}\n\n"
-            f"Рыночный контекст:\n{json.dumps(context, ensure_ascii=False, indent=2)}\n\n"
+            f"Рыночный контекст:\n<market_data>\n{json.dumps(clean_context, ensure_ascii=False, indent=2)}\n</market_data>\n\n"
             "Верни ответ строго в формате JSON."
         )
 
-        cmd = ["agy", "-p", prompt, "--model", self.model]
+        cmd = ["agy", "--model", self.model]
         res = subprocess.run(
             cmd,
-            input="",
+            input=prompt,
             capture_output=True,
             text=True,
-            timeout=self.timeout,
             encoding="utf-8",
+            timeout=self.timeout,
         )
         if res.returncode != 0:
             raise RuntimeError(f"agy CLI failed with exit code {res.returncode}: {res.stderr}")
@@ -330,9 +447,9 @@ class AntigravityManagerClient:
 
         # 1. Vendor Arbitrage
         for it in vendor_items:
-            name = str(it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
-            profit = int(it.get("profit_copper", it.get("profit", 0)))
-            buyout = int(it.get("buyout_price", it.get("price", 0)))
+            name = _sanitize_name(it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
+            profit = _safe_int(it.get("profit_copper"), _safe_int(it.get("profit"), 0))
+            buyout = _safe_int(it.get("buyout_price"), _safe_int(it.get("price"), 0))
             actions.append({
                 "step": step,
                 "category": "vendor_arbitrage",
@@ -345,13 +462,17 @@ class AntigravityManagerClient:
 
         # 2. Waylaid Crates Crafting
         for it in crafting_items:
-            name = str(it.get("name") or it.get("crafted_item_name") or f"Recipe #{it.get('recipe_id', 'unknown')}")
+            name = _sanitize_name(it.get("name") or it.get("crafted_item_name") or f"Recipe #{it.get('recipe_id', 'unknown')}")
             prof = str(it.get("profession") or "Ремесло")
             crate = it.get("crate_name") or it.get("waylaid_crate_name")
-            profit = int(it.get("profit_copper", it.get("profit", 0)))
-            roi = it.get("roi_percent")
-            if roi is None:
-                roi = round(float(it.get("roi", 0.0)) * 100, 1)
+            if crate:
+                crate = _sanitize_name(crate)
+            profit = _safe_int(it.get("profit_copper"), _safe_int(it.get("profit"), 0))
+            roi_val = it.get("roi_percent")
+            if roi_val is None:
+                roi = round(_safe_float(it.get("roi"), 0.0) * 100, 1)
+            else:
+                roi = _safe_float(roi_val, 0.0)
 
             if crate:
                 act = f"Скрафтить {name} ({prof}) под сдачу ящика {crate}"
@@ -370,10 +491,10 @@ class AntigravityManagerClient:
 
         # 3. Price Dumps / Sniping
         for it in anomaly_items:
-            name = str(it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
-            z = float(it.get("z_score", it.get("z", 0.0)))
-            curr = int(it.get("current_price", it.get("price", 0)))
-            mean = float(it.get("mean_price", it.get("mean", 0.0)))
+            name = _sanitize_name(it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
+            z = _safe_float(it.get("z_score"), _safe_float(it.get("z"), 0.0))
+            curr = _safe_int(it.get("current_price"), _safe_int(it.get("price"), 0))
+            mean = _safe_float(it.get("mean_price"), _safe_float(it.get("mean"), 0.0))
             diff = max(0, int(round(mean - curr)))
 
             profit_desc = f"Экономия {format_currency(diff)}" if diff > 0 else f"Скидка при Z={z:.1f}"
@@ -413,6 +534,9 @@ class AntigravityManagerClient:
             "checklist": checklist,
         }
 
+    # Alias for consistency
+    _generate_heuristic_advice = generate_heuristic_advice
+
     def _format_and_validate(self, data: Any, fallback_context: Optional[dict] = None) -> dict:
         """Validate and enforce structured return contract."""
         if not isinstance(data, dict):
@@ -433,29 +557,44 @@ class AntigravityManagerClient:
                 or []
             )
 
+        whitelist = _build_context_whitelist(fallback_context)
+
         actions: list[dict] = []
+        step_idx = 1
         for i, item in enumerate(raw_actions, start=1):
             if isinstance(item, dict):
+                target_str = _sanitize_name(item.get("target") or item.get("name") or "Рынок")
+                if whitelist and not _is_target_valid(target_str, whitelist):
+                    logger.warning("Target '%s' not in context whitelist. Discarding action.", target_str)
+                    continue
                 actions.append({
-                    "step": int(item.get("step") or i),
+                    "step": _safe_int(item.get("step"), step_idx),
                     "category": str(item.get("category") or "market_action"),
                     "action": str(item.get("action") or item.get("text") or ""),
-                    "target": str(item.get("target") or item.get("name") or "Рынок"),
+                    "target": target_str,
                     "expected_profit": str(item.get("expected_profit") or item.get("profit") or "—"),
                     "priority": str(item.get("priority") or "MEDIUM").upper(),
                 })
+                step_idx += 1
             elif isinstance(item, str):
+                if whitelist and not _is_target_valid(item, whitelist):
+                    continue
                 actions.append({
-                    "step": i,
+                    "step": step_idx,
                     "category": "market_action",
                     "action": item,
                     "target": "Рынок",
                     "expected_profit": "—",
                     "priority": "MEDIUM",
                 })
+                step_idx += 1
+
+        if not actions and raw_actions and fallback_context:
+            logger.warning("All LLM actions rejected by target whitelist. Falling back to heuristic.")
+            return self.generate_heuristic_advice(fallback_context)
 
         checklist = data.get("checklist")
-        if not checklist or not isinstance(checklist, list):
+        if not checklist or not isinstance(checklist, list) or len(actions) != len(raw_actions):
             checklist = [
                 f"[{a['category'].replace('_', ' ').capitalize()}] {a['action']} (Цель: {a['target']}, Выгода: {a['expected_profit']})"
                 for a in actions
