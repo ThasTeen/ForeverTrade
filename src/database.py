@@ -7,6 +7,176 @@ import sqlite3
 import time
 from typing import Optional
 
+# Known item names localization mapping: item_id -> {"en": ..., "ru": ...}
+ITEM_LOCALIZATION: dict[int, dict[str, str]] = {
+    # Specifically required items
+    3857: {"en": "Coal", "ru": "Уголь"},
+    2589: {"en": "Linen Cloth", "ru": "Льняная ткань"},
+    2996: {"en": "Bolt of Linen Cloth", "ru": "Рулон льняной ткани"},
+    2840: {"en": "Copper Bar", "ru": "Медный слиток"},
+    2770: {"en": "Copper Ore", "ru": "Медная руда"},
+    2320: {"en": "Coarse Thread", "ru": "Грубая нить"},
+    765: {"en": "Silverleaf", "ru": "Сребролист"},
+    2447: {"en": "Peacebloom", "ru": "Мироцвет"},
+    2318: {"en": "Light Leather", "ru": "Тонкая кожа"},
+    4238: {"en": "Linen Bag", "ru": "Льняная сумка"},
+    4359: {"en": "Handful of Copper Bolts", "ru": "Горсть медных винтов"},
+    4361: {"en": "Copper Tube", "ru": "Медная трубка"},
+    1482: {"en": "Silver Rod", "ru": "Серебряный жезл"},
+    1978: {"en": "Heavy Sharpening Stone", "ru": "Тяжелое точило"},
+    2880: {"en": "Weak Flux", "ru": "Слабый плавень"},
+    3371: {"en": "Empty Vial", "ru": "Пустая колба"},
+
+    # Bars & Ores
+    2771: {"en": "Tin Ore", "ru": "Оловянная руда"},
+    3576: {"en": "Tin Bar", "ru": "Оловянный слиток"},
+    2841: {"en": "Bronze Bar", "ru": "Бронзовый слиток"},
+    2772: {"en": "Iron Ore", "ru": "Железная руда"},
+    3575: {"en": "Iron Bar", "ru": "Железный слиток"},
+    2775: {"en": "Silver Ore", "ru": "Серебряная руда"},
+    2842: {"en": "Silver Bar", "ru": "Серебряный слиток"},
+    2776: {"en": "Gold Ore", "ru": "Золотая руда"},
+    3577: {"en": "Gold Bar", "ru": "Золотой слиток"},
+    3858: {"en": "Mithril Ore", "ru": "Мифриловая руда"},
+    3860: {"en": "Mithril Bar", "ru": "Мифриловый слиток"},
+    10620: {"en": "Thorium Ore", "ru": "Ториевая руда"},
+    12359: {"en": "Thorium Bar", "ru": "Ториевый слиток"},
+    12363: {"en": "Arcane Crystal", "ru": "Чародейный кристалл"},
+    12360: {"en": "Arcanite Bar", "ru": "Арканитовый слиток"},
+
+    # Stones
+    2835: {"en": "Rough Stone", "ru": "Грубый камень"},
+    2836: {"en": "Coarse Stone", "ru": "Необработанный камень"},
+    2838: {"en": "Heavy Stone", "ru": "Тяжелый камень"},
+    7912: {"en": "Solid Stone", "ru": "Твердый камень"},
+    12365: {"en": "Dense Stone", "ru": "Массивный камень"},
+
+    # Herbs
+    2449: {"en": "Earthroot", "ru": "Земляной корень"},
+    785: {"en": "Mageroyal", "ru": "Магороза"},
+    2452: {"en": "Briarthorn", "ru": "Остротерн"},
+    2453: {"en": "Bruiseweed", "ru": "Синячник"},
+    3820: {"en": "Stranglekelp", "ru": "Удавник"},
+    3355: {"en": "Wild Steelbloom", "ru": "Дикий сталец"},
+    3356: {"en": "Kingsblood", "ru": "Королевская кровь"},
+    3357: {"en": "Liferoot", "ru": "Жизнецвет"},
+    3818: {"en": "Fadeleaf", "ru": "Бледнолист"},
+    3821: {"en": "Goldthorn", "ru": "Златошип"},
+    3358: {"en": "Khadgar's Whisker", "ru": "Кадгаров ус"},
+    8838: {"en": "Sungrass", "ru": "Солнечник"},
+    8839: {"en": "Blindweed", "ru": "Пастушья сумка"},
+    8845: {"en": "Ghost Mushroom", "ru": "Призрачный гриб"},
+    8846: {"en": "Gromsblood", "ru": "Кровь Грома"},
+    13463: {"en": "Dreamfoil", "ru": "Снолист"},
+    13464: {"en": "Mountain Silversage", "ru": "Горный серебряный шалфей"},
+    13468: {"en": "Black Lotus", "ru": "Черный лотос"},
+
+    # Cloth & Thread
+    2592: {"en": "Wool Cloth", "ru": "Шерсть"},
+    2997: {"en": "Bolt of Woolen Cloth", "ru": "Рулон шерсти"},
+    4306: {"en": "Silk Cloth", "ru": "Шелковая ткань"},
+    4305: {"en": "Bolt of Silk Cloth", "ru": "Рулон шелка"},
+    4338: {"en": "Mageweave Cloth", "ru": "Магическая ткань"},
+    4339: {"en": "Bolt of Mageweave", "ru": "Рулон магической ткани"},
+    14047: {"en": "Runecloth", "ru": "Руническая ткань"},
+    14048: {"en": "Bolt of Runecloth", "ru": "Рулон рунической ткани"},
+    14256: {"en": "Felcloth", "ru": "Скверноткань"},
+    14342: {"en": "Mooncloth", "ru": "Луноткань"},
+    2321: {"en": "Fine Thread", "ru": "Тонкая нить"},
+    4291: {"en": "Silken Thread", "ru": "Шелковая нить"},
+    14341: {"en": "Rune Thread", "ru": "Руническая нить"},
+
+    # Leather & Hides
+    783: {"en": "Light Hide", "ru": "Легкая шкура"},
+    4231: {"en": "Cured Light Hide", "ru": "Обработанная легкая шкура"},
+    2319: {"en": "Medium Leather", "ru": "Средняя кожа"},
+    4232: {"en": "Medium Hide", "ru": "Средняя шкура"},
+    4233: {"en": "Cured Medium Hide", "ru": "Обработанная средняя шкура"},
+    4234: {"en": "Heavy Leather", "ru": "Тяжелая кожа"},
+    4235: {"en": "Heavy Hide", "ru": "Тяжелая шкура"},
+    4236: {"en": "Cured Heavy Hide", "ru": "Обработанная тяжелая шкура"},
+    4304: {"en": "Thick Leather", "ru": "Толстая кожа"},
+    8170: {"en": "Rugged Leather", "ru": "Плотная кожа"},
+    8171: {"en": "Rugged Hide", "ru": "Плотная шкура"},
+    15407: {"en": "Cured Rugged Hide", "ru": "Обработанная плотная шкура"},
+    4289: {"en": "Salt", "ru": "Соль"},
+    15844: {"en": "Refined Deeprock Salt", "ru": "Очищенная глубокоскальная соль"},
+
+    # Alchemy Vials & Potions
+    3372: {"en": "Leaded Vial", "ru": "Окованная колба"},
+    8925: {"en": "Crystal Vial", "ru": "Хрустальная колба"},
+    118: {"en": "Minor Healing Potion", "ru": "Малое лечебное зелье"},
+    858: {"en": "Lesser Healing Potion", "ru": "Простое лечебное зелье"},
+    929: {"en": "Healing Potion", "ru": "Лечебное зелье"},
+    1710: {"en": "Greater Healing Potion", "ru": "Сильное лечебное зелье"},
+    3928: {"en": "Superior Healing Potion", "ru": "Превосходное лечебное зелье"},
+    13446: {"en": "Major Healing Potion", "ru": "Мощное лечебное зелье"},
+    2455: {"en": "Minor Mana Potion", "ru": "Малое зелье маны"},
+    3385: {"en": "Lesser Mana Potion", "ru": "Простое зелье маны"},
+    3827: {"en": "Mana Potion", "ru": "Зелье маны"},
+    6149: {"en": "Greater Mana Potion", "ru": "Сильное зелье маны"},
+    13443: {"en": "Superior Mana Potion", "ru": "Превосходное зелье маны"},
+    13444: {"en": "Major Mana Potion", "ru": "Мощное зелье маны"},
+    2454: {"en": "Elixir of Lion's Strength", "ru": "Эликсир львиной силы"},
+    2457: {"en": "Elixir of Minor Agility", "ru": "Эликсир малой ловкости"},
+    3383: {"en": "Elixir of Wisdom", "ru": "Эликсир мудрости"},
+    8951: {"en": "Elixir of Greater Defense", "ru": "Сильный эликсир защиты"},
+
+    # Crafted Items & Bags
+    4357: {"en": "Rough Blasting Powder", "ru": "Грубый порох"},
+    4364: {"en": "Coarse Blasting Powder", "ru": "Тяжелый порох"},
+    4377: {"en": "Heavy Blasting Powder", "ru": "Тяжелый пороховой заряд"},
+    4375: {"en": "Bronze Framework", "ru": "Бронзовый каркас"},
+    4371: {"en": "Bronze Tube", "ru": "Бронзовая трубка"},
+    4389: {"en": "Iron Strut", "ru": "Железная балка"},
+    4240: {"en": "Woolen Bag", "ru": "Шерстяная сумка"},
+    4245: {"en": "Small Silk Pack", "ru": "Маленький шелковый рюкзак"},
+    10050: {"en": "Mageweave Bag", "ru": "Сумка из магической ткани"},
+    14046: {"en": "Runecloth Bag", "ru": "Сумка из рунической ткани"},
+    2304: {"en": "Light Armor Kit", "ru": "Накладки из тонкой кожи"},
+    2309: {"en": "Fine Leather Boots", "ru": "Тонкие кожаные сапоги"},
+    2316: {"en": "Medium Armor Kit", "ru": "Накладки из средней кожи"},
+    4252: {"en": "Hillman's Leather Gloves", "ru": "Кожаные перчатки жителя холмов"},
+    2317: {"en": "Heavy Armor Kit", "ru": "Накладки из тяжелой кожи"},
+    8173: {"en": "Thick Armor Kit", "ru": "Накладки из толстой кожи"},
+    15408: {"en": "Rugged Armor Kit", "ru": "Накладки из плотной кожи"},
+
+    # Cooking & Food
+    769: {"en": "Chunk of Boar Meat", "ru": "Кусок мяса вепря"},
+    2680: {"en": "Roasted Boar Meat", "ru": "Жареное мясо вепря"},
+    2672: {"en": "Stringy Wolf Meat", "ru": "Жилистое волчье мясо"},
+    2678: {"en": "Hot Spices", "ru": "Острые специи"},
+    2681: {"en": "Spiced Wolf Meat", "ru": "Пряное волчье мясо"},
+    3173: {"en": "Bear Meat", "ru": "Медвежатина"},
+    3571: {"en": "Smoked Bear Meat", "ru": "Копченое медвежье мясо"},
+    6291: {"en": "Raw Brilliant Smallfish", "ru": "Свежая блестящая рыбка"},
+    6290: {"en": "Brilliant Smallfish", "ru": "Блестящая рыбка"},
+    6308: {"en": "Raw Longjaw Mud Snapper", "ru": "Свежий острозубый илистый луфарь"},
+    6317: {"en": "Longjaw Mud Snapper", "ru": "Острозубый илистый луфарь"},
+    6309: {"en": "Raw Bristle Whisker Catfish", "ru": "Свежий грязнорылый сом"},
+    6361: {"en": "Bristle Whisker Catfish", "ru": "Грязнорылый сом"},
+    13758: {"en": "Raw Redgill", "ru": "Свежий краснобрюх"},
+    13930: {"en": "Filet of Redgill", "ru": "Филе краснобрюха"},
+    13759: {"en": "Raw Nightfin Snapper", "ru": "Свежий ночной луфарь"},
+    159: {"en": "Refreshing Spring Water", "ru": "Освежающая родниковая вода"},
+    13931: {"en": "Nightfin Soup", "ru": "Суп из ночного луфаря"},
+    13760: {"en": "Raw Sunscale Salmon", "ru": "Свежий солнечный лосось"},
+    13932: {"en": "Poached Sunscale Salmon", "ru": "Вареный солнечный лосось"},
+
+    # Enchanting & Elementals
+    7078: {"en": "Elemental Earth", "ru": "Первоэлемент земли"},
+    7076: {"en": "Elemental Fire", "ru": "Первоэлемент огня"},
+    7080: {"en": "Elemental Water", "ru": "Первоэлемент воды"},
+    7082: {"en": "Elemental Air", "ru": "Первоэлемент воздуха"},
+    10940: {"en": "Strange Dust", "ru": "Странная пыль"},
+    11083: {"en": "Soul Dust", "ru": "Пыль духа"},
+    11137: {"en": "Vision Dust", "ru": "Пыль провидения"},
+    11176: {"en": "Dream Dust", "ru": "Сонная пыль"},
+    16204: {"en": "Illusion Dust", "ru": "Пыль иллюзий"},
+    10938: {"en": "Lesser Magic Essence", "ru": "Простая магическая субстанция"},
+    10939: {"en": "Greater Magic Essence", "ru": "Великая магическая субстанция"},
+}
+
 
 def get_connection(db_path: str = "market.db") -> sqlite3.Connection:
     """Create and configure a lightweight SQLite connection."""
@@ -32,6 +202,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             CREATE TABLE IF NOT EXISTS items (
                 item_id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
+                name_ru TEXT,
                 quality INTEGER DEFAULT 1,
                 item_class INTEGER DEFAULT 0,
                 item_subclass INTEGER DEFAULT 0,
@@ -80,6 +251,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
                 PRIMARY KEY (recipe_id, reagent_item_id)
             );
         """)
+        try:
+            conn.execute("ALTER TABLE items ADD COLUMN name_ru TEXT;")
+        except Exception:
+            pass
 
 
 def init_db(db_path: str = "market.db") -> sqlite3.Connection:
@@ -112,9 +287,19 @@ def load_catalog(
         with open(era_catalog_path, "r", encoding="utf-8") as f:
             era_data = json.load(f)
         for item in _extract_items(era_data):
+            i_id = int(item["item_id"])
+            loc = ITEM_LOCALIZATION.get(i_id, {})
+            raw_name = str(item.get("name", "")).strip()
+            if not raw_name or raw_name.lower() in (f"item {i_id}".lower(), f"item #{i_id}".lower()):
+                name = loc.get("en") or raw_name or f"Item {i_id}"
+            else:
+                name = raw_name
+            name_ru = item.get("name_ru") or loc.get("ru")
+
             items_to_upsert.append((
-                int(item["item_id"]),
-                str(item.get("name", "")),
+                i_id,
+                name,
+                name_ru,
                 int(item.get("quality", 1)),
                 int(item.get("item_class", 0)),
                 int(item.get("item_subclass", 0)),
@@ -131,9 +316,19 @@ def load_catalog(
         with open(overrides_path, "r", encoding="utf-8") as f:
             override_data = json.load(f)
         for item in _extract_items(override_data):
+            i_id = int(item["item_id"])
+            loc = ITEM_LOCALIZATION.get(i_id, {})
+            raw_name = str(item.get("name", "")).strip()
+            if not raw_name or raw_name.lower() in (f"item {i_id}".lower(), f"item #{i_id}".lower()):
+                name = loc.get("en") or raw_name or f"Item {i_id}"
+            else:
+                name = raw_name
+            name_ru = item.get("name_ru") or loc.get("ru")
+
             items_to_upsert.append((
-                int(item["item_id"]),
-                str(item.get("name", "")),
+                i_id,
+                name,
+                name_ru,
                 int(item.get("quality", 1)),
                 int(item.get("item_class", 0)),
                 int(item.get("item_subclass", 0)),
@@ -149,12 +344,13 @@ def load_catalog(
     with conn:
         conn.executemany("""
             INSERT INTO items (
-                item_id, name, quality, item_class, item_subclass,
+                item_id, name, name_ru, quality, item_class, item_subclass,
                 vendor_sell_price, vendor_buy_price, target_item_id,
                 target_item_count, reward_copper, category, is_override
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(item_id) DO UPDATE SET
                 name = excluded.name,
+                name_ru = excluded.name_ru,
                 quality = excluded.quality,
                 item_class = excluded.item_class,
                 item_subclass = excluded.item_subclass,
@@ -166,6 +362,14 @@ def load_catalog(
                 category = excluded.category,
                 is_override = excluded.is_override
         """, items_to_upsert)
+
+        for loc_id, loc_data in ITEM_LOCALIZATION.items():
+            conn.execute("""
+                UPDATE items
+                SET name = CASE WHEN name IS NULL OR name = '' OR name LIKE 'Item %' THEN ? ELSE name END,
+                    name_ru = COALESCE(name_ru, ?)
+                WHERE item_id = ?
+            """, (loc_data.get("en", f"Item {loc_id}"), loc_data.get("ru"), loc_id))
 
     cursor = conn.cursor()
     cursor.execute("SELECT count(*) FROM items")
@@ -671,6 +875,79 @@ def get_item(conn: sqlite3.Connection, item_id: int) -> Optional[dict]:
     if not row:
         return None
     if isinstance(row, sqlite3.Row):
-        return dict(row)
-    columns = [col[0] for col in cursor.description]
-    return dict(zip(columns, row))
+        item = dict(row)
+    else:
+        columns = [col[0] for col in cursor.description]
+        item = dict(zip(columns, row))
+
+    loc = ITEM_LOCALIZATION.get(int(item_id))
+    if loc:
+        cur_name = str(item.get("name") or "").strip()
+        if not cur_name or cur_name.lower() in (f"item {item_id}".lower(), f"item #{item_id}".lower()):
+            item["name"] = loc.get("en") or cur_name or f"Item {item_id}"
+        if not item.get("name_ru"):
+            item["name_ru"] = loc.get("ru")
+
+    return item
+
+
+def get_item_name(conn: Optional[sqlite3.Connection], item_id: int, lang: str = "en") -> str:
+    """Return localized item name ('ru' or 'en') with database lookup and fallback to ITEM_LOCALIZATION."""
+    item_id = int(item_id)
+    loc = ITEM_LOCALIZATION.get(item_id, {})
+    is_ru = str(lang).strip().lower().startswith("ru")
+
+    db_name = None
+    db_name_ru = None
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT name, name_ru FROM items WHERE item_id = ?", (item_id,))
+                row = cur.fetchone()
+                if row:
+                    db_name = row[0]
+                    db_name_ru = row[1]
+            except sqlite3.OperationalError:
+                cur.execute("SELECT name FROM items WHERE item_id = ?", (item_id,))
+                row = cur.fetchone()
+                if row:
+                    db_name = row[0]
+        except Exception:
+            pass
+
+    def _is_placeholder(val: Optional[str]) -> bool:
+        if not val or not str(val).strip():
+            return True
+        s = str(val).strip().lower()
+        return s in (f"item {item_id}".lower(), f"item #{item_id}".lower())
+
+    if is_ru:
+        if db_name_ru and not _is_placeholder(db_name_ru):
+            return str(db_name_ru).strip()
+        if loc.get("ru"):
+            return loc["ru"]
+        if db_name and not _is_placeholder(db_name):
+            return str(db_name).strip()
+        if loc.get("en"):
+            return loc["en"]
+        return db_name or f"Item {item_id}"
+    else:
+        if db_name and not _is_placeholder(db_name):
+            return str(db_name).strip()
+        if loc.get("en"):
+            return loc["en"]
+        if db_name_ru and not _is_placeholder(db_name_ru):
+            return str(db_name_ru).strip()
+        if loc.get("ru"):
+            return loc["ru"]
+        return db_name or f"Item {item_id}"
+
+
+def clean_demo_data(conn: sqlite3.Connection) -> None:
+    """Remove demo / test items (e.g. item_id = 9999) and associated price snapshots."""
+    with conn:
+        conn.execute("DELETE FROM price_snapshots WHERE item_id = 9999;")
+        conn.execute("DELETE FROM items WHERE item_id = 9999;")
+    conn.commit()
+

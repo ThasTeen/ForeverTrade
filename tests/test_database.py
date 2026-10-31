@@ -6,13 +6,16 @@ import time
 import pytest
 
 from src.database import (
+    ITEM_LOCALIZATION,
+    clean_demo_data,
     get_connection,
+    get_item,
+    get_item_name,
     init_db,
     init_schema,
     load_catalog,
     load_recipes,
     prune_snapshots,
-    get_item,
 )
 
 
@@ -347,3 +350,116 @@ def test_get_item(populated_db):
     # Non-existing item returns None
     missing = get_item(populated_db, 99999999)
     assert missing is None
+
+
+def test_clean_demo_data(memory_db):
+    """Verify clean_demo_data removes item 9999 and all its price snapshots."""
+    # Insert regular item and demo item 9999
+    memory_db.execute("INSERT INTO items (item_id, name) VALUES (1, 'Real Item')")
+    memory_db.execute("INSERT INTO items (item_id, name) VALUES (9999, 'Demo Item 9999')")
+
+    now = int(time.time())
+    memory_db.execute(
+        "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+        (1, "Everlook", 50, now)
+    )
+    memory_db.execute(
+        "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+        (9999, "Everlook", 100, now)
+    )
+    memory_db.execute(
+        "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+        (9999, "Everlook", 120, now + 60)
+    )
+
+    # Pre-condition check
+    item_9999 = memory_db.execute("SELECT count(*) FROM items WHERE item_id = 9999").fetchone()[0]
+    snaps_9999 = memory_db.execute("SELECT count(*) FROM price_snapshots WHERE item_id = 9999").fetchone()[0]
+    assert item_9999 == 1
+    assert snaps_9999 == 2
+
+    # Execute clean_demo_data
+    clean_demo_data(memory_db)
+
+    # Verify item 9999 and its snapshots are completely removed
+    assert memory_db.execute("SELECT count(*) FROM items WHERE item_id = 9999").fetchone()[0] == 0
+    assert memory_db.execute("SELECT count(*) FROM price_snapshots WHERE item_id = 9999").fetchone()[0] == 0
+
+    # Verify regular item 1 and its snapshots remain untouched
+    assert memory_db.execute("SELECT count(*) FROM items WHERE item_id = 1").fetchone()[0] == 1
+    assert memory_db.execute("SELECT count(*) FROM price_snapshots WHERE item_id = 1").fetchone()[0] == 1
+
+    # Verify idempotence: repeating clean_demo_data causes no errors
+    clean_demo_data(memory_db)
+
+
+def test_item_localization_and_get_item_name(memory_db):
+    """Verify ITEM_LOCALIZATION mapping and get_item_name resolution for en/ru and placeholder handling."""
+    # Check dictionary localization entries
+    assert 3857 in ITEM_LOCALIZATION
+    assert ITEM_LOCALIZATION[3857]["en"] == "Coal"
+    assert ITEM_LOCALIZATION[3857]["ru"] == "Уголь"
+
+    assert 2840 in ITEM_LOCALIZATION
+    assert ITEM_LOCALIZATION[2840]["en"] == "Copper Bar"
+    assert ITEM_LOCALIZATION[2840]["ru"] == "Медный слиток"
+
+    # 1. Direct dictionary fallback (conn=None)
+    assert get_item_name(None, 3857, lang="en") == "Coal"
+    assert get_item_name(None, 3857, lang="ru") == "Уголь"
+    assert get_item_name(None, 2840, lang="en") == "Copper Bar"
+    assert get_item_name(None, 2840, lang="ru") == "Медный слиток"
+
+    # 2. Database with placeholder / empty names should resolve from ITEM_LOCALIZATION
+    memory_db.execute("INSERT OR REPLACE INTO items (item_id, name, name_ru) VALUES (3857, 'Item 3857', NULL)")
+    assert get_item_name(memory_db, 3857, lang="en") == "Coal"
+    assert get_item_name(memory_db, 3857, lang="ru") == "Уголь"
+
+    memory_db.execute("UPDATE items SET name = '', name_ru = '' WHERE item_id = 3857")
+    assert get_item_name(memory_db, 3857, lang="en") == "Coal"
+    assert get_item_name(memory_db, 3857, lang="ru") == "Уголь"
+
+    memory_db.execute("UPDATE items SET name = 'Item #3857', name_ru = 'Item 3857' WHERE item_id = 3857")
+    assert get_item_name(memory_db, 3857, lang="en") == "Coal"
+    assert get_item_name(memory_db, 3857, lang="ru") == "Уголь"
+
+    # 3. Database with valid populated names
+    memory_db.execute("UPDATE items SET name = 'Coal', name_ru = 'Уголь' WHERE item_id = 3857")
+    assert get_item_name(memory_db, 3857, lang="en") == "Coal"
+    assert get_item_name(memory_db, 3857, lang="ru") == "Уголь"
+
+    # 4. Unknown item fallback
+    assert get_item_name(memory_db, 9999999, lang="en") == "Item 9999999"
+    assert get_item_name(None, 9999999, lang="ru") == "Item 9999999"
+
+
+def test_items_schema_and_name_ru_migration(memory_db):
+    """Verify name_ru column creation, migration on existing table, catalog loading, and get_item."""
+    # 1. Column exists in newly initialized schema
+    cursor = memory_db.cursor()
+    cursor.execute("PRAGMA table_info(items);")
+    cols = {row["name"] for row in cursor.fetchall()}
+    assert "name_ru" in cols
+
+    # 2. Migration: table created without name_ru is altered cleanly by init_schema
+    legacy_conn = sqlite3.connect(":memory:")
+    legacy_conn.execute("CREATE TABLE items (item_id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+    init_schema(legacy_conn)
+    legacy_cur = legacy_conn.cursor()
+    legacy_cur.execute("PRAGMA table_info(items);")
+    migrated_cols = {row[1] for row in legacy_cur.fetchall()}
+    assert "name_ru" in migrated_cols
+    legacy_conn.close()
+
+    # 3. load_catalog correctly populates name_ru
+    load_catalog(memory_db)
+
+    item_coal = get_item(memory_db, 3857)
+    assert item_coal is not None
+    assert item_coal["name"] == "Coal"
+    assert item_coal["name_ru"] == "Уголь"
+
+    item_copper = get_item(memory_db, 2840)
+    assert item_copper is not None
+    assert item_copper["name"] == "Copper Bar"
+    assert item_copper["name_ru"] == "Медный слиток"

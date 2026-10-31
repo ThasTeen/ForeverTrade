@@ -10,6 +10,7 @@
   {"item_id": 2842, "name": "Silver Bar", "quality": 2, "item_class": 7, "item_subclass": 7, "vendor_sell_price": 200, "vendor_buy_price": 0},
   {"item_id": 2776, "name": "Gold Ore", "quality": 2, "item_class": 7, "item_subclass": 7, "vendor_sell_price": 300, "vendor_buy_price": 0},
   {"item_id": 3577, "name": "Gold Bar", "quality": 2, "item_class": 7, "item_subclass": 7, "vendor_sell_price": 600, "vendor_buy_price": 0},
+  {"item_id": 3857, "name": "Coal", "quality": 1, "item_class": 7, "item_subclass": 0, "vendor_sell_price": 125, "vendor_buy_price": 500},
   {"item_id": 3858, "name": "Mithril Ore", "quality": 1, "item_class": 7, "item_subclass": 7, "vendor_sell_price": 150, "vendor_buy_price": 0},
   {"item_id": 3860, "name": "Mithril Bar", "quality": 1, "item_class": 7, "item_subclass": 7, "vendor_sell_price": 300, "vendor_buy_price": 0},
   {"item_id": 10620, "name": "Thorium Ore", "quality": 1, "item_class": 7, "item_subclass": 7, "vendor_sell_price": 350, "vendor_buy_price": 0},
