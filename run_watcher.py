@@ -14,6 +14,25 @@ from src.analytics import get_vendor_arbitrage
 from src.ai_advisor import build_compact_context, generate_market_advice, AntigravityManagerClient
 
 
+def _load_dotenv(filepath: str = ".env"):
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+
+_load_dotenv()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Forever Trade Watcher & Analytical Agent")
     parser.add_argument("--watch-dir", default=os.getenv("WOW_WTF_PATH", "data"),

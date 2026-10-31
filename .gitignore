@@ -9,3 +9,6 @@ __pycache__/
 .autopilot/daemon.log
 watcher.log
 *.log
+market.db
+*.db
+portal.html
