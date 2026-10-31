@@ -2,7 +2,7 @@ window.STATE =
 {
   "version": 2,
   "slug": "wow-forever-trade",
-  "dir": "2026-10-31-wow-forever-trade--wip",
+  "dir": "2026-10-31-wow-forever-trade",
   "title": "Рыночный аналитический агент WoW: Forever",
   "mode": "full",
   "depth": "normal",
@@ -11,10 +11,10 @@ window.STATE =
   "memoryFile": "AGENTS.md",
   "memoryOwner": "autopilot",
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
-  "baseCommit": "c69be53",
+  "baseCommit": "f3aa0b4",
   "startedAt": "2026-10-31T19:41:42+03:00",
-  "updatedAt": "2026-11-01T00:04:40+03:00",
-  "finishedAt": null,
+  "updatedAt": "2026-11-01T00:40:10+03:00",
+  "finishedAt": "2026-11-01T00:40:10+03:00",
   "stages": [
     {
       "id": "preflight",
@@ -43,26 +43,33 @@ window.STATE =
     },
     {
       "id": "plan",
-      "status": "active",
-      "startedAt": "2026-11-01T00:04:11+03:00"
+      "status": "done",
+      "startedAt": "2026-11-01T00:04:11+03:00",
+      "finishedAt": "2026-11-01T00:04:52+03:00"
     },
     {
       "id": "build",
-      "status": "pending"
+      "status": "done",
+      "startedAt": "2026-11-01T00:04:52+03:00",
+      "finishedAt": "2026-11-01T00:31:49+03:00"
     },
     {
       "id": "review",
-      "status": "pending"
+      "status": "done",
+      "startedAt": "2026-11-01T00:31:49+03:00",
+      "finishedAt": "2026-11-01T00:34:02+03:00"
     },
     {
       "id": "final",
-      "status": "pending"
+      "status": "done",
+      "startedAt": "2026-11-01T00:34:02+03:00",
+      "finishedAt": "2026-11-01T00:40:10+03:00"
     }
   ],
   "requirements": {
     "total": 44,
-    "done": 39,
-    "inTicket": 5,
+    "done": 44,
+    "inTicket": 0,
     "inSpec": 0,
     "placeholder": 0,
     "deferred": 0,
@@ -392,9 +399,16 @@ window.STATE =
       ],
       "review": "нет",
       "model": "сильная",
-      "status": "pending",
+      "status": "done",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-11-01T00:05:19+03:00",
+      "finishedAt": "2026-11-01T00:16:49+03:00",
+      "tests": {
+        "passed": 101,
+        "failed": 0
+      },
+      "commit": "5e0b08e"
     },
     {
       "id": "12",
@@ -415,9 +429,16 @@ window.STATE =
       ],
       "review": "да — интерфейс",
       "model": "сильная",
-      "status": "pending",
+      "status": "done",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-11-01T00:17:09+03:00",
+      "finishedAt": "2026-11-01T00:31:45+03:00",
+      "tests": {
+        "passed": 106,
+        "failed": 0
+      },
+      "commit": "d25ea3d"
     },
     {
       "id": "F1",
@@ -447,7 +468,7 @@ window.STATE =
     }
   ],
   "tests": {
-    "passed": 18,
+    "passed": 106,
     "failed": 0
   },
   "debt": {
@@ -463,7 +484,11 @@ window.STATE =
     "items": []
   },
   "concerns": [],
-  "blind": null,
+  "blind": {
+    "checked": 7,
+    "matched": 7,
+    "mismatches": []
+  },
   "beats": [
     "2026-10-31T19:41:42+03:00",
     "2026-10-31T19:42:41+03:00",
@@ -536,9 +561,20 @@ window.STATE =
     "2026-11-01T00:04:06+03:00",
     "2026-11-01T00:04:11+03:00",
     "2026-11-01T00:04:36+03:00",
-    "2026-11-01T00:04:40+03:00"
+    "2026-11-01T00:04:40+03:00",
+    "2026-11-01T00:04:48+03:00",
+    "2026-11-01T00:04:52+03:00",
+    "2026-11-01T00:05:19+03:00",
+    "2026-11-01T00:16:49+03:00",
+    "2026-11-01T00:17:09+03:00",
+    "2026-11-01T00:31:45+03:00",
+    "2026-11-01T00:31:49+03:00",
+    "2026-11-01T00:34:02+03:00",
+    "2026-11-01T00:39:37+03:00",
+    "2026-11-01T00:39:41+03:00",
+    "2026-11-01T00:40:10+03:00"
   ],
-  "rev": 80,
+  "rev": 92,
   "waiting": null,
   "waits": [],
   "log": [
@@ -1116,6 +1152,83 @@ window.STATE =
       "g": "G3",
       "ok": true,
       "problems": 0
+    },
+    {
+      "t": "2026-11-01T00:04:52+03:00",
+      "k": "stage",
+      "id": "build",
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T00:05:19+03:00",
+      "k": "ticket",
+      "ids": [
+        "11"
+      ],
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T00:16:49+03:00",
+      "k": "ticket",
+      "ids": [
+        "11"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 101,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-01T00:17:09+03:00",
+      "k": "ticket",
+      "ids": [
+        "12"
+      ],
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T00:31:45+03:00",
+      "k": "ticket",
+      "ids": [
+        "12"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 106,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-01T00:31:49+03:00",
+      "k": "stage",
+      "id": "review",
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T00:34:02+03:00",
+      "k": "stage",
+      "id": "final",
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T00:39:37+03:00",
+      "k": "gate",
+      "g": "G4",
+      "ok": true,
+      "checked": 7,
+      "matched": 7
+    },
+    {
+      "t": "2026-11-01T00:39:41+03:00",
+      "k": "tests",
+      "passed": 106,
+      "failed": 0
+    },
+    {
+      "t": "2026-11-01T00:40:10+03:00",
+      "k": "finish",
+      "result": "Удалены тестовые прогоны, добавлен Coal (3857), мгновенный переключатель RU/EN, 1-click копирование и персональные графики с фильтром категорий"
     }
   ],
   "reqList": [
@@ -1317,27 +1430,27 @@ window.STATE =
     {
       "id": "R40",
       "text": "«Удали тестовы прогоны с портала»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R41",
       "text": "«второй скрин непонятно что за предмет — гарантированное разрешение названий всех предметов»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R42",
       "text": "«сделай так чтобы можно было поменять язык мгновенно на русский/английский»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R43",
       "text": "«быстрое копирование название предмета чтобы я мог вставить в игре в аук»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R44",
       "text": "«График цены предметов нужен на каждый предмет отдельно: разбить по категориям и по клику на предмет смотреть его статистику»",
-      "status": "in-ticket"
+      "status": "done"
     }
   ],
   "gates": {
@@ -1358,9 +1471,15 @@ window.STATE =
       "ok": true,
       "at": "2026-11-01T00:04:40+03:00",
       "problems": 0
+    },
+    "G4": {
+      "ok": true,
+      "at": "2026-11-01T00:39:37+03:00",
+      "checked": 7,
+      "matched": 7
     }
   },
-  "result": null,
+  "result": "Удалены тестовые прогоны, добавлен Coal (3857), мгновенный переключатель RU/EN, 1-click копирование и персональные графики с фильтром категорий",
   "report": [
     "Автоматическая пересборка дашборда: при перехвате новых снимков данные пишутся в БД, а дашборд portal.html генерируется на старте (для автообновления страницы в рантайме можно подключить вызов build_standalone_dashboard в callback)",
     "Партиционирование реалмов: при работе с несколькими игровыми мирами рекомендуется всегда передавать параметр --realm для исключения коллизий цен между серверами",
