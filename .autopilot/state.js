@@ -2,7 +2,7 @@ window.STATE =
 {
   "version": 2,
   "slug": "wow-forever-trade",
-  "dir": "2026-10-31-wow-forever-trade--wip",
+  "dir": "2026-10-31-wow-forever-trade",
   "title": "Рыночный аналитический агент WoW: Forever",
   "mode": "full",
   "depth": "normal",
@@ -11,10 +11,10 @@ window.STATE =
   "memoryFile": "AGENTS.md",
   "memoryOwner": "autopilot",
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
-  "baseCommit": "61181ce",
+  "baseCommit": "c69be53",
   "startedAt": "2026-10-31T19:41:42+03:00",
-  "updatedAt": "2026-10-31T22:52:41+03:00",
-  "finishedAt": null,
+  "updatedAt": "2026-10-31T23:43:43+03:00",
+  "finishedAt": "2026-10-31T23:43:43+03:00",
   "stages": [
     {
       "id": "preflight",
@@ -43,26 +43,33 @@ window.STATE =
     },
     {
       "id": "plan",
-      "status": "active",
-      "startedAt": "2026-10-31T22:50:12+03:00"
+      "status": "done",
+      "startedAt": "2026-10-31T22:50:12+03:00",
+      "finishedAt": "2026-10-31T22:52:53+03:00"
     },
     {
       "id": "build",
-      "status": "pending"
+      "status": "done",
+      "startedAt": "2026-10-31T22:52:53+03:00",
+      "finishedAt": "2026-10-31T23:34:58+03:00"
     },
     {
       "id": "review",
-      "status": "pending"
+      "status": "done",
+      "startedAt": "2026-10-31T23:34:58+03:00",
+      "finishedAt": "2026-10-31T23:38:59+03:00"
     },
     {
       "id": "final",
-      "status": "pending"
+      "status": "done",
+      "startedAt": "2026-10-31T23:38:59+03:00",
+      "finishedAt": "2026-10-31T23:43:43+03:00"
     }
   ],
   "requirements": {
     "total": 39,
-    "done": 21,
-    "inTicket": 18,
+    "done": 39,
+    "inTicket": 0,
     "inSpec": 0,
     "placeholder": 0,
     "deferred": 0,
@@ -240,9 +247,16 @@ window.STATE =
       ],
       "review": "да — фундамент",
       "model": "сильная",
-      "status": "pending",
+      "status": "done",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-10-31T22:53:03+03:00",
+      "finishedAt": "2026-10-31T23:04:18+03:00",
+      "tests": {
+        "passed": 10,
+        "failed": 0
+      },
+      "commit": "f0d5352"
     },
     {
       "id": "07",
@@ -267,9 +281,16 @@ window.STATE =
       ],
       "review": "нет",
       "model": "сильная",
-      "status": "pending",
+      "status": "done",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-10-31T23:01:40+03:00",
+      "finishedAt": "2026-10-31T23:16:14+03:00",
+      "tests": {
+        "passed": 31,
+        "failed": 0
+      },
+      "commit": "9bd0235"
     },
     {
       "id": "08",
@@ -291,9 +312,16 @@ window.STATE =
       ],
       "review": "да — деньги",
       "model": "сильная",
-      "status": "pending",
+      "status": "done",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-10-31T23:01:40+03:00",
+      "finishedAt": "2026-10-31T23:19:42+03:00",
+      "tests": {
+        "passed": 15,
+        "failed": 0
+      },
+      "commit": "01bc48a"
     },
     {
       "id": "09",
@@ -315,9 +343,16 @@ window.STATE =
       ],
       "review": "да — безопасность",
       "model": "сильная",
-      "status": "pending",
+      "status": "done",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-10-31T23:17:45+03:00",
+      "finishedAt": "2026-10-31T23:34:53+03:00",
+      "tests": {
+        "passed": 18,
+        "failed": 0
+      },
+      "commit": "3ce3cc8"
     },
     {
       "id": "10",
@@ -336,9 +371,16 @@ window.STATE =
       ],
       "review": "да — безопасность",
       "model": "сильная",
-      "status": "pending",
+      "status": "done",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-10-31T23:17:45+03:00",
+      "finishedAt": "2026-10-31T23:27:59+03:00",
+      "tests": {
+        "passed": 24,
+        "failed": 0
+      },
+      "commit": "275cf72"
     },
     {
       "id": "F1",
@@ -368,7 +410,7 @@ window.STATE =
     }
   ],
   "tests": {
-    "passed": 7,
+    "passed": 18,
     "failed": 0
   },
   "debt": {
@@ -384,7 +426,11 @@ window.STATE =
     "items": []
   },
   "concerns": [],
-  "blind": null,
+  "blind": {
+    "checked": 39,
+    "matched": 39,
+    "mismatches": []
+  },
   "beats": [
     "2026-10-31T19:41:42+03:00",
     "2026-10-31T19:42:41+03:00",
@@ -428,9 +474,31 @@ window.STATE =
     "2026-10-31T22:51:58+03:00",
     "2026-10-31T22:52:02+03:00",
     "2026-10-31T22:52:36+03:00",
-    "2026-10-31T22:52:41+03:00"
+    "2026-10-31T22:52:41+03:00",
+    "2026-10-31T22:52:50+03:00",
+    "2026-10-31T22:52:53+03:00",
+    "2026-10-31T22:53:03+03:00",
+    "2026-10-31T23:01:30+03:00",
+    "2026-10-31T23:01:39+03:00",
+    "2026-10-31T23:01:40+03:00",
+    "2026-10-31T23:04:18+03:00",
+    "2026-10-31T23:16:14+03:00",
+    "2026-10-31T23:17:39+03:00",
+    "2026-10-31T23:17:45+03:00",
+    "2026-10-31T23:19:42+03:00",
+    "2026-10-31T23:26:22+03:00",
+    "2026-10-31T23:26:27+03:00",
+    "2026-10-31T23:27:59+03:00",
+    "2026-10-31T23:31:28+03:00",
+    "2026-10-31T23:31:32+03:00",
+    "2026-10-31T23:34:53+03:00",
+    "2026-10-31T23:34:58+03:00",
+    "2026-10-31T23:38:55+03:00",
+    "2026-10-31T23:38:59+03:00",
+    "2026-10-31T23:43:20+03:00",
+    "2026-10-31T23:43:43+03:00"
   ],
-  "rev": 49,
+  "rev": 72,
   "waiting": null,
   "waits": [],
   "log": [
@@ -753,6 +821,209 @@ window.STATE =
       "g": "G3",
       "ok": true,
       "problems": 0
+    },
+    {
+      "t": "2026-10-31T22:52:53+03:00",
+      "k": "stage",
+      "id": "build",
+      "act": "start"
+    },
+    {
+      "t": "2026-10-31T22:53:03+03:00",
+      "k": "ticket",
+      "ids": [
+        "06"
+      ],
+      "act": "start"
+    },
+    {
+      "t": "2026-10-31T23:01:30+03:00",
+      "k": "ticket",
+      "ids": [
+        "06"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 10,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:01:39+03:00",
+      "k": "ticket",
+      "ids": [
+        "06"
+      ],
+      "act": "review"
+    },
+    {
+      "t": "2026-10-31T23:01:40+03:00",
+      "k": "ticket",
+      "ids": [
+        "07",
+        "08"
+      ],
+      "act": "start"
+    },
+    {
+      "t": "2026-10-31T23:04:18+03:00",
+      "k": "ticket",
+      "ids": [
+        "06"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 10,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:16:14+03:00",
+      "k": "ticket",
+      "ids": [
+        "07"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 31,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:17:39+03:00",
+      "k": "ticket",
+      "ids": [
+        "08"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 15,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:17:45+03:00",
+      "k": "ticket",
+      "ids": [
+        "08"
+      ],
+      "act": "review"
+    },
+    {
+      "t": "2026-10-31T23:17:45+03:00",
+      "k": "ticket",
+      "ids": [
+        "09",
+        "10"
+      ],
+      "act": "start"
+    },
+    {
+      "t": "2026-10-31T23:19:42+03:00",
+      "k": "ticket",
+      "ids": [
+        "08"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 15,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:26:22+03:00",
+      "k": "ticket",
+      "ids": [
+        "10"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 24,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:26:27+03:00",
+      "k": "ticket",
+      "ids": [
+        "10"
+      ],
+      "act": "review"
+    },
+    {
+      "t": "2026-10-31T23:27:59+03:00",
+      "k": "ticket",
+      "ids": [
+        "10"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 24,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:31:28+03:00",
+      "k": "ticket",
+      "ids": [
+        "09"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 18,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:31:32+03:00",
+      "k": "ticket",
+      "ids": [
+        "09"
+      ],
+      "act": "review"
+    },
+    {
+      "t": "2026-10-31T23:34:53+03:00",
+      "k": "ticket",
+      "ids": [
+        "09"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 18,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-10-31T23:34:58+03:00",
+      "k": "stage",
+      "id": "review",
+      "act": "start"
+    },
+    {
+      "t": "2026-10-31T23:38:55+03:00",
+      "k": "add",
+      "key": "report",
+      "n": 2
+    },
+    {
+      "t": "2026-10-31T23:38:59+03:00",
+      "k": "stage",
+      "id": "final",
+      "act": "start"
+    },
+    {
+      "t": "2026-10-31T23:43:20+03:00",
+      "k": "gate",
+      "g": "G4",
+      "ok": true,
+      "checked": 39,
+      "matched": 39
+    },
+    {
+      "t": "2026-10-31T23:43:43+03:00",
+      "k": "finish",
+      "result": "Устранены все дефекты из audit_report.md (P0/P1): SQLite UPSERT, фабрика соединений, trailing-edge дебаунс, защита бэкапов, Auctionator v341 'm' и gr:, Z-score Самуэльсона, белый список вендорных реагентов, залог аукциона, модель Waylaid Crates, защита от Stored XSS, децимация графиков и безопасность AI-модуля. Все 98 тестов зеленые."
     }
   ],
   "reqList": [
@@ -864,92 +1135,92 @@ window.STATE =
     {
       "id": "R22",
       "text": "«1.1 Заменить INSERT OR REPLACE на честный SQLite UPSERT (ON CONFLICT ... DO UPDATE) для предотвращения нарушения Foreign Keys»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R23",
       "text": "«1.2 Разделить первичную инициализацию схемы init_schema() и фабрику соединений get_connection(), задать busy_timeout = 30000, synchronous = NORMAL и WAL»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R24",
       "text": "«1.3 Оптимизировать prune_snapshots: индекс idx_snapshots_timestamp, INTEGER epoch timestamp, удаление батчами по 5000 строк»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R25",
       "text": "«2.1 Внедрить trailing-edge дебаунс (500 мс) с проверкой стабилизации размера файла Auctionator.lua вместо 50мс паузы»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R26",
       "text": "«2.2 Использовать mtime файла бэкапа при fallback вместо текущего time.time() и запретить инжест бэкапов старше 2 часов»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R27",
       "text": "«2.3 Корректно создавать директорию watch_path через os.makedirs и сохранять target_filename = Auctionator.lua»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R28",
       "text": "«2.4 Вынести тяжелый пересчет аналитики, обращение к AI и обновление дашборда в фоновую очередь задач queue.Queue, не блокируя watchdog»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R29",
       "text": "«3.1 Устранить нарушение неравенства Самуэльсона в Z-score: установить min_samples >= 6 и использовать несмещенную дисперсию (n - 1)»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R30",
       "text": "«3.2 Заменить эвристику v_buy > 0 на строгий белый список вендорных реагентов, исключив дикорастущую траву и рыбу»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R31",
       "text": "«3.3 Учесть безвозвратный залог аукциона AH Deposit Fee: вычитать max(15, int(v_sell  0.05)) из расчетной прибыли крафта»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R32",
       "text": "«4.1, 4.2 Поддержать формат Auctionator v341: извлекать цену из val['m'], поддержать префикс gr: и вложенные таблицы h/l/a»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R33",
       "text": "«4.3 Поддержать разделитель имени реалма через пробел: ForeverRealm Alliance»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R34",
       "text": "«5.1, 5.2 Корректная модель Waylaid Crates: учесть target_item_count и reward_copper, разделить AH-комплекты и сдачу ящиков, поддержать сырьевые ящики 211501-211507»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R35",
       "text": "«6.1 Устранить Stored XSS в Plotly Chart: экранировать html.escape() и экранировать подстроки </script> при сериализации»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R36",
       "text": "«6.2 Предотвратить зависание браузера: ограничить выборку истории графиков топ-8 предметами и даунсэмплить точки до <= 300»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R37",
       "text": "«6.3 Исправить инверсию логики шага в AI-баннере: step_text = item.get('action') or item.get('text') or str(item.get('step') or item)»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R38",
       "text": "«7.1-7.4 Защитить AI-модуль: санитизация имен предметов, теги <market_data>, передача промпта в agy через stdin, безопасный парсинг None, ключ в x-goog-api-key»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R39",
       "text": "«8.1-8.3 Обработка фаззинга и пограничных случаев: OverflowError в format_currency при inf, фильтрация bool как цены, безопасный escape при name is None»",
-      "status": "in-ticket"
+      "status": "done"
     }
   ],
   "gates": {
@@ -970,14 +1241,22 @@ window.STATE =
       "ok": true,
       "at": "2026-10-31T22:52:41+03:00",
       "problems": 0
+    },
+    "G4": {
+      "ok": true,
+      "at": "2026-10-31T23:43:20+03:00",
+      "checked": 39,
+      "matched": 39
     }
   },
-  "result": null,
+  "result": "Устранены все дефекты из audit_report.md (P0/P1): SQLite UPSERT, фабрика соединений, trailing-edge дебаунс, защита бэкапов, Auctionator v341 'm' и gr:, Z-score Самуэльсона, белый список вендорных реагентов, залог аукциона, модель Waylaid Crates, защита от Stored XSS, децимация графиков и безопасность AI-модуля. Все 98 тестов зеленые.",
   "report": [
     "Автоматическая пересборка дашборда: при перехвате новых снимков данные пишутся в БД, а дашборд portal.html генерируется на старте (для автообновления страницы в рантайме можно подключить вызов build_standalone_dashboard в callback)",
     "Партиционирование реалмов: при работе с несколькими игровыми мирами рекомендуется всегда передавать параметр --realm для исключения коллизий цен между серверами",
     "Plotly.js в дашборде: используется легковесный CDN-бандл Plotly (28 КБ HTML); без интернета все 3 таблицы сигналов и AI-вердикт работают локально, а график цен ждет связи",
     "Аутентификация Gemini: ключ передается в API-клиенте стандартным вызовом Google AI; при отсутствии сети активируется локальный эвристический генератор рекомендаций",
-    "Целостность графа базы: строгий контроль внешних ключей требует загрузки базового каталога предметов перед связыванием графа рецептов"
+    "Целостность графа базы: строгий контроль внешних ключей требует загрузки базового каталога предметов перед связыванием графа рецептов",
+    "src/ai_advisor.py: оптимизация build_compact_context с переиспользованием предварительно рассчитанных списков аналитики",
+    "src/dashboard.py: расширенное экранирование JSON-блоков Plotly"
   ]
 }
