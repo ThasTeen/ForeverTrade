@@ -4,11 +4,10 @@
 import argparse
 import os
 import signal
-import sys
 import threading
 import time
 
-from src.database import init_db, load_catalog, load_recipes
+from src.database import init_db, load_catalog, load_recipes, prune_snapshots
 from src.etl import start_watcher
 from src.dashboard import build_standalone_dashboard, notify_high_value_arbitrage
 from src.analytics import get_vendor_arbitrage
@@ -27,39 +26,41 @@ def main():
 
     print(f"[*] Initializing Forever Trade database: {args.db}")
     conn = init_db(args.db)
-    load_catalog(conn)
-    load_recipes(conn)
+    try:
+        load_catalog(conn)
+        load_recipes(conn)
+        prune_snapshots(conn, max_days=30)
 
-    print("[*] Generating baseline AI market advice...")
-    context = build_compact_context(conn, realm=args.realm)
-    client = AntigravityManagerClient(model=args.model)
-    advice = generate_market_advice(context, client=client)
+        print("[*] Generating baseline AI market advice...")
+        context = build_compact_context(conn, realm=args.realm)
+        client = AntigravityManagerClient(model=args.model)
+        advice = generate_market_advice(context, client=client)
 
-    print(f"[*] Building initial standalone portal: {args.dashboard_out}")
-    build_standalone_dashboard(conn, output_path=args.dashboard_out, ai_advice=advice, realm=args.realm)
+        print(f"[*] Building initial standalone portal: {args.dashboard_out}")
+        build_standalone_dashboard(conn, output_path=args.dashboard_out, ai_advice=advice, realm=args.realm)
 
-    arb = get_vendor_arbitrage(conn, realm=args.realm)
-    notify_high_value_arbitrage(arb)
+        arb = get_vendor_arbitrage(conn, realm=args.realm)
+        notify_high_value_arbitrage(arb)
+    finally:
+        conn.close()
 
     stop_event = threading.Event()
 
     def handle_signal(sig, frame):
         print("\n[*] Stopping watcher...")
         stop_event.set()
-        sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
     print(f"[*] Starting Watcher Engine on: {args.watch_dir}")
     print("[*] Press Ctrl+C to terminate.")
-    observer = start_watcher(args.watch_dir, args.db, args.realm, stop_event=stop_event)
+    observer = start_watcher(args.watch_dir, args.db, args.realm)
 
     try:
         while not stop_event.is_set():
             time.sleep(1)
     finally:
-        stop_event.set()
         observer.stop()
         observer.join()
 
