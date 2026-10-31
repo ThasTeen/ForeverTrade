@@ -179,11 +179,11 @@ def build_compact_context(
         else:
             roi_val = round(_safe_float(roi_val, 0.0), 2)
 
-        name = _sanitize_name(recipe.get("crafted_item_name") or recipe.get("name", f"Recipe #{recipe['recipe_id']}"))
+        name = _sanitize_name(recipe.get("crafted_item_name") or recipe.get("name", f"Recipe #{recipe.get('recipe_id')}"))
         crate_name = _sanitize_name(recipe["waylaid_crate_name"]) if recipe.get("waylaid_crate_name") else None
 
         top_crafting.append({
-            "recipe_id": int(recipe["recipe_id"]),
+            "recipe_id": _safe_int(recipe.get("recipe_id")) if recipe.get("recipe_id") is not None else None,
             "name": name,
             "profession": str(recipe.get("profession", "")),
             "crate_name": crate_name,
