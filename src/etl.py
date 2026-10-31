@@ -34,8 +34,8 @@ if not any(
 
 
 def normalize_item_id(raw_id: Any) -> Optional[int]:
-    """Extract integer item ID from string or numeric signature (e.g., '2589:0:0:0:0' -> 2589)."""
-    if raw_id is None:
+    """Extract integer item ID from string or numeric signature (e.g., '2589:0:0:0:0' -> 2589, 'gr:1234:567' -> 1234)."""
+    if raw_id is None or isinstance(raw_id, bool):
         return None
     if isinstance(raw_id, int):
         return raw_id if raw_id > 0 else None
@@ -47,7 +47,7 @@ def normalize_item_id(raw_id: Any) -> Optional[int]:
     parts = s.split(":")
     for part in parts:
         token = part.strip()
-        if not token or token.lower() == "item":
+        if not token or token.lower() in ("item", "gr"):
             continue
         try:
             val = int(token)
@@ -165,6 +165,20 @@ def _parse_single_lua_file(path: str) -> dict:
 
 def parse_auctionator_data(file_path: str) -> dict:
     """Safely parse AUCTIONATOR_PRICE_DATABASE via luadata with automatic fallback to .bak."""
+    if file_path.endswith(".bak") and os.path.isfile(file_path):
+        bak_mtime = int(os.path.getmtime(file_path))
+        if time.time() - bak_mtime > 7200:
+            logger.warning(
+                "Backup file '%s' is older than 2 hours (age: %d seconds). Discarding to prevent time-series poisoning.",
+                file_path,
+                int(time.time() - bak_mtime),
+            )
+            raise ValueError(f"Backup file '{file_path}' is older than 2 hours")
+        data = _parse_single_lua_file(file_path)
+        if isinstance(data, dict):
+            data["_source_mtime"] = bak_mtime
+        return data
+
     bak_candidates = [f"{file_path}.bak"]
     if file_path.endswith(".lua"):
         bak_candidates.append(f"{file_path[:-4]}.bak")
@@ -183,9 +197,23 @@ def parse_auctionator_data(file_path: str) -> dict:
 
     for bak_path in bak_candidates:
         if os.path.isfile(bak_path):
+            bak_mtime = int(os.path.getmtime(bak_path))
+            if time.time() - bak_mtime > 7200:
+                logger.warning(
+                    "Backup file '%s' is older than 2 hours (age: %d seconds). Discarding to prevent time-series poisoning.",
+                    bak_path,
+                    int(time.time() - bak_mtime),
+                )
+                continue
             try:
                 data = _parse_single_lua_file(bak_path)
-                logger.info("Successfully loaded fallback backup file '%s'", bak_path)
+                if isinstance(data, dict):
+                    data["_source_mtime"] = bak_mtime
+                logger.info(
+                    "Successfully loaded fallback backup file '%s' (mtime=%d)",
+                    bak_path,
+                    bak_mtime,
+                )
                 return data
             except Exception as bak_err:
                 logger.warning(
@@ -205,25 +233,42 @@ def ingest_price_snapshot(
     raw_data: dict,
     realm: str,
     dedupe_window_minutes: int = 10,
+    source_mtime: Optional[int] = None,
     current_time: Optional[int] = None,
 ) -> int:
     """Ingest price snapshot for the given realm with 10-minute deduplication and batch insertion."""
-    now = int(time.time()) if current_time is None else int(current_time)
+    if source_mtime is None and isinstance(raw_data, dict):
+        source_mtime = raw_data.get("_source_mtime")
+
+    effective_time = source_mtime if source_mtime is not None else current_time
+    now = int(time.time()) if effective_time is None else int(effective_time)
     window_seconds = int(dedupe_window_minutes * 60)
 
-    # Resolve realm dictionary
+    # Resolve realm dictionary (support space and underscore variants)
+    realm_candidates = [realm]
+    alt_space = realm.replace("_", " ")
+    if alt_space not in realm_candidates:
+        realm_candidates.append(alt_space)
+    alt_underscore = realm.replace(" ", "_")
+    if alt_underscore not in realm_candidates:
+        realm_candidates.append(alt_underscore)
+
     realm_data: Optional[dict] = None
     if isinstance(raw_data, dict):
-        if realm in raw_data and isinstance(raw_data[realm], dict):
-            realm_data = raw_data[realm]
-        elif (
-            "AUCTIONATOR_PRICE_DATABASE" in raw_data
-            and isinstance(raw_data["AUCTIONATOR_PRICE_DATABASE"], dict)
-            and realm in raw_data["AUCTIONATOR_PRICE_DATABASE"]
-            and isinstance(raw_data["AUCTIONATOR_PRICE_DATABASE"][realm], dict)
-        ):
-            realm_data = raw_data["AUCTIONATOR_PRICE_DATABASE"][realm]
-        elif any(normalize_item_id(k) is not None for k in raw_data.keys()):
+        for cand in realm_candidates:
+            if cand in raw_data and isinstance(raw_data[cand], dict):
+                realm_data = raw_data[cand]
+                break
+            elif (
+                "AUCTIONATOR_PRICE_DATABASE" in raw_data
+                and isinstance(raw_data["AUCTIONATOR_PRICE_DATABASE"], dict)
+                and cand in raw_data["AUCTIONATOR_PRICE_DATABASE"]
+                and isinstance(raw_data["AUCTIONATOR_PRICE_DATABASE"][cand], dict)
+            ):
+                realm_data = raw_data["AUCTIONATOR_PRICE_DATABASE"][cand]
+                break
+
+        if realm_data is None and any(normalize_item_id(k) is not None for k in raw_data.keys()):
             realm_data = raw_data
 
     if not realm_data or not isinstance(realm_data, dict):
@@ -246,6 +291,8 @@ def ingest_price_snapshot(
     batch_to_insert: List[Tuple[int, str, int, int]] = []
 
     for raw_key, val in realm_data.items():
+        if raw_key == "_source_mtime":
+            continue
         item_id = normalize_item_id(raw_key)
         if item_id is None and isinstance(val, dict):
             item_id = normalize_item_id(val.get("id") or val.get("item_id"))
@@ -254,28 +301,72 @@ def ingest_price_snapshot(
 
         price: Optional[int] = None
         if isinstance(val, dict):
-            if "mr" in val and val["mr"] is not None:
-                try:
-                    price = int(val["mr"])
-                except (ValueError, TypeError):
-                    pass
+            # 1. Auctionator v341: buyout price in val["m"]
+            if "m" in val and val["m"] is not None:
+                m_val = val["m"]
+                if not isinstance(m_val, bool):
+                    try:
+                        price = int(m_val)
+                    except (ValueError, TypeError):
+                        pass
+
+            # 2. Fallback to legacy fields mr / price
+            if price is None and "mr" in val and val["mr"] is not None:
+                mr_val = val["mr"]
+                if not isinstance(mr_val, bool):
+                    try:
+                        price = int(mr_val)
+                    except (ValueError, TypeError):
+                        pass
             if price is None and "price" in val and val["price"] is not None:
-                try:
-                    price = int(val["price"])
-                except (ValueError, TypeError):
-                    pass
+                p_val = val["price"]
+                if not isinstance(p_val, bool):
+                    try:
+                        price = int(p_val)
+                    except (ValueError, TypeError):
+                        pass
+
+            # 3. Extremums and historical tables (nested h/l or flat H/L)
             if price is None:
-                # Check low/high extremum values
                 for k, v in val.items():
-                    if (str(k).startswith("L") or str(k).startswith("H")) and isinstance(
-                        v, (int, float)
+                    k_str = str(k)
+                    k_lower = k_str.lower()
+                    if k_lower in ("l", "h") and isinstance(v, dict):
+                        for sub_k, sub_v in v.items():
+                            if not isinstance(sub_v, bool):
+                                try:
+                                    price = int(sub_v)
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+                        if price is not None:
+                            break
+                    elif k_lower in ("l", "h") and isinstance(v, (list, tuple)) and v:
+                        for sub_v in v:
+                            if not isinstance(sub_v, bool):
+                                try:
+                                    price = int(sub_v)
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+                        if price is not None:
+                            break
+                    elif (k_str.startswith("L") or k_str.startswith("H")) and isinstance(
+                        v, (int, float, str)
                     ):
-                        price = int(v)
-                        break
-        elif isinstance(val, (int, float)):
+                        if not isinstance(v, bool):
+                            try:
+                                price = int(v)
+                                break
+                            except (ValueError, TypeError):
+                                pass
+        elif isinstance(val, (int, float)) and not isinstance(val, bool):
             price = int(val)
         elif isinstance(val, str) and val.isdigit():
             price = int(val)
+
+        if isinstance(price, bool):
+            price = None
 
         if price is None or price < 0:
             continue
@@ -365,38 +456,54 @@ class AuctionatorEventHandler(FileSystemEventHandler):
 
     def _trigger_etl(self, file_path: str):
         with self._lock:
+            target_file = file_path if os.path.isfile(file_path) else self.full_target_path
+
+            # Trailing-edge debounce: silence timer + file size stabilization
+            time.sleep(self.debounce_seconds)
+
+            check_interval = min(0.2, self.debounce_seconds)
+            if os.path.isfile(target_file):
+                try:
+                    size1 = os.path.getsize(target_file)
+                    time.sleep(check_interval)
+                    size2 = os.path.getsize(target_file)
+                    retries = 0
+                    while size1 != size2 and retries < 5:
+                        size1 = size2
+                        time.sleep(check_interval)
+                        size2 = os.path.getsize(target_file)
+                        retries += 1
+                except OSError:
+                    time.sleep(check_interval)
+
             now = time.time()
-            if now - self._last_processed < self.debounce_seconds:
-                return
             self._last_processed = now
 
-        # Brief pause to let file writing complete on disk
-        time.sleep(0.05)
-        target_file = file_path if os.path.isfile(file_path) else self.full_target_path
-        logger.info(
-            "Watcher detected update in '%s', starting ETL ingestion...", target_file
-        )
-        try:
-            raw_data = parse_auctionator_data(target_file)
-            conn = init_db(self.db_path)
-            try:
-                count = ingest_price_snapshot(conn, raw_data, self.realm)
-                logger.info(
-                    "Watcher ETL finished: %d snapshots ingested from '%s'",
-                    count,
-                    target_file,
-                )
-                if count > 0 and self.callback is not None:
-                    try:
-                        self.callback(target_file, count)
-                    except Exception as cb_err:
-                        logger.error("Watcher callback failed: %s", cb_err, exc_info=True)
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.error(
-                "Watcher ETL failed for '%s': %s", target_file, e, exc_info=True
+            logger.info(
+                "Watcher detected update in '%s', starting ETL ingestion...", target_file
             )
+            try:
+                raw_data = parse_auctionator_data(target_file)
+                src_mtime = raw_data.get("_source_mtime") if isinstance(raw_data, dict) else None
+                conn = init_db(self.db_path)
+                try:
+                    count = ingest_price_snapshot(conn, raw_data, self.realm, source_mtime=src_mtime)
+                    logger.info(
+                        "Watcher ETL finished: %d snapshots ingested from '%s'",
+                        count,
+                        target_file,
+                    )
+                    if count > 0 and self.callback is not None:
+                        try:
+                            self.callback(target_file, count)
+                        except Exception as cb_err:
+                            logger.error("Watcher callback failed: %s", cb_err, exc_info=True)
+                finally:
+                    conn.close()
+            except Exception as e:
+                logger.error(
+                    "Watcher ETL failed for '%s': %s", target_file, e, exc_info=True
+                )
 
 
 def start_watcher(
@@ -405,25 +512,35 @@ def start_watcher(
     realm: str,
     stop_event: Optional[threading.Event] = None,
     callback: Optional[Callable[[str, int], None]] = None,
+    on_snapshot_callback: Optional[Callable[[str, int], None]] = None,
 ) -> Observer:
     """Start background file watcher monitoring Auctionator.lua modifications."""
-    if os.path.isdir(watch_path):
-        watch_dir = os.path.abspath(watch_path)
-        target_filename = "Auctionator.lua"
-        full_target_path = os.path.join(watch_dir, target_filename)
-    else:
-        full_target_path = os.path.abspath(watch_path)
+    cb = callback or on_snapshot_callback
+    clean_path = os.path.abspath(watch_path)
+
+    if watch_path.lower().endswith(".lua"):
+        full_target_path = clean_path
         watch_dir = os.path.dirname(full_target_path) or "."
         target_filename = os.path.basename(full_target_path)
-
-    os.makedirs(watch_dir, exist_ok=True)
+        os.makedirs(watch_dir, exist_ok=True)
+    elif os.path.isdir(watch_path):
+        watch_dir = clean_path
+        target_filename = "Auctionator.lua"
+        full_target_path = os.path.join(watch_dir, target_filename)
+        os.makedirs(watch_dir, exist_ok=True)
+    else:
+        # Directory does not exist yet: create it and force target_filename = "Auctionator.lua"
+        os.makedirs(clean_path, exist_ok=True)
+        watch_dir = clean_path
+        target_filename = "Auctionator.lua"
+        full_target_path = os.path.join(watch_dir, target_filename)
 
     event_handler = AuctionatorEventHandler(
         target_filename=target_filename,
         full_target_path=full_target_path,
         db_path=db_path,
         realm=realm,
-        callback=callback,
+        callback=cb,
     )
 
     observer = Observer()

@@ -52,12 +52,22 @@ class TestNormalizeItemId:
         assert normalize_item_id("item:2589:0:0:0") == 2589
         assert normalize_item_id("item:774") == 774
 
+    def test_normalize_with_gear_random_suffix_prefix(self):
+        """Verify gear with random properties signature gr:<item_id>:<suffix> (R32)."""
+        assert normalize_item_id("gr:1234:567") == 1234
+        assert normalize_item_id("gr:5555:0") == 5555
+        assert normalize_item_id("gr:9999") == 9999
+
     def test_normalize_simple_string_and_int(self):
         assert normalize_item_id("2589") == 2589
         assert normalize_item_id(2589) == 2589
+        assert normalize_item_id("1234:0:0") == 1234
+        assert normalize_item_id("1234") == 1234
 
     def test_normalize_invalid_and_edge_cases(self):
         assert normalize_item_id(None) is None
+        assert normalize_item_id(True) is None
+        assert normalize_item_id(False) is None
         assert normalize_item_id("") is None
         assert normalize_item_id("   ") is None
         assert normalize_item_id("unknown:invalid") is None
@@ -176,6 +186,45 @@ class TestParseAuctionatorData:
         assert isinstance(data, dict)
         assert "Everlook" in data
         assert data["Everlook"]["3000"]["mr"] == 120
+
+    def test_parse_stale_backup_older_than_two_hours_rejected(self, tmp_path):
+        """Verify backup older than 2 hours is discarded to prevent time-series poisoning (R26)."""
+        primary_file = tmp_path / "Auctionator.lua"
+        primary_file.write_text("corrupted primary content", encoding="utf-8")
+
+        bak_file = tmp_path / "Auctionator.lua.bak"
+        bak_file.write_text(
+            'AUCTIONATOR_PRICE_DATABASE = { ["Everlook"] = { ["2589"] = { ["m"] = 500 } } }',
+            encoding="utf-8",
+        )
+        stale_mtime = time.time() - 7300  # > 2 hours old
+        os.utime(bak_file, (stale_mtime, stale_mtime))
+
+        # Primary failed, backup is older than 2 hours -> must reject and raise error
+        with pytest.raises(Exception):
+            parse_auctionator_data(str(primary_file))
+
+        # Direct parse on stale backup must raise ValueError
+        with pytest.raises(ValueError) as exc_info:
+            parse_auctionator_data(str(bak_file))
+        assert "older than 2 hours" in str(exc_info.value)
+
+    def test_parse_fresh_backup_preserves_mtime(self, tmp_path):
+        """Verify fresh backup parse sets _source_mtime to backup file mtime (R26)."""
+        primary_file = tmp_path / "Auctionator.lua"
+        primary_file.write_text("corrupted primary", encoding="utf-8")
+
+        bak_file = tmp_path / "Auctionator.lua.bak"
+        bak_file.write_text(
+            'AUCTIONATOR_PRICE_DATABASE = { ["Everlook"] = { ["2589"] = { ["m"] = 500 } } }',
+            encoding="utf-8",
+        )
+        fresh_mtime = int(time.time()) - 1800  # 30 minutes ago
+        os.utime(bak_file, (fresh_mtime, fresh_mtime))
+
+        data = parse_auctionator_data(str(primary_file))
+        assert isinstance(data, dict)
+        assert data.get("_source_mtime") == fresh_mtime
 
 
 class TestIngestPriceSnapshot:
@@ -301,6 +350,81 @@ class TestIngestPriceSnapshot:
         """Verify graceful return 0 when realm data is empty or missing."""
         assert ingest_price_snapshot(memory_db, {}, realm="Everlook") == 0
         assert ingest_price_snapshot(memory_db, {"OtherRealm": {}}, realm="Everlook") == 0
+
+    def test_ingest_auctionator_v341_and_bool_protection(self, memory_db):
+        """Verify Auctionator v341 val['m'], nested h/l, and bool value protection (R32, R39)."""
+        raw_data = {
+            "Everlook": {
+                # Auctionator v341 buyout price in 'm'
+                "1001": {"m": 450},
+                # Numeric string in 'm'
+                "1002": {"m": "620"},
+                # Nested 'h' table
+                "1003": {"h": {"1700000000": 780}},
+                # Bool values must be discarded and NOT recorded as 1 copper
+                "1004": {"m": True},
+                "1005": {"mr": False},
+                "1006": {"price": True},
+                "1007": True,
+                "1008": False,
+            }
+        }
+        count = ingest_price_snapshot(memory_db, raw_data, realm="Everlook", current_time=1000)
+        assert count == 3
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT item_id, price FROM price_snapshots WHERE realm = 'Everlook' ORDER BY item_id")
+        rows = dict(cur.fetchall())
+        assert rows == {1001: 450, 1002: 620, 1003: 780}
+        # Ensure bool items were never inserted
+        for bad_id in (1004, 1005, 1006, 1007, 1008):
+            assert bad_id not in rows
+
+    def test_ingest_realm_with_space_and_source_mtime(self, memory_db):
+        """Verify realm with space and explicit source_mtime timestamp handling (R26, R33)."""
+        target_realm = "ForeverRealm Alliance"
+        fixed_mtime = 1700000000
+        raw_data = {
+            target_realm: {
+                "2589": {"m": 1200},
+                "1205": {"m": 350},
+            }
+        }
+        count = ingest_price_snapshot(
+            memory_db,
+            raw_data,
+            realm=target_realm,
+            source_mtime=fixed_mtime,
+            current_time=2000000000,
+        )
+        assert count == 2
+
+        cur = memory_db.cursor()
+        cur.execute(
+            "SELECT item_id, realm, price, timestamp FROM price_snapshots WHERE realm = ? ORDER BY item_id",
+            (target_realm,),
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 2
+        assert tuple(rows[0]) == (1205, target_realm, 350, fixed_mtime)
+        assert tuple(rows[1]) == (2589, target_realm, 1200, fixed_mtime)
+
+    def test_ingest_source_mtime_from_raw_data_metadata(self, memory_db):
+        """Verify _source_mtime in raw_data is used as snapshot timestamp (R26)."""
+        fixed_mtime = 1700000123
+        raw_data = {
+            "_source_mtime": fixed_mtime,
+            "Everlook": {
+                "3000": {"m": 888},
+            },
+        }
+        count = ingest_price_snapshot(memory_db, raw_data, realm="Everlook", current_time=2000000000)
+        assert count == 1
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT timestamp, price FROM price_snapshots WHERE item_id = 3000")
+        row = cur.fetchone()
+        assert tuple(row) == (fixed_mtime, 888)
 
 
 class TestWatcherEngine:
@@ -553,4 +677,31 @@ class TestWatcherEngine:
         finally:
             observer.stop()
             observer.join(timeout=2.0)
+
+    def test_start_watcher_creates_missing_directory_and_targets_auctionator_lua(self, tmp_path):
+        """Verify start_watcher creates non-existent directory via os.makedirs and targets Auctionator.lua (R27)."""
+        nonexistent_dir = tmp_path / "NonExistent" / "SavedVariables"
+        assert not nonexistent_dir.exists()
+
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        observer = start_watcher(str(nonexistent_dir), db_path, "Everlook", stop_event=None)
+        try:
+            assert nonexistent_dir.exists()
+            assert nonexistent_dir.is_dir()
+
+            watches = list(observer._watches)
+            assert len(watches) >= 1
+            watch = watches[0]
+            handlers = list(observer._handlers[watch])
+            assert len(handlers) >= 1
+            handler = handlers[0]
+            assert isinstance(handler, AuctionatorEventHandler)
+            assert handler.target_filename == "auctionator.lua"
+            assert os.path.basename(handler.full_target_path).lower() == "auctionator.lua"
+        finally:
+            observer.stop()
+            observer.join(timeout=2.0)
+        assert not observer.is_alive()
 
