@@ -17,6 +17,8 @@ from src.analytics import (
     get_vendor_arbitrage,
     get_crafting_margins,
     get_zscore_anomalies,
+    get_waylaid_crate_arbitrage,
+    VENDOR_REAGENTS_WHITELIST,
 )
 
 
@@ -172,27 +174,31 @@ def test_vendor_arbitrage_latest_snapshot_and_realm_filter(memory_db):
 
 def test_crafting_margins_bartering_discount(memory_db):
     """Verify 5% Bartering discount on vendor components (V_buy * 0.95 vs V_buy * 1.0)."""
-    # Item 1001: Crafted potion, AH price = 200 copper
+    # Item 1001: Crafted potion, AH price = 200 copper, vendor_sell = 10 -> deposit = 15.
     # Item 1002: Vendor reagent, vendor_buy_price = 100 copper (requires 1)
     #
     # With Bartering:
     #   Cost = 100 * 0.95 = 95.0
     #   Revenue = 200 * 0.95 = 190.0
-    #   Profit = 190.0 - 95.0 = 95.0
-    #   ROI = 95.0 / 95.0 = 1.0 (100% >= 25%) -> INCLUDED
+    #   Deposit = 15.0
+    #   Profit = 190.0 - 95.0 - 15.0 = 80.0
+    #   ROI = 80.0 / 95.0 = 0.8421 (84.21% >= 25%) -> INCLUDED
     #
     # Without Bartering:
     #   Cost = 100 * 1.0 = 100.0
     #   Revenue = 190.0
-    #   Profit = 190.0 - 100.0 = 90.0
-    #   ROI = 90.0 / 100.0 = 0.9 (90% >= 25%) -> INCLUDED
+    #   Deposit = 15.0
+    #   Profit = 190.0 - 100.0 - 15.0 = 75.0
+    #   ROI = 75.0 / 100.0 = 0.75 (75% >= 25%) -> INCLUDED
     #
     # Now let's tune a second item where bartering makes the difference between ROI >= 25% and ROI < 25%:
-    # Item 1003: Crafted potion, AH price = 130 copper.
+    # Item 1003: Crafted potion, AH price = 145 copper, vendor_sell = 10 -> deposit = 15.
     # Item 1004: Vendor reagent, vendor_buy_price = 100 copper.
-    # Revenue = 130 * 0.95 = 123.5 copper.
-    # With Bartering: Cost = 95.0. Profit = 123.5 - 95 = 28.5. ROI = 28.5 / 95 = 0.30 (30% >= 25%) -> INCLUDED.
-    # Without Bartering: Cost = 100.0. Profit = 123.5 - 100 = 23.5. ROI = 23.5 / 100 = 0.235 (23.5% < 25%) -> EXCLUDED.
+    # Revenue = 145 * 0.95 = 137.75 copper.
+    # With Bartering: Cost = 95.0, Deposit = 15. Profit = 137.75 - 95 - 15 = 27.75.
+    #   ROI = 27.75 / 95 = 0.2921 (29.21% >= 25%) -> INCLUDED.
+    # Without Bartering: Cost = 100.0, Deposit = 15. Profit = 137.75 - 100 - 15 = 22.75.
+    #   ROI = 22.75 / 100 = 0.2275 (22.75% < 25%) -> EXCLUDED.
     now = int(time.time())
     with memory_db:
         memory_db.executemany(
@@ -210,7 +216,7 @@ def test_crafting_margins_bartering_discount(memory_db):
                VALUES (?, ?, ?, ?)""",
             [
                 (1001, "Everlook", 200, now),
-                (1003, "Everlook", 130, now),
+                (1003, "Everlook", 145, now),
             ]
         )
         memory_db.executemany(
@@ -238,41 +244,43 @@ def test_crafting_margins_bartering_discount(memory_db):
 
     recipe_b_barter = next(r for r in results_barter if r["recipe_id"] == 2)
     assert recipe_b_barter["cost"] == 95.0
-    assert recipe_b_barter["revenue"] == 123.5
-    assert recipe_b_barter["profit"] == 28.5
-    assert recipe_b_barter["roi"] == 0.3
-    assert recipe_b_barter["roi_percent"] == 30.0
+    assert recipe_b_barter["revenue"] == 137.75
+    assert recipe_b_barter["deposit"] == 15
+    assert recipe_b_barter["profit"] == 27.75
+    assert recipe_b_barter["roi"] == 0.2921
+    assert recipe_b_barter["roi_percent"] == 29.21
 
     # 2. Without bartering
     results_no_barter = get_crafting_margins(memory_db, has_bartering=False, min_roi=0.25)
     no_barter_ids = [r["recipe_id"] for r in results_no_barter]
     assert 1 in no_barter_ids
-    assert 2 not in no_barter_ids  # Excluded because ROI = 23.5% < 25%
+    assert 2 not in no_barter_ids  # Excluded because ROI = 22.75% < 25%
 
     recipe_a_no_barter = next(r for r in results_no_barter if r["recipe_id"] == 1)
     assert recipe_a_no_barter["cost"] == 100.0
     assert recipe_a_no_barter["revenue"] == 190.0
-    assert recipe_a_no_barter["profit"] == 90.0
-    assert recipe_a_no_barter["roi"] == 0.9
+    assert recipe_a_no_barter["deposit"] == 15
+    assert recipe_a_no_barter["profit"] == 75.0
+    assert recipe_a_no_barter["roi"] == 0.75
 
 
 def test_crafting_margins_master_chef_cooking_multiplier(memory_db):
     """Verify 1.1x multiplier applies to Cooking with Master Chef, but not to other professions."""
-    # Item 2001: Cooked Food, AH price = 100 copper.
+    # Item 2001: Cooked Food, AH price = 120 copper, vendor_sell = 10 -> deposit = 15.
     # Reagent 2002: AH price = 40 copper, count = 2. Total cost = 80 copper.
     # Base yield = 1.0.
     #
     # With Master Chef (Cooking):
     #   Expected yield = 1.1 * 1.0 = 1.1
-    #   Revenue = 100 * 0.95 * 1.1 = 104.5 copper.
-    #   Profit = 104.5 - 80 = 24.5 copper.
-    #   ROI = 24.5 / 80 = 0.30625 (30.63% >= 25%) -> INCLUDED
+    #   Revenue = 120 * 0.95 * 1.1 = 125.4 copper.
+    #   Profit = 125.4 - 80 - 15 = 30.4 copper.
+    #   ROI = 30.4 / 80 = 0.38 (38.0% >= 25%) -> INCLUDED
     #
     # Without Master Chef (Cooking):
     #   Expected yield = 1.0 * 1.0 = 1.0
-    #   Revenue = 100 * 0.95 * 1.0 = 95.0 copper.
-    #   Profit = 95.0 - 80 = 15.0 copper.
-    #   ROI = 15.0 / 80 = 0.1875 (18.75% < 25%) -> EXCLUDED
+    #   Revenue = 120 * 0.95 * 1.0 = 114.0 copper.
+    #   Profit = 114.0 - 80 - 15 = 19.0 copper.
+    #   ROI = 19.0 / 80 = 0.2375 (23.75% < 25%) -> EXCLUDED
     #
     # Control case: Alchemy recipe with same numbers.
     # Even if has_master_chef=True, Master Chef MUST NOT apply to Alchemy!
@@ -292,9 +300,9 @@ def test_crafting_margins_master_chef_cooking_multiplier(memory_db):
             """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
                VALUES (?, ?, ?, ?)""",
             [
-                (2001, "Everlook", 100, now),
+                (2001, "Everlook", 120, now),
                 (2002, "Everlook", 40, now),
-                (2003, "Everlook", 100, now),
+                (2003, "Everlook", 120, now),
                 (2004, "Everlook", 40, now),
             ]
         )
@@ -320,15 +328,17 @@ def test_crafting_margins_master_chef_cooking_multiplier(memory_db):
     rec_ids = [r["recipe_id"] for r in res_master_chef]
     # Cooking recipe meets >= 25% thanks to 1.1x multiplier
     assert 10 in rec_ids
-    # Alchemy recipe does NOT get 1.1x multiplier, so ROI is 18.75% < 25% -> EXCLUDED
+    # Alchemy recipe does NOT get 1.1x multiplier, so ROI is 23.75% < 25% -> EXCLUDED
     assert 20 not in rec_ids
 
     cooking_res = next(r for r in res_master_chef if r["recipe_id"] == 10)
     assert cooking_res["yield"] == 1.1
     assert cooking_res["expected_yield"] == 1.1
-    assert cooking_res["revenue"] == 104.5
-    assert cooking_res["profit"] == 24.5
-    assert cooking_res["roi"] == 0.3062 or pytest.approx(cooking_res["roi"], 0.001) == 0.30625
+    assert cooking_res["revenue"] == 125.4
+    assert cooking_res["deposit"] == 15
+    assert cooking_res["profit"] == 30.4
+    assert cooking_res["roi"] == 0.38
+    assert cooking_res["roi_percent"] == 38.0
 
     # 2. Without Master Chef
     res_no_chef = get_crafting_margins(memory_db, has_master_chef=False, min_roi=0.25)
@@ -339,10 +349,10 @@ def test_crafting_margins_master_chef_cooking_multiplier(memory_db):
 
 
 def test_crafting_margins_ah_commission_and_filtering(memory_db):
-    """Verify 5% auction commission deduction, negative profit filtering, and sorting."""
-    # Item 3001: P_out = 100, cost = 96. Revenue = 95. Profit = -1 -> EXCLUDED
-    # Item 3002: P_out = 100, cost = 76. Revenue = 95. Profit = 19, ROI = 25.0% -> INCLUDED
-    # Item 3003: P_out = 200, cost = 100. Revenue = 190. Profit = 90, ROI = 90.0% -> INCLUDED
+    """Verify 5% auction commission deduction, AH deposit fee, negative profit filtering, and sorting."""
+    # Item 3001: P_out = 100, cost = 95. Revenue = 95. Deposit = 15. Profit = 95 - 95 - 15 = -15 -> EXCLUDED
+    # Item 3002: P_out = 200, cost = 140. Revenue = 190. Deposit = 15. Profit = 190 - 140 - 15 = 35, ROI = 25.0% -> INCLUDED
+    # Item 3003: P_out = 300, cost = 100. Revenue = 285. Deposit = 15. Profit = 285 - 100 - 15 = 170, ROI = 170.0% -> INCLUDED
     now = int(time.time())
     with memory_db:
         memory_db.executemany(
@@ -362,10 +372,10 @@ def test_crafting_margins_ah_commission_and_filtering(memory_db):
                VALUES (?, ?, ?, ?)""",
             [
                 (3001, "Everlook", 100, now),
-                (3004, "Everlook", 96, now),
-                (3002, "Everlook", 100, now),
-                (3005, "Everlook", 76, now),
-                (3003, "Everlook", 200, now),
+                (3004, "Everlook", 95, now),
+                (3002, "Everlook", 200, now),
+                (3005, "Everlook", 140, now),
+                (3003, "Everlook", 300, now),
                 (3006, "Everlook", 100, now),
             ]
         )
@@ -395,11 +405,13 @@ def test_crafting_margins_ah_commission_and_filtering(memory_db):
 
     r33 = results[0]
     assert r33["recipe_id"] == 33
-    assert r33["roi"] == 0.9
+    assert r33["roi"] == 1.7
+    assert r33["profit"] == 170.0
 
     r32 = results[1]
     assert r32["recipe_id"] == 32
     assert r32["roi"] == 0.25
+    assert r32["profit"] == 35.0
 
 
 def test_crafting_margins_missing_reagents_and_waylaid_crates(memory_db):
@@ -466,26 +478,26 @@ def test_crafting_margins_missing_reagents_and_waylaid_crates(memory_db):
 # ---------------------------------------------------------------------------
 
 def test_zscore_anomalies_mean_sigma_and_signals(memory_db):
-    """Verify mean, standard deviation, and STRONG_BUY (Z <= -1.8) / STRONG_SELL (Z >= 1.6) signals."""
-    # We construct exact mathematical distributions for 10 snapshots:
+    """Verify mean, unbiased sample standard deviation (ddof=1), and STRONG_BUY / STRONG_SELL signals."""
+    # We construct exact mathematical distributions for 10 snapshots (N >= 6, ddof=1):
     #
     # Item 501: Dump / Crash
     # 9 snapshots at 100, newest snapshot (rn=1) at 10:
     # prices = [10, 100, 100, 100, 100, 100, 100, 100, 100, 100]
     # N = 10, sum = 910, mu = 91.0
-    # var = ((10-91)^2 + 9*(100-91)^2) / 10 = (6561 + 729) / 10 = 729.0
-    # sigma = sqrt(729) = 27.0
-    # Z = (10 - 91) / 27 = -81 / 27 = -3.0
-    # Since Z = -3.0 <= -1.8 -> signal = "STRONG_BUY"
+    # var = ((10-91)^2 + 9*(100-91)^2) / (10 - 1) = (6561 + 729) / 9 = 810.0
+    # sigma = sqrt(810) = 28.4604989... -> 28.4605
+    # Z = (10 - 91) / 28.4604989... = -81 / 28.4605 = -2.846
+    # Since Z = -2.846 <= -1.8 -> signal = "STRONG_BUY"
     #
     # Item 502: Spike / Pump
     # 9 snapshots at 10, newest snapshot (rn=1) at 100:
     # prices = [100, 10, 10, 10, 10, 10, 10, 10, 10, 10]
     # N = 10, sum = 190, mu = 19.0
-    # var = ((100-19)^2 + 9*(10-19)^2) / 10 = (6561 + 729) / 10 = 729.0
-    # sigma = sqrt(729) = 27.0
-    # Z = (100 - 19) / 27 = +81 / 27 = +3.0
-    # Since Z = +3.0 >= 1.6 -> signal = "STRONG_SELL"
+    # var = ((100-19)^2 + 9*(10-19)^2) / 9 = (6561 + 729) / 9 = 810.0
+    # sigma = sqrt(810) = 28.4605
+    # Z = (100 - 19) / 28.4605 = +81 / 28.4605 = +2.846
+    # Since Z = +2.846 >= 1.6 -> signal = "STRONG_SELL"
     #
     # Item 503: Normal price oscillation (no signal)
     # prices around 100: [101, 100, 99, 100, 101, 100, 99, 100, 101, 100]
@@ -536,8 +548,8 @@ def test_zscore_anomalies_mean_sigma_and_signals(memory_db):
     assert buy_entry["signal"] == "STRONG_BUY"
     assert buy_entry["current_price"] == 10
     assert buy_entry["mean_price"] == 91.0
-    assert buy_entry["std_dev"] == 27.0
-    assert buy_entry["z_score"] == -3.0
+    assert buy_entry["std_dev"] == 28.4605
+    assert buy_entry["z_score"] == -2.846
     assert buy_entry["sample_count"] == 10
 
     sell_entry = results[1]
@@ -545,8 +557,8 @@ def test_zscore_anomalies_mean_sigma_and_signals(memory_db):
     assert sell_entry["signal"] == "STRONG_SELL"
     assert sell_entry["current_price"] == 100
     assert sell_entry["mean_price"] == 19.0
-    assert sell_entry["std_dev"] == 27.0
-    assert sell_entry["z_score"] == 3.0
+    assert sell_entry["std_dev"] == 28.4605
+    assert sell_entry["z_score"] == 2.846
     assert sell_entry["sample_count"] == 10
 
 
@@ -557,11 +569,11 @@ def test_zscore_anomalies_zero_variance_protection(memory_db):
             "INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price) VALUES (?, ?, ?, ?, ?)",
             (601, "Flat Price Item", 1, 10, 0)
         )
-        # 5 snapshots with the exact same price
+        # 6 snapshots with the exact same price (reaches min_samples=6)
         memory_db.executemany(
             "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
             [
-                (601, "Everlook", 500, 1000 + i) for i in range(5)
+                (601, "Everlook", 500, 1000 + i) for i in range(6)
             ]
         )
 
@@ -572,7 +584,7 @@ def test_zscore_anomalies_zero_variance_protection(memory_db):
 
 
 def test_zscore_anomalies_window_size_and_minimum_samples(memory_db):
-    """Verify window_size limits history and items with < 2 snapshots are excluded."""
+    """Verify window_size limits history and min_samples requirement."""
     base_time = 1000
     with memory_db:
         memory_db.executemany(
@@ -583,7 +595,7 @@ def test_zscore_anomalies_window_size_and_minimum_samples(memory_db):
                 (702, "Window Tested Item", 1, 10, 0),
             ]
         )
-        # Item 701: only 1 snapshot (< 2 samples must be skipped)
+        # Item 701: only 1 snapshot (< min_samples must be skipped)
         memory_db.execute(
             "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
             (701, "Everlook", 10, base_time)
@@ -594,15 +606,14 @@ def test_zscore_anomalies_window_size_and_minimum_samples(memory_db):
         # 3 newest snapshots (t=1012..1014) with price 10
         #
         # If window_size = 3:
-        #   Only latest 3 snapshots (all price 10) are used:
-        #   mu = 10, sigma = 0, Z = 0.0 -> no anomaly.
+        #   Only latest 3 snapshots are selected (< min_samples=6) -> skipped, len = 0.
         #
         # If window_size = 15:
         #   All 15 snapshots used (12 of 100, 3 of 10):
         #   N = 15, sum = 1230, mu = 82.0
-        #   var = (12*(18^2) + 3*(-72^2)) / 15 = (3888 + 15552) / 15 = 1296.0
-        #   sigma = sqrt(1296) = 36.0
-        #   Z = (10 - 82) / 36 = -72 / 36 = -2.0 <= -1.8 -> STRONG_BUY!
+        #   var (ddof=1) = (12*(18^2) + 3*(-72^2)) / 14 = (3888 + 15552) / 14 = 1388.5714...
+        #   sigma = sqrt(1388.5714) = 37.2635...
+        #   Z = (10 - 82) / 37.2635 = -72 / 37.2635 = -1.9322 <= -1.8 -> STRONG_BUY!
         snapshots_702 = []
         for i in range(12):
             snapshots_702.append((702, "Everlook", 100, base_time + i))
@@ -615,18 +626,18 @@ def test_zscore_anomalies_window_size_and_minimum_samples(memory_db):
         )
 
     # Item 701 with 1 snapshot is skipped in both cases
-    # Window size 3: latest 3 snapshots are all 10, sigma = 0, no signal
+    # Window size 3: only 3 snapshots (< 6 samples) -> no signal
     results_w3 = get_zscore_anomalies(memory_db, window_size=3)
     assert len(results_w3) == 0
 
-    # Window size 15: includes 12 older prices of 100, producing Z = -2.0
+    # Window size 15: includes 12 older prices of 100, producing Z = -1.9322
     results_w15 = get_zscore_anomalies(memory_db, window_size=15)
     assert len(results_w15) == 1
     assert results_w15[0]["item_id"] == 702
     assert results_w15[0]["signal"] == "STRONG_BUY"
     assert results_w15[0]["mean_price"] == 82.0
-    assert results_w15[0]["std_dev"] == 36.0
-    assert results_w15[0]["z_score"] == -2.0
+    assert results_w15[0]["std_dev"] == 37.2635
+    assert results_w15[0]["z_score"] == -1.9322
     assert results_w15[0]["sample_count"] == 15
 
 
@@ -663,3 +674,343 @@ def test_analytics_with_real_catalog_and_recipes(memory_db):
     # Run get_zscore_anomalies with real catalog
     anomalies = get_zscore_anomalies(memory_db)
     assert isinstance(anomalies, list)
+
+
+# ---------------------------------------------------------------------------
+# Task 08 (R29, R30, R31, R34) Specific Math, Reagents & Crate Tests
+# ---------------------------------------------------------------------------
+
+def test_zscore_samuelson_min_samples_and_realm_isolation(memory_db):
+    """Verify Samuelson's inequality protection (< 6 snapshots -> empty) and realm isolation (R29)."""
+    base_time = 50000
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (901, "Samuelson Test Item", 1, 10, 0),
+                (902, "Multi-Realm Item", 1, 10, 0),
+            ]
+        )
+
+        # 1. Test Samuelson protection on 901 with 3, 4, 5 snapshots
+        # 3 snapshots: 2 at 100, newest at 10
+        memory_db.executemany(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            [
+                (901, "Everlook", 100, base_time),
+                (901, "Everlook", 100, base_time + 1),
+                (901, "Everlook", 10, base_time + 10),
+            ]
+        )
+
+    # 3 snapshots (< 6) -> list of anomalies must be strictly empty (Samuelson violation prevented)
+    assert get_zscore_anomalies(memory_db, realm="Everlook") == []
+
+    # 4 snapshots (< 6) -> still empty
+    with memory_db:
+        memory_db.execute(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            (901, "Everlook", 100, base_time + 2)
+        )
+    assert get_zscore_anomalies(memory_db, realm="Everlook") == []
+
+    # 5 snapshots (< 6) -> still empty
+    with memory_db:
+        memory_db.execute(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            (901, "Everlook", 100, base_time + 3)
+        )
+    assert get_zscore_anomalies(memory_db, realm="Everlook") == []
+
+    # 6 snapshots (>= 6) -> valid sample size, triggers anomaly using unbiased sample variance (ddof=1)
+    # 5 older snapshots at 100 (t=base_time..base_time+4), 1 newest snapshot at 10 (t=base_time+10)
+    with memory_db:
+        memory_db.execute(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            (901, "Everlook", 100, base_time + 4)
+        )
+
+    results_6 = get_zscore_anomalies(memory_db, realm="Everlook")
+    assert len(results_6) == 1
+    anom = results_6[0]
+    assert anom["item_id"] == 901
+    assert anom["signal"] == "STRONG_BUY"
+    assert anom["sample_count"] == 6
+    assert anom["current_price"] == 10
+    # N=6: mu = (5*100 + 10)/6 = 85.0
+    assert anom["mean_price"] == 85.0
+    # var (ddof=1) = (5*(15^2) + (-75)^2) / 5 = (1125 + 5625) / 5 = 1350.0
+    # sigma = sqrt(1350) = 36.7423...
+    assert anom["std_dev"] == 36.7423
+    # Z = (10 - 85) / 36.742346... = -2.04124...
+    assert anom["z_score"] == -2.0412
+
+    # 2. Realm isolation test:
+    # Item 902 has crash on Everlook (6 snapshots: 5 of 100, newest 10)
+    # Item 902 has completely flat stable prices on Warsong (8 snapshots of 500)
+    with memory_db:
+        everlook_snaps = [(902, "Everlook", 100, base_time + i) for i in range(5)]
+        everlook_snaps.append((902, "Everlook", 10, base_time + 10))
+        warsong_snaps = [(902, "Warsong", 500, base_time + i) for i in range(8)]
+        memory_db.executemany(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            everlook_snaps + warsong_snaps
+        )
+
+    # Everlook query: only detects anomalies on Everlook, stats not skewed by Warsong
+    ev_anoms = get_zscore_anomalies(memory_db, realm="Everlook")
+    ev_item_902 = next((a for a in ev_anoms if a["item_id"] == 902), None)
+    assert ev_item_902 is not None
+    assert ev_item_902["realm"] == "Everlook"
+    assert ev_item_902["mean_price"] == 85.0
+    assert ev_item_902["std_dev"] == 36.7423
+    assert ev_item_902["current_price"] == 10
+
+    # Warsong query: stable prices produce 0 anomalies
+    ws_anoms = get_zscore_anomalies(memory_db, realm="Warsong")
+    assert not any(a["item_id"] == 902 for a in ws_anoms)
+
+
+def test_crafting_margins_vendor_whitelist_vs_wild_resources(memory_db):
+    """Verify strict whitelist: wild fish and herbs with vendor_buy_price > 0 use AH price, not NPC buy (R30)."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                # Wild fish & herbs (have vendor_buy_price in some DB dumps, but are NOT in whitelist)
+                (13759, "Raw Nightfin Snapper", 1, 100, 450),
+                (13464, "Golden Sansam", 1, 50, 250),
+                # Genuine vendor materials (present in VENDOR_REAGENTS_WHITELIST)
+                (2320, "Coarse Thread", 1, 5, 100),
+                (3371, "Empty Vial", 1, 2, 50),
+                # Crafted products
+                (13931, "Nightfin Soup", 1, 200, 0),
+                (13444, "Major Healing Potion", 1, 200, 0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                # Raw resources have high AH prices
+                (13759, "Everlook", 5000, now),
+                (13464, "Everlook", 3000, now),
+                # Crafted items sell on AH
+                (13931, "Everlook", 10000, now),
+                (13444, "Everlook", 8000, now),
+                # Note: vendor items 2320 and 3371 have NO AH snapshots!
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (501, "Nightfin Soup Recipe", "Cooking", 13931, 1.0),
+                (502, "Major Healing Potion Recipe", "Alchemy", 13444, 1.0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                # 501: 1x Raw Nightfin Snapper + 1x Coarse Thread
+                (501, 13759, 13759, 1, 1),
+                (501, 2320, 2320, 1, 1),
+                # 502: 1x Golden Sansam + 1x Empty Vial
+                (502, 13464, 13464, 1, 1),
+                (502, 3371, 3371, 1, 1),
+            ]
+        )
+
+    results = get_crafting_margins(memory_db, has_bartering=True, has_master_chef=False)
+    assert len(results) == 2
+
+    # Verify Recipe 501 (Cooking with wild fish)
+    r501 = next(r for r in results if r["recipe_id"] == 501)
+    # Expected cost: 13759 is AH price 5000 (NOT 450*0.95=427.5), 2320 is vendor price 100*0.95=95.0
+    # Total cost = 5000 + 95 = 5095.0
+    assert r501["cost"] == 5095.0
+    reagents_501 = {rg["item_id"]: rg for rg in r501["reagents"]}
+    assert reagents_501[13759]["is_vendor"] is False
+    assert reagents_501[13759]["unit_cost"] == 5000.0
+    assert reagents_501[2320]["is_vendor"] is True
+    assert reagents_501[2320]["unit_cost"] == 95.0
+
+    # Verify Recipe 502 (Alchemy with wild herb)
+    r502 = next(r for r in results if r["recipe_id"] == 502)
+    # Expected cost: 13464 is AH price 3000 (NOT 250*0.95=237.5), 3371 is vendor price 50*0.95=47.5
+    # Total cost = 3000 + 47.5 = 3047.5
+    assert r502["cost"] == 3047.5
+    reagents_502 = {rg["item_id"]: rg for rg in r502["reagents"]}
+    assert reagents_502[13464]["is_vendor"] is False
+    assert reagents_502[13464]["unit_cost"] == 3000.0
+    assert reagents_502[3371]["is_vendor"] is True
+    assert reagents_502[3371]["unit_cost"] == 47.5
+
+
+def test_crafting_margins_ah_deposit_fee(memory_db):
+    """Verify AH deposit fee deduction: max(15, int(v_sell * 0.05)) (R31)."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                # Product 6001: vendor_sell = 100 -> 5% = 5 < 15 -> deposit is 15 copper
+                (6001, "Low Vendor Sell Product", 1, 100, 0),
+                (6002, "Reagent A", 1, 5, 0),
+                # Product 6003: vendor_sell = 2000 -> 5% = 100 > 15 -> deposit is 100 copper
+                (6003, "High Vendor Sell Product", 1, 2000, 0),
+                (6004, "Reagent B", 1, 5, 0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                # AH prices
+                (6001, "Everlook", 500, now),
+                (6002, "Everlook", 200, now),
+                (6003, "Everlook", 2000, now),
+                (6004, "Everlook", 800, now),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (601, "Low Sell Recipe", "Tailoring", 6001, 1.0),
+                (602, "High Sell Recipe", "Tailoring", 6003, 1.0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (601, 6002, 6002, 1, 1),
+                (602, 6004, 6004, 1, 1),
+            ]
+        )
+
+    # 1. With AH deposit fee enabled (default)
+    res_with = get_crafting_margins(memory_db, include_ah_deposit=True)
+    r601_with = next(r for r in res_with if r["recipe_id"] == 601)
+    # Revenue = 500 * 0.95 = 475.0, Cost = 200.0, Deposit = max(15, int(100*0.05)) = 15
+    # Profit = 475 - 200 - 15 = 260.0
+    assert r601_with["deposit"] == 15
+    assert r601_with["deposit_copper"] == 15
+    assert r601_with["profit"] == 260.0
+
+    r602_with = next(r for r in res_with if r["recipe_id"] == 602)
+    # Revenue = 2000 * 0.95 = 1900.0, Cost = 800.0, Deposit = max(15, int(2000*0.05)) = 100
+    # Profit = 1900 - 800 - 100 = 1000.0
+    assert r602_with["deposit"] == 100
+    assert r602_with["deposit_copper"] == 100
+    assert r602_with["profit"] == 1000.0
+
+    # 2. With AH deposit fee disabled
+    res_without = get_crafting_margins(memory_db, include_ah_deposit=False)
+    r601_no = next(r for r in res_without if r["recipe_id"] == 601)
+    assert r601_no["deposit"] == 0
+    assert r601_no["profit"] == 275.0
+    assert r601_no["profit"] - r601_with["profit"] == 15.0
+
+    r602_no = next(r for r in res_without if r["recipe_id"] == 602)
+    assert r602_no["deposit"] == 0
+    assert r602_no["profit"] == 1100.0
+    assert r602_no["profit"] - r602_with["profit"] == 100.0
+
+
+def test_waylaid_crates_economy_and_raw_resources(memory_db):
+    """Verify Waylaid Crates model: target_item_count, reward_copper, and raw-resource crates 211501-211507 (R34)."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (
+                   item_id, name, quality, vendor_sell_price, vendor_buy_price,
+                   target_item_id, target_item_count, reward_copper, category
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                # 1. Crafted item and its Waylaid Crate
+                (7001, "Target Heavy Belt", 1, 50, 0, None, 0, 0, None),
+                (7002, "Heavy Leather", 1, 10, 0, None, 0, 0, None),
+                (7010, "Waylaid Shipment: Heavy Belts", 2, 0, 0, 7001, 5, 12000, "waylaid_crate"),
+
+                # 2. Raw-resource item and its crate (211501: Copper Bars, no crafting recipe)
+                (2840, "Copper Bar", 1, 10, 0, None, 0, 0, None),
+                (211501, "Waylaid Supplies: Copper Bars", 1, 100, 0, 2840, 20, 500, "waylaid_crate"),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                # Crafted belt AH price = 1000, reagent = 400
+                (7001, "Everlook", 1000, now),
+                (7002, "Everlook", 400, now),
+                # Raw Copper Bar AH price = 15
+                (2840, "Everlook", 15, now),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (701, "Heavy Belt Recipe", "Leatherworking", 7001, 1.0),
+                # Notice: NO recipe in DB for Copper Bar (2840) or crate 211501!
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (701, 7002, 7002, 1, 1),
+            ]
+        )
+
+    results = get_crafting_margins(memory_db, min_roi=0.25)
+
+    # 1. Verify crafted item crate (7010)
+    r_crafted = next((r for r in results if r["recipe_id"] == 701), None)
+    assert r_crafted is not None
+    assert r_crafted["is_waylaid_target"] is True
+    assert r_crafted["waylaid_crate_id"] == 7010
+    assert r_crafted["target_item_count"] == 5
+    assert r_crafted["reward_copper"] == 12000
+    # Pack cost: 5 * 400 = 2000
+    assert r_crafted["pack_cost"] == 2000.0
+    # Pack revenue on AH: 5 * 1000 * 0.95 = 4750
+    assert r_crafted["pack_revenue"] == 4750.0
+    # Turn-in profit vs AH: 12000 - 4750 = 7250
+    assert r_crafted["turnin_profit"] == 7250.0
+    assert r_crafted["waylaid_crate"]["turnin_profit"] == 7250.0
+
+    # 2. Verify raw-resource crate (211501)
+    r_raw = next((r for r in results if r.get("waylaid_crate_id") == 211501), None)
+    assert r_raw is not None
+    assert r_raw["recipe_id"] is None
+    assert r_raw["profession"] == "Gathering"
+    assert r_raw["crafted_item_id"] == 2840
+    assert r_raw["target_item_count"] == 20
+    assert r_raw["reward_copper"] == 500
+    # Pack cost: 20 * 15 = 300
+    assert r_raw["pack_cost"] == 300.0
+    # Pack revenue on AH: 20 * 15 * 0.95 = 285
+    assert r_raw["pack_revenue"] == 285.0
+    # Turn-in profit vs AH: 500 - 285 = 215
+    assert r_raw["turnin_profit"] == 215.0
+    assert r_raw["is_waylaid_target"] is True
+    # Reagent details
+    assert len(r_raw["reagents"]) == 1
+    assert r_raw["reagents"][0]["item_id"] == 2840
+    assert r_raw["reagents"][0]["count"] == 20
+    assert r_raw["reagents"][0]["is_vendor"] is False
+
+    # 3. Verify get_waylaid_crate_arbitrage helper
+    crate_arb = get_waylaid_crate_arbitrage(memory_db)
+    crate_ids = {c["waylaid_crate_id"] for c in crate_arb}
+    assert 7010 in crate_ids
+    assert 211501 in crate_ids
