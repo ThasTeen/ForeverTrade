@@ -7,9 +7,38 @@
 
 | Команда | Что делает |
 |---------|------------|
-| `pip install -r requirements.txt` | Установить зависимости |
-| `python -m pytest` | Запустить тесты |
-| `python run_watcher.py` | Запустить мониторинг и ETL |
+| `pip install -r requirements.txt` | Установить зависимости проекта |
+| `python run_watcher.py` | Запустить фоновый мониторинг файлов, ETL и генератор дашборда |
+| `python -m pytest` | Запустить полный тестовый набор |
+| `python -m pytest tests/test_database.py` | Запустить один конкретный тестовый модуль |
+
+## Архитектура
+
+Подробное описание схемы БД, ETL-конвейера, математических формул с перками Forever и AI-клиента находится в [`docs/architecture.md`](file:///d:/ai%20project/Forever%20Trade/docs/architecture.md).
+
+## Где что
+
+- `run_watcher.py` — Главная входная точка демона: инициализация БД, загрузка каталога и рецептов, разовый расчет аналитики, запуск фонового `watchdog` для `Auctionator.lua`.
+- `src/database.py` — Схема SQLite (`market.db`, WAL, foreign keys), таблицы `items`, `price_snapshots`, `recipes`, `recipe_reagents`, составные индексы, загрузка каталога Era 1.15 и оверрайдов Forever, ротация старых снимков (`prune_snapshots`).
+- `src/etl.py` — Мониторинг файлов (`watchdog`), безопасный парсер `luadata` без `eval()`, отказоустойчивый fallback на `.bak`, нормализация строковых `itemId` (`normalize_item_id`), 10-минутная дедупликация цен и батч-инжест в `price_snapshots`.
+- `src/analytics.py` — Аналитический движок: расчет мгновенного вендорного арбитража ($\ge 50$ меди), маржинальности крафта (скидка $5\%$ Bartering, выход $1.1\times$ Master Chef для кулинарии, $5\%$ комиссия аукциона, $\text{ROI} \ge 25\%$, учет Waylaid Crates), статистический снайпинг Z-score ($Z \le -1.8$ `STRONG_BUY`, $Z \ge 1.6$ `STRONG_SELL`).
+- `src/dashboard.py` — Генератор автономного HTML-дашборда `portal.html` с 3 блоками рыночных сигналов, интерактивными графиками Plotly.js, форматированием валюты (`g/s/c`) и звуковыми нотификациями об арбитраже $> 1\text{g}$.
+- `src/ai_advisor.py` — Тактический AI-ассистент: сбор компактного рыночного контекста (топ-3), клиент `AntigravityManagerClient` (`gemini-3.8-flash-high`) и детерминированный эвристический fallback при отсутствии сети/ключа.
+- `data/items_era_1_15.json` — Базовый каталог предметов Classic Era 1.15.
+- `forever_overrides.json` — Специфичные данные сервера Forever (контейнеры Waylaid Crates, целевые предметы, награды и кастомные цены).
+- `tests/` — Набор модульных тестов pytest (`test_database.py`, `test_etl.py`, `test_analytics.py`, `test_dashboard.py`, `test_ai_advisor.py`).
+
+## Подводные камни
+
+1. **Foreign Keys в SQLite:** В БД включен режим `PRAGMA foreign_keys = ON;`. Таблица `price_snapshots` ссылается на `items(item_id)`. При пакетной вставке новых снимков в `src/etl.py` сначала обязательно выполняется `INSERT OR IGNORE INTO items (item_id, name)` для всех встреченных ID, иначе SQLite выбросит ошибку нарушения внешнего ключа.
+2. **luadata и .bak fallback:** Игровой клиент WoW перезаписывает `Auctionator.lua` при `/reload` или выходе из игры. В момент записи файл может оказаться заблокирован или частично усечен. Парсер в `src/etl.py` обрабатывает ошибки и автоматически переключается на чтение резервной копии `Auctionator.lua.bak` / `Auctionator.bak`. Не заменяйте вызовы `luadata` на `eval()` или регулярные выражения.
+3. **Порт дашборда 10459:** Порт `10459` зарезервирован под фоновый процесс дашборда автопилота (`http://localhost:10459/dashboard.html`). Торговый портал проекта генерируется в виде статичного автономного файла `portal.html` и открывается напрямую в браузере (`file:///...`), не занимая сетевых портов.
+
+## Окружение
+
+Переменные окружения задаются в файле `.env` (образец в `.env.example`):
+- `GEMINI_API_KEY` (или `GOOGLE_API_KEY`) — Ключ Google Generative AI для генерации тактических советов моделью `gemini-3.8-flash-high`. Если ключ не задан, `AntigravityManagerClient` автоматически и прозрачно использует встроенный алгоритмический fallback.
+- `WOW_WTF_PATH` — Путь к папке SavedVariables аккаунта WoW (`WTF/Account/<ACCOUNT>/SavedVariables`), откуда читается `Auctionator.lua`. По умолчанию: `data/`.
 
 ## Как здесь работает Autopilot
 
