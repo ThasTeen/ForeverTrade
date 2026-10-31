@@ -8,19 +8,25 @@ import time
 from typing import Optional
 
 
-def init_db(db_path: str = "market.db") -> sqlite3.Connection:
-    """Initialize SQLite database with required tables and indexes."""
+def get_connection(db_path: str = "market.db") -> sqlite3.Connection:
+    """Create and configure a lightweight SQLite connection."""
     if db_path != ":memory:":
         parent_dir = os.path.dirname(db_path)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     if db_path != ":memory:":
         conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+    return conn
 
+
+def init_schema(conn: sqlite3.Connection) -> None:
+    """Create required tables and indexes on an existing connection."""
     with conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS items (
@@ -52,6 +58,9 @@ def init_db(db_path: str = "market.db") -> sqlite3.Connection:
             CREATE INDEX IF NOT EXISTS idx_snapshots_realm_time
                 ON price_snapshots(realm, timestamp);
 
+            CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp
+                ON price_snapshots(timestamp);
+
             CREATE TABLE IF NOT EXISTS recipes (
                 recipe_id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -72,6 +81,11 @@ def init_db(db_path: str = "market.db") -> sqlite3.Connection:
             );
         """)
 
+
+def init_db(db_path: str = "market.db") -> sqlite3.Connection:
+    """Initialize SQLite database with required tables and indexes."""
+    conn = get_connection(db_path)
+    init_schema(conn)
     return conn
 
 
@@ -134,11 +148,23 @@ def load_catalog(
 
     with conn:
         conn.executemany("""
-            INSERT OR REPLACE INTO items (
+            INSERT INTO items (
                 item_id, name, quality, item_class, item_subclass,
                 vendor_sell_price, vendor_buy_price, target_item_id,
                 target_item_count, reward_copper, category, is_override
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(item_id) DO UPDATE SET
+                name = excluded.name,
+                quality = excluded.quality,
+                item_class = excluded.item_class,
+                item_subclass = excluded.item_subclass,
+                vendor_sell_price = excluded.vendor_sell_price,
+                vendor_buy_price = excluded.vendor_buy_price,
+                target_item_id = excluded.target_item_id,
+                target_item_count = excluded.target_item_count,
+                reward_copper = excluded.reward_copper,
+                category = excluded.category,
+                is_override = excluded.is_override
         """, items_to_upsert)
 
     cursor = conn.cursor()
@@ -563,9 +589,16 @@ def load_recipes(conn: sqlite3.Connection) -> int:
     with conn:
         for r in recipes_data:
             conn.execute("""
-                INSERT OR REPLACE INTO recipes (
+                INSERT INTO recipes (
                     recipe_id, name, profession, crafted_item_id, yield, yield_min, yield_max
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(recipe_id) DO UPDATE SET
+                    name = excluded.name,
+                    profession = excluded.profession,
+                    crafted_item_id = excluded.crafted_item_id,
+                    yield = excluded.yield,
+                    yield_min = excluded.yield_min,
+                    yield_max = excluded.yield_max
             """, (
                 r["recipe_id"],
                 r["name"],
@@ -576,11 +609,17 @@ def load_recipes(conn: sqlite3.Connection) -> int:
                 int(r.get("yield_max", 1))
             ))
 
+            conn.execute("DELETE FROM recipe_reagents WHERE recipe_id = ?", (r["recipe_id"],))
+
             for reagent_id, count in r["reagents"]:
                 conn.execute("""
-                    INSERT OR REPLACE INTO recipe_reagents (
+                    INSERT INTO recipe_reagents (
                         recipe_id, reagent_item_id, reagent_id, count, quantity
                     ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(recipe_id, reagent_item_id) DO UPDATE SET
+                        reagent_id = excluded.reagent_id,
+                        count = excluded.count,
+                        quantity = excluded.quantity
                 """, (
                     r["recipe_id"],
                     int(reagent_id),
@@ -594,22 +633,34 @@ def load_recipes(conn: sqlite3.Connection) -> int:
     return cursor.fetchone()[0]
 
 
-def prune_snapshots(conn: sqlite3.Connection, max_days: int = 30) -> int:
-    """Delete price snapshots older than max_days."""
-    cutoff_epoch = int(time.time()) - int(max_days * 86400)
+def prune_snapshots(conn: sqlite3.Connection, max_days: int = 30, batch_size: int = 5000) -> int:
+    """Delete price snapshots older than max_days in batches."""
+    cutoff_timestamp = int(time.time() - (max_days * 86400))
     cutoff_iso = datetime.datetime.fromtimestamp(
-        cutoff_epoch, tz=datetime.timezone.utc
+        cutoff_timestamp, tz=datetime.timezone.utc
     ).strftime("%Y-%m-%d %H:%M:%S")
 
-    cursor = conn.cursor()
-    cursor.execute("""
-        DELETE FROM price_snapshots
-        WHERE (typeof(timestamp) IN ('integer', 'real') AND timestamp < ?)
-           OR (typeof(timestamp) = 'text' AND timestamp < ?)
-    """, (cutoff_epoch, cutoff_iso))
-    pruned = cursor.rowcount
-    conn.commit()
-    return max(0, pruned)
+    total_deleted = 0
+    while True:
+        cur = conn.execute("""
+            DELETE FROM price_snapshots
+            WHERE rowid IN (
+                SELECT rowid FROM price_snapshots
+                WHERE (typeof(timestamp) IN ('integer', 'real') AND timestamp < ?)
+                   OR (typeof(timestamp) = 'text' AND (
+                       (timestamp LIKE '%-%' AND timestamp < ?)
+                       OR (timestamp NOT LIKE '%-%' AND CAST(timestamp AS INTEGER) < ?)
+                   ))
+                LIMIT ?
+            )
+        """, (cutoff_timestamp, cutoff_iso, cutoff_timestamp, batch_size))
+        deleted = cur.rowcount
+        if deleted <= 0:
+            break
+        total_deleted += deleted
+        conn.commit()
+
+    return total_deleted
 
 
 def get_item(conn: sqlite3.Connection, item_id: int) -> Optional[dict]:

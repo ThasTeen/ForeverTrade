@@ -5,7 +5,15 @@ import sqlite3
 import time
 import pytest
 
-from src.database import init_db, load_catalog, load_recipes, prune_snapshots, get_item
+from src.database import (
+    get_connection,
+    init_db,
+    init_schema,
+    load_catalog,
+    load_recipes,
+    prune_snapshots,
+    get_item,
+)
 
 
 @pytest.fixture
@@ -56,6 +64,7 @@ def test_init_db_creates_tables_and_indexes(memory_db, tmp_path):
     indexes = {row[0] for row in cursor.fetchall()}
     assert "idx_snapshots_item_time" in indexes
     assert "idx_snapshots_realm_time" in indexes
+    assert "idx_snapshots_timestamp" in indexes
 
     cursor.execute("PRAGMA index_info(idx_snapshots_item_time);")
     item_time_cols = [row["name"] for row in cursor.fetchall()]
@@ -64,6 +73,10 @@ def test_init_db_creates_tables_and_indexes(memory_db, tmp_path):
     cursor.execute("PRAGMA index_info(idx_snapshots_realm_time);")
     realm_time_cols = [row["name"] for row in cursor.fetchall()]
     assert realm_time_cols == ["realm", "timestamp"]
+
+    cursor.execute("PRAGMA index_info(idx_snapshots_timestamp);")
+    ts_cols = [row["name"] for row in cursor.fetchall()]
+    assert ts_cols == ["timestamp"]
 
     # Check file-based creation with parent directory and WAL mode
     file_db_path = tmp_path / "nested" / "market.db"
@@ -82,6 +95,35 @@ def test_init_db_foreign_key_enforcement(memory_db):
             "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
             (999999, "Everlook", 500, int(time.time()))
         )
+
+
+def test_get_connection(tmp_path):
+    """Verify get_connection factory sets Row factory, foreign keys, WAL, synchronous, and busy_timeout."""
+    # In-memory connection
+    mem_conn = get_connection(":memory:")
+    try:
+        assert mem_conn.row_factory == sqlite3.Row
+        fk = mem_conn.execute("PRAGMA foreign_keys;").fetchone()[0]
+        assert fk == 1
+    finally:
+        mem_conn.close()
+
+    # File-based connection with parent directory auto-creation
+    db_file = tmp_path / "factory_dir" / "market.db"
+    file_conn = get_connection(str(db_file))
+    try:
+        assert db_file.exists()
+        assert file_conn.row_factory == sqlite3.Row
+        fk = file_conn.execute("PRAGMA foreign_keys;").fetchone()[0]
+        assert fk == 1
+        journal_mode = file_conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        assert journal_mode.lower() == "wal"
+        synchronous = file_conn.execute("PRAGMA synchronous;").fetchone()[0]
+        assert synchronous == 1
+        busy_timeout = file_conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+        assert busy_timeout == 30000
+    finally:
+        file_conn.close()
 
 
 def test_load_catalog_era_and_overrides(memory_db):
@@ -140,6 +182,30 @@ def test_load_catalog_missing_files(memory_db, tmp_path):
         overrides_path=str(tmp_path / "nonexistent_overrides.json")
     )
     assert result == 0
+
+
+def test_load_catalog_upsert_preserves_foreign_keys(memory_db):
+    """Verify load_catalog uses UPSERT so re-inserting items does not violate price_snapshots foreign keys."""
+    # Initial load of catalog
+    load_catalog(memory_db)
+
+    # Insert a child snapshot referencing an existing item (Copper Bar: 2840)
+    now = int(time.time())
+    memory_db.execute(
+        "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+        (2840, "Everlook", 150, now)
+    )
+
+    # Re-run load_catalog: must NOT raise sqlite3.IntegrityError from FK violation
+    count = load_catalog(memory_db)
+    assert count > 0
+
+    # Ensure price snapshot is preserved
+    snapshot = memory_db.execute(
+        "SELECT item_id, price FROM price_snapshots WHERE item_id = 2840"
+    ).fetchone()
+    assert snapshot is not None
+    assert snapshot["price"] == 150
 
 
 def test_load_recipes_five_professions(memory_db):
@@ -236,6 +302,36 @@ def test_prune_snapshots(memory_db):
     # Running prune again when nothing is older should delete 0
     pruned_again = prune_snapshots(memory_db, max_days=30)
     assert pruned_again == 0
+
+
+def test_prune_snapshots_batching(memory_db):
+    """Verify prune_snapshots deletes records in batches using batch_size parameter."""
+    memory_db.execute("INSERT INTO items (item_id, name) VALUES (1, 'Batch Test Item')")
+
+    now = int(time.time())
+    old_ts = now - (40 * 86400)
+    fresh_ts = now - (5 * 86400)
+
+    # Insert 5 old snapshots and 3 fresh snapshots
+    for _ in range(5):
+        memory_db.execute(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            (1, "Everlook", 100, old_ts)
+        )
+    for _ in range(3):
+        memory_db.execute(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            (1, "Everlook", 200, fresh_ts)
+        )
+
+    # Prune with batch_size=2 to test multiple batch loop iterations
+    deleted = prune_snapshots(memory_db, max_days=30, batch_size=2)
+    assert deleted == 5
+
+    remaining = memory_db.execute("SELECT price FROM price_snapshots").fetchall()
+    assert len(remaining) == 3
+    for row in remaining:
+        assert row["price"] == 200
 
 
 def test_get_item(populated_db):
