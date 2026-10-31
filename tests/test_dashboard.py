@@ -540,3 +540,220 @@ def test_build_standalone_dashboard_handles_none_name(memory_db, tmp_path, monke
     assert "Unknown" in html_content
     assert "Recipe" in html_content
     assert "Item" in html_content
+
+
+# ===========================================================================
+# 5. Task 12: UI / UX Enhancements Tests (R42, R43, R44)
+# ===========================================================================
+
+def test_dashboard_i18n_switcher_and_attributes(populated_dashboard_db, tmp_path):
+    """Verify RU/EN language switcher buttons, setLanguage JS function, and i18n data attributes (R42)."""
+    out_file = tmp_path / "i18n_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file))
+
+    # 1. Switcher toggle buttons
+    assert 'id="lang-ru"' in html_content
+    assert 'id="lang-en"' in html_content
+    assert "onclick=\"setLanguage('ru')\"" in html_content
+    assert "onclick=\"setLanguage('en')\"" in html_content
+    assert 'class="lang-btn active"' in html_content
+
+    # 2. JS function setLanguage presence and implementation
+    assert "function setLanguage(lang)" in html_content
+    assert "localStorage.getItem('ft_lang')" in html_content
+    assert "localStorage.setItem('ft_lang', lang)" in html_content
+    assert "document.querySelectorAll('[data-' + lang + ']')" in html_content
+    assert "document.querySelectorAll('[data-' + lang + '-placeholder]')" in html_content
+
+    # 3. i18n data attributes on headers and UI elements
+    # Brand subtitle
+    assert 'data-ru="Автономный аналитический портал и торговый навигатор WoW: Forever"' in html_content
+    assert 'data-en="Autonomous analytical portal & market navigator for WoW: Forever"' in html_content
+
+    # Stat pills
+    assert 'data-ru="Вендорный арбитраж:"' in html_content
+    assert 'data-en="Vendor Arbitrage:"' in html_content
+
+    # Table headers (th elements)
+    assert 'data-ru="Предмет" data-en="Item"' in html_content
+    assert 'data-ru="Выкуп (AH)" data-en="Buyout (AH)"' in html_content
+    assert 'data-ru="Себестоимость" data-en="Craft Cost"' in html_content
+    assert 'data-ru="Текущая цена" data-en="Current Price"' in html_content
+
+    # Category filter buttons
+    assert 'data-ru="Все" data-en="All"' in html_content
+    assert 'data-ru="Сырье" data-en="Trade Goods"' in html_content
+
+    # Search placeholder data attributes
+    assert 'data-ru-placeholder="Поиск предмета..."' in html_content
+    assert 'data-en-placeholder="Search item..."' in html_content
+
+    # 4. Item name spans in tables: <span class="item-name i18n" data-ru="..." data-en="...">
+    item_span_pattern = re.compile(
+        r'<span\s+class=[\'"][^\'"]*item-name[^\'"]*i18n[^\'"]*[\'"]\s+data-ru=[\'"][^\'"]+[\'"]\s+data-en=[\'"][^\'"]+[\'"]>'
+    )
+    matches = item_span_pattern.findall(html_content)
+    assert len(matches) >= 3, f"Expected item-name spans with data-ru and data-en in tables, found {len(matches)}"
+
+    # Specific items check
+    assert 'data-ru="Golden Diamond"' in html_content
+    assert 'data-ru="Heavy Copper Broadsword"' in html_content
+    assert 'data-ru="Peacebloom"' in html_content
+
+
+def test_dashboard_one_click_copy_name_button(populated_dashboard_db, tmp_path):
+    """Verify 1-click item name copy button, copyItemName JS logic, and clipboard writeText (R43)."""
+    out_file = tmp_path / "copy_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file))
+
+    # 1. Presence of .copy-btn buttons alongside item names in table rows
+    assert "class='copy-btn'" in html_content or 'class="copy-btn"' in html_content
+    assert "onclick='copyItemName(this, event)'" in html_content or 'onclick="copyItemName(this, event)"' in html_content
+    copy_btns_count = html_content.count("copyItemName(this, event)")
+    # Must have copy buttons for rows + 1 in the inspector modal
+    assert copy_btns_count >= 4
+
+    # 2. Modal header copy button
+    assert 'id="modal-copy-btn"' in html_content
+
+    # 3. JS function copyItemName and clipboard API integration
+    assert "function copyItemName(btn, event)" in html_content
+    assert "navigator.clipboard.writeText(textToCopy)" in html_content
+    assert "event.stopPropagation()" in html_content
+
+    # 4. Fallback for non-secure contexts / legacy browsers
+    assert "function fallbackCopy(text, cb)" in html_content
+    assert "document.execCommand('copy')" in html_content
+
+    # 5. Visual copy feedback and localized text
+    assert "btn.classList.add('copied')" in html_content
+    assert "✓ Скопировано!" in html_content
+    assert "✓ Copied!" in html_content
+    assert "setTimeout" in html_content
+
+
+def test_dashboard_item_inspector_modal_structure(populated_dashboard_db, tmp_path):
+    """Verify structure and controls of dedicated item inspector modal (R44)."""
+    out_file = tmp_path / "modal_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file))
+
+    # 1. Modal container and backdrop
+    assert 'id="item-modal"' in html_content
+    assert 'class="modal-backdrop"' in html_content
+    assert 'class="modal-content"' in html_content
+
+    # 2. Header and close buttons
+    assert 'id="modal-item-name"' in html_content
+    assert 'class="modal-close-btn"' in html_content
+    assert 'onclick="closeItemModal()"' in html_content
+
+    # 3. Dedicated stat cards in modal
+    assert 'id="modal-stat-current"' in html_content
+    assert 'id="modal-stat-mean"' in html_content
+    assert 'id="modal-stat-min"' in html_content
+    assert 'id="modal-stat-max"' in html_content
+    assert 'id="modal-stat-zscore"' in html_content
+
+    # 4. Chart container inside modal
+    assert 'id="modal-plot-container"' in html_content
+
+    # 5. Row clickability and graph button
+    assert "class='clickable-row'" in html_content or 'class="clickable-row"' in html_content
+    assert "onRowClick(event," in html_content
+    assert "class='graph-btn'" in html_content or 'class="graph-btn"' in html_content
+    assert "openItemModal(" in html_content
+
+    # 6. JS functions in script
+    assert "function openItemModal(itemId, event)" in html_content
+    assert "function closeItemModal()" in html_content
+    assert "function onRowClick(event, itemId)" in html_content
+    assert "function onModalBackdropClick(event)" in html_content
+
+
+def test_dashboard_category_filtering_and_item_selector(populated_dashboard_db, tmp_path):
+    """Verify category filtering buttons, item dropdown selector, and ITEM_STORE JSON (R44)."""
+    out_file = tmp_path / "filters_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file))
+
+    # 1. Category filter buttons
+    categories = ["all", "trade_goods", "consumables", "weapons", "armor", "waylaid_crates"]
+    for cat in categories:
+        assert f'data-cat="{cat}"' in html_content
+        assert f"filterCategory('{cat}')" in html_content
+
+    # 2. Search input & dropdown
+    assert 'id="item-search-input"' in html_content
+    assert 'id="item-select"' in html_content
+    assert 'oninput="onItemSearch(this.value)"' in html_content
+    assert 'onchange="onSelectDropdownItem(this.value)"' in html_content
+
+    # 3. Dropdown options have necessary metadata
+    assert 'data-category=' in html_content
+    assert 'data-search=' in html_content
+
+    # 4. JS functions for filtering and selection
+    assert "function filterCategory(cat)" in html_content
+    assert "function onItemSearch(query)" in html_content
+    assert "function applyItemSelectFilter()" in html_content
+    assert "function onSelectDropdownItem(val)" in html_content
+
+    # 5. ITEM_STORE embedded data
+    match = re.search(r'var ITEM_STORE = (\{.*?\});\n', html_content)
+    if not match:
+        match = re.search(r'var ITEM_STORE = (\{.*?\});', html_content)
+    assert match is not None, "ITEM_STORE JSON variable not found in generated HTML"
+    store_json_str = match.group(1)
+    store_data = json.loads(store_json_str)
+
+    # Verify keys exist and contain items from test db (101, 102, 201, 202, 401)
+    assert "101" in store_data or 101 in store_data
+    assert "401" in store_data or 401 in store_data
+    peacebloom_entry = store_data.get("401") or store_data.get(401)
+    assert peacebloom_entry is not None
+    assert "Peacebloom" in peacebloom_entry.get("name_ru", "") or "Peacebloom" in peacebloom_entry.get("name_en", "")
+    assert len(peacebloom_entry.get("points", [])) == 16
+    assert "z_score" in peacebloom_entry
+    assert "current_price" in peacebloom_entry
+    assert "mean_price" in peacebloom_entry
+
+
+def test_dashboard_item_modal_empty_snapshots_state(memory_db, tmp_path, monkeypatch):
+    """Verify modal and overview chart handle items with 0 price snapshots gracefully without JS errors (R44)."""
+    # Insert an item with 0 price snapshots
+    with memory_db:
+        memory_db.execute(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (777, "Snapshotless Herb", 1, 7, "herb", 100, 0),
+        )
+
+    # Mock signal returning item 777 with no snapshots in price_snapshots table
+    monkeypatch.setattr(
+        "src.dashboard.get_vendor_arbitrage",
+        lambda conn, realm=None: [
+            {"item_id": 777, "name": "Snapshotless Herb", "buyout_price": 50, "vendor_sell_price": 100, "profit_copper": 50, "realm": "Everlook", "quality": 1}
+        ],
+    )
+
+    out_file = tmp_path / "empty_item_portal.html"
+    html_content = build_standalone_dashboard(memory_db, output_path=str(out_file))
+
+    # Verify ITEM_STORE has this item with empty points
+    match = re.search(r'var ITEM_STORE = (\{.*?\});\n', html_content)
+    if not match:
+        match = re.search(r'var ITEM_STORE = (\{.*?\});', html_content)
+    assert match is not None
+    store_data = json.loads(match.group(1))
+
+    item_777 = store_data.get("777") or store_data.get(777)
+    assert item_777 is not None
+    assert item_777.get("points") == []
+    assert item_777.get("current_price") == 0
+    assert item_777.get("sample_count") == 0
+
+    # Verify that modal rendering logic includes graceful fallback message for 0 points
+    empty_msg_ru = "База данных ожидает первого снимка цен из Auctionator.lua..."
+    empty_msg_en = "Waiting for first price snapshot from Auctionator.lua..."
+    assert empty_msg_ru in html_content
+    assert empty_msg_en in html_content
+
