@@ -1,0 +1,6 @@
+pytest
+luadata
+watchdog
+pandas
+numpy
+plotly
