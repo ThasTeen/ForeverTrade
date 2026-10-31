@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
 import urllib.error
 import urllib.request
 from typing import Any, Optional
@@ -155,6 +156,13 @@ class AntigravityManagerClient:
         If network or key is unavailable, seamlessly falls back to heuristic generation.
         """
         if not self.api_key:
+            try:
+                return self._call_agy_cli(context)
+            except Exception as exc:
+                logger.warning(
+                    "AntigravityManagerClient: agy CLI call failed (%s). Falling back to heuristic.",
+                    exc,
+                )
             logger.info("AntigravityManagerClient: No API key set. Using deterministic heuristic generator.")
             return self.generate_heuristic_advice(context)
 
@@ -230,8 +238,7 @@ class AntigravityManagerClient:
             candidates = parsed.get("candidates", [])
             if candidates:
                 text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                clean = self._clean_code_fence(text)
-                advice_data = json.loads(clean)
+                advice_data = self._parse_json_payload(text)
             else:
                 advice_data = parsed
         else:
@@ -239,9 +246,59 @@ class AntigravityManagerClient:
 
         return self._format_and_validate(advice_data, fallback_context=context)
 
+    def _call_agy_cli(self, context: dict) -> dict:
+        """Call local Antigravity CLI (agy) to generate market advice."""
+        system_prompt = (
+            "Ты — тактический рыночный AI-ассистент World of Warcraft: Forever.\n"
+            "На основе входного рыночного среза (вендорный арбитраж, маржинальный крафт под ящики Waylaid Crates, "
+            "ценовые сбросы сырья) сформируй строгий оперативный чек-лист действий игрока на сессию.\n"
+            "Верни ответ строго в формате JSON:\n"
+            "{\n"
+            '  "title": "Тактический план торговой сессии",\n'
+            '  "summary": "Краткое резюме ситуации на рынке",\n'
+            f'  "model": "{self.model}",\n'
+            '  "actions": [\n'
+            '    {\n'
+            '      "step": 1,\n'
+            '      "category": "vendor_arbitrage" | "waylaid_crafting" | "price_dump",\n'
+            '      "action": "Конкретное действие (выкуп, крафт, закупка впрок)",\n'
+            '      "target": "Название предмета",\n'
+            '      "expected_profit": "Ожидаемая выгода",\n'
+            '      "priority": "HIGH" | "MEDIUM" | "LOW"\n'
+            '    }\n'
+            '  ]\n'
+            "}"
+        )
+        prompt = (
+            f"{system_prompt}\n\n"
+            f"Рыночный контекст:\n{json.dumps(context, ensure_ascii=False, indent=2)}\n\n"
+            "Верни ответ строго в формате JSON."
+        )
+
+        cmd = ["agy", "-p", prompt, "--model", self.model]
+        res = subprocess.run(
+            cmd,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            encoding="utf-8",
+        )
+        if res.returncode != 0:
+            raise RuntimeError(f"agy CLI failed with exit code {res.returncode}: {res.stderr}")
+
+        output = res.stdout.strip()
+        if not output:
+            raise ValueError("agy CLI returned empty output")
+
+        advice_data = self._parse_json_payload(output)
+        return self._format_and_validate(advice_data, fallback_context=context)
+
     @staticmethod
     def _clean_code_fence(text: str) -> str:
         text = text.strip()
+        if text.startswith("[c4]"):
+            text = text[4:].strip()
         if text.startswith("```"):
             lines = text.splitlines()
             if lines[0].startswith("```"):
@@ -250,6 +307,17 @@ class AntigravityManagerClient:
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
         return text
+
+    def _parse_json_payload(self, text: str) -> dict:
+        clean = self._clean_code_fence(text)
+        try:
+            return json.loads(clean)
+        except json.JSONDecodeError:
+            start_idx = clean.find("{")
+            end_idx = clean.rfind("}")
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                return json.loads(clean[start_idx : end_idx + 1])
+            raise
 
     def generate_heuristic_advice(self, context: dict) -> dict:
         """Deterministic heuristic generator producing actionable checklist from context."""

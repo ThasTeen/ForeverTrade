@@ -5,6 +5,7 @@ import os
 import sqlite3
 import threading
 import time
+from unittest.mock import MagicMock
 
 import pytest
 from watchdog.events import FileModifiedEvent
@@ -400,3 +401,156 @@ class TestWatcherEngine:
         assert len(rows) == 1
         assert rows[0][0] == 2589
         assert rows[0][1] == 7777
+
+    def test_auctionator_event_handler_callback_invoked(self, tmp_path):
+        """Verify AuctionatorEventHandler invokes callback with (target_file, count) on successful ingest."""
+        watch_dir = tmp_path / "SavedVariables"
+        watch_dir.mkdir()
+        target_file = watch_dir / "Auctionator.lua"
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        callback_mock = MagicMock()
+        handler = AuctionatorEventHandler(
+            target_filename="Auctionator.lua",
+            full_target_path=str(target_file),
+            db_path=db_path,
+            realm="Everlook",
+            debounce_seconds=0.01,
+            callback=callback_mock,
+        )
+
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["2589:0:0:0:0"] = { ["mr"] = 5555 },\n'
+            '    ["1205:0:0:0:0"] = { ["mr"] = 1234 }\n'
+            '  }\n'
+            '}\n'
+        )
+        target_file.write_text(lua_content, encoding="utf-8")
+
+        handler._trigger_etl(str(target_file))
+
+        callback_mock.assert_called_once_with(str(target_file), 2)
+
+    def test_auctionator_event_handler_callback_not_called_on_zero_ingest(self, tmp_path):
+        """Verify callback is not invoked when count is 0."""
+        watch_dir = tmp_path / "SavedVariables"
+        watch_dir.mkdir()
+        target_file = watch_dir / "Auctionator.lua"
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        callback_mock = MagicMock()
+        handler = AuctionatorEventHandler(
+            target_filename="Auctionator.lua",
+            full_target_path=str(target_file),
+            db_path=db_path,
+            realm="Everlook",
+            debounce_seconds=0.01,
+            callback=callback_mock,
+        )
+
+        target_file.write_text("AUCTIONATOR_PRICE_DATABASE = {}", encoding="utf-8")
+
+        handler._trigger_etl(str(target_file))
+        assert not callback_mock.called
+
+    def test_auctionator_event_handler_callback_exception_handled(self, tmp_path):
+        """Verify that an exception inside the callback does not crash the event handler."""
+        watch_dir = tmp_path / "SavedVariables"
+        watch_dir.mkdir()
+        target_file = watch_dir / "Auctionator.lua"
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        failing_callback = MagicMock(side_effect=RuntimeError("Portal rebuild failed"))
+        handler = AuctionatorEventHandler(
+            target_filename="Auctionator.lua",
+            full_target_path=str(target_file),
+            db_path=db_path,
+            realm="Everlook",
+            debounce_seconds=0.01,
+            callback=failing_callback,
+        )
+
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["2589:0:0:0:0"] = { ["mr"] = 5555 }\n'
+            '  }\n'
+            '}\n'
+        )
+        target_file.write_text(lua_content, encoding="utf-8")
+
+        # Must not raise exception
+        handler._trigger_etl(str(target_file))
+        failing_callback.assert_called_once_with(str(target_file), 1)
+
+    def test_start_watcher_recursive_nested_directories(self, tmp_path):
+        """Verify start_watcher schedules a recursive observer that handles nested directory files."""
+        root_watch_dir = tmp_path / "WTF"
+        nested_dir = root_watch_dir / "Account" / "TEST_ACC" / "SavedVariables"
+        nested_dir.mkdir(parents=True)
+        nested_file = nested_dir / "Auctionator.lua"
+
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        callback_mock = MagicMock()
+        observer = start_watcher(
+            str(root_watch_dir),
+            db_path=db_path,
+            realm="Everlook",
+            stop_event=None,
+            callback=callback_mock,
+        )
+
+        try:
+            # 1. Verify observer was scheduled with recursive=True on root_watch_dir
+            watches = list(observer._watches)
+            assert len(watches) >= 1
+            watch = watches[0]
+            assert watch.is_recursive is True
+            assert os.path.abspath(str(root_watch_dir)) == os.path.abspath(watch.path)
+
+            # 2. Verify event handler associated with observer handles nested file events
+            handlers = list(observer._handlers[watch])
+            assert len(handlers) >= 1
+            handler = handlers[0]
+            assert isinstance(handler, AuctionatorEventHandler)
+            assert handler.callback == callback_mock
+
+            # Write valid data to the nested file
+            lua_content = (
+                'AUCTIONATOR_PRICE_DATABASE = {\n'
+                '  ["Everlook"] = {\n'
+                '    ["3001:0:0:0:0"] = { ["mr"] = 8888 }\n'
+                '  }\n'
+                '}\n'
+            )
+            nested_file.write_text(lua_content, encoding="utf-8")
+
+            # Simulate modified event on nested path
+            event = FileModifiedEvent(str(nested_file))
+            handler.on_modified(event)
+
+            # Verify DB ingestion from nested path
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT item_id, price FROM price_snapshots WHERE item_id = 3001")
+            row = cur.fetchone()
+            conn.close()
+
+            assert row is not None
+            assert row[0] == 3001
+            assert row[1] == 8888
+
+            # Verify callback received the nested file path and count
+            callback_mock.assert_called_once_with(str(nested_file), 1)
+
+        finally:
+            observer.stop()
+            observer.join(timeout=2.0)
+

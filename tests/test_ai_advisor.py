@@ -31,6 +31,14 @@ from src.dashboard import build_standalone_dashboard
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _default_mock_agy_unavailable(monkeypatch):
+    """By default, simulate agy CLI unavailable to avoid unmocked 15s subprocess hangs in offline tests."""
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("Mock: agy CLI not available by default in tests")
+    monkeypatch.setattr("src.ai_advisor.subprocess.run", fake_run)
+
+
 @pytest.fixture
 def memory_db():
     """Provide a fresh in-memory SQLite database connection."""
@@ -476,6 +484,127 @@ def test_antigravity_client_corrupted_response_fallback():
         assert isinstance(advice, dict)
         assert len(advice["actions"]) == 1
         assert advice["actions"][0]["target"] == "Fallback Item"
+
+
+def test_antigravity_client_call_agy_cli_success():
+    """Verify _call_agy_cli parses [c4] prefix and markdown json code blocks cleanly."""
+    context = {
+        "realm": "Everlook",
+        "vendor_arbitrage": [
+            {"item_id": 101, "name": "Golden Diamond", "profit_copper": 13000, "buyout_price": 2000, "vendor_sell_price": 15000}
+        ],
+        "waylaid_crafting": [],
+        "price_anomalies": [],
+    }
+
+    mock_agy_output = (
+        "[c4]\n"
+        "```json\n"
+        "{\n"
+        '  "title": "Тактический план торговой сессии",\n'
+        '  "summary": "Рынок стабилен, обнаружен прибыльный вендорный арбитраж.",\n'
+        '  "model": "gemini-3.8-flash-high",\n'
+        '  "actions": [\n'
+        '    {\n'
+        '      "step": 1,\n'
+        '      "category": "vendor_arbitrage",\n'
+        '      "action": "Выкупить Golden Diamond на аукционе и продать вендору",\n'
+        '      "target": "Golden Diamond",\n'
+        '      "expected_profit": "+1g 30s",\n'
+        '      "priority": "HIGH"\n'
+        '    }\n'
+        '  ]\n'
+        "}\n"
+        "```\n"
+    )
+
+    mock_res = MagicMock()
+    mock_res.returncode = 0
+    mock_res.stdout = mock_agy_output
+    mock_res.stderr = ""
+
+    with patch("src.ai_advisor.subprocess.run", return_value=mock_res) as mock_run:
+        client = AntigravityManagerClient(api_key=None)
+        # 1. Direct invocation of _call_agy_cli
+        advice = client._call_agy_cli(context)
+
+        assert mock_run.called
+        called_cmd = mock_run.call_args[0][0]
+        assert called_cmd[0] == "agy"
+        assert "-p" in called_cmd
+        assert "--model" in called_cmd
+        assert client.model in called_cmd
+
+        assert advice["title"] == "Тактический план торговой сессии"
+        assert advice["summary"] == "Рынок стабилен, обнаружен прибыльный вендорный арбитраж."
+        assert advice["model"] == "gemini-3.8-flash-high"
+        assert len(advice["actions"]) == 1
+        assert advice["actions"][0]["target"] == "Golden Diamond"
+        assert advice["actions"][0]["expected_profit"] == "+1g 30s"
+        assert advice["actions"][0]["priority"] == "HIGH"
+        assert len(advice["checklist"]) == 1
+        assert "Golden Diamond" in advice["checklist"][0]
+
+        # 2. Integration via generate_advice(context) when api_key is None
+        advice_via_gen = client.generate_advice(context)
+        assert advice_via_gen["title"] == "Тактический план торговой сессии"
+        assert len(advice_via_gen["actions"]) == 1
+        assert advice_via_gen["actions"][0]["target"] == "Golden Diamond"
+
+
+def test_antigravity_client_call_agy_cli_fallback_on_failure():
+    """Verify generate_advice falls back to generate_heuristic_advice when agy CLI fails or is missing."""
+    context = {
+        "realm": "Everlook",
+        "vendor_arbitrage": [
+            {"item_id": 101, "name": "Golden Diamond", "profit_copper": 13000, "buyout_price": 2000, "vendor_sell_price": 15000}
+        ],
+        "waylaid_crafting": [],
+        "price_anomalies": [],
+    }
+
+    client = AntigravityManagerClient(api_key=None)
+
+    # 1. agy CLI command not found (FileNotFoundError)
+    with patch("src.ai_advisor.subprocess.run", side_effect=FileNotFoundError("agy not found")):
+        advice = client.generate_advice(context)
+        assert isinstance(advice, dict)
+        assert advice["title"] == "Тактический чек-лист торговой сессии"
+        assert len(advice["actions"]) == 1
+        assert advice["actions"][0]["target"] == "Golden Diamond"
+
+    # 2. agy CLI returns non-zero exit code
+    mock_failed_proc = MagicMock(returncode=1, stdout="", stderr="Error: service unavailable")
+    with patch("src.ai_advisor.subprocess.run", return_value=mock_failed_proc):
+        advice = client.generate_advice(context)
+        assert isinstance(advice, dict)
+        assert advice["title"] == "Тактический чек-лист торговой сессии"
+        assert len(advice["actions"]) == 1
+        assert advice["actions"][0]["target"] == "Golden Diamond"
+
+    # 3. agy CLI returns empty stdout
+    mock_empty_proc = MagicMock(returncode=0, stdout="   \n", stderr="")
+    with patch("src.ai_advisor.subprocess.run", return_value=mock_empty_proc):
+        advice = client.generate_advice(context)
+        assert isinstance(advice, dict)
+        assert advice["title"] == "Тактический чек-лист торговой сессии"
+        assert len(advice["actions"]) == 1
+        assert advice["actions"][0]["target"] == "Golden Diamond"
+
+
+def test_antigravity_client_clean_code_fence_and_json_parsing():
+    """Verify _clean_code_fence and _parse_json_payload handle [c4] prefix and backtick code blocks."""
+    client = AntigravityManagerClient()
+    raw = "[c4]\n```json\n{\"test\": 123}\n```"
+    assert client._parse_json_payload(raw) == {"test": 123}
+
+    # Without code fences, just [c4]
+    raw_no_fence = "[c4] {\"test\": 456}"
+    assert client._parse_json_payload(raw_no_fence) == {"test": 456}
+
+    # Embedded in conversational noise
+    raw_embedded = "Here is the plan:\n[c4]\n```\n{\"test\": 789}\n```\nDone."
+    assert client._parse_json_payload(raw_embedded) == {"test": 789}
 
 
 # ---------------------------------------------------------------------------

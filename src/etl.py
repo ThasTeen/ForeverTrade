@@ -5,7 +5,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import luadata
 from watchdog.events import FileSystemEventHandler
@@ -333,6 +333,7 @@ class AuctionatorEventHandler(FileSystemEventHandler):
         db_path: str,
         realm: str,
         debounce_seconds: float = 0.5,
+        callback: Optional[Callable[[str, int], None]] = None,
     ):
         super().__init__()
         self.target_filename = target_filename.lower()
@@ -340,6 +341,7 @@ class AuctionatorEventHandler(FileSystemEventHandler):
         self.db_path = db_path
         self.realm = realm
         self.debounce_seconds = debounce_seconds
+        self.callback = callback
         self._last_processed = 0.0
         self._lock = threading.Lock()
 
@@ -384,6 +386,11 @@ class AuctionatorEventHandler(FileSystemEventHandler):
                     count,
                     target_file,
                 )
+                if count > 0 and self.callback is not None:
+                    try:
+                        self.callback(target_file, count)
+                    except Exception as cb_err:
+                        logger.error("Watcher callback failed: %s", cb_err, exc_info=True)
             finally:
                 conn.close()
         except Exception as e:
@@ -397,6 +404,7 @@ def start_watcher(
     db_path: str,
     realm: str,
     stop_event: Optional[threading.Event] = None,
+    callback: Optional[Callable[[str, int], None]] = None,
 ) -> Observer:
     """Start background file watcher monitoring Auctionator.lua modifications."""
     if os.path.isdir(watch_path):
@@ -415,13 +423,14 @@ def start_watcher(
         full_target_path=full_target_path,
         db_path=db_path,
         realm=realm,
+        callback=callback,
     )
 
     observer = Observer()
-    observer.schedule(event_handler, path=watch_dir, recursive=False)
+    observer.schedule(event_handler, path=watch_dir, recursive=True)
     observer.start()
     logger.info(
-        "Watcher started monitoring '%s' for '%s' (realm: '%s')",
+        "Watcher started monitoring '%s' for '%s' (realm: '%s', recursive=True)",
         watch_dir,
         target_filename,
         realm,

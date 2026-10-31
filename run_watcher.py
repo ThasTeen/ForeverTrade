@@ -53,9 +53,25 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    def on_snapshot_ingested(file_path: str, count: int):
+        print(f"[*] New market data ingested ({count} snapshots from '{file_path}'). Auto-rebuilding portal...")
+        cb_conn = init_db(args.db)
+        try:
+            cb_context = build_compact_context(cb_conn, realm=args.realm)
+            cb_client = AntigravityManagerClient(model=args.model)
+            cb_advice = generate_market_advice(cb_context, client=cb_client)
+            build_standalone_dashboard(cb_conn, output_path=args.dashboard_out, ai_advice=cb_advice, realm=args.realm)
+            arb_items = get_vendor_arbitrage(cb_conn, realm=args.realm)
+            notify_high_value_arbitrage(arb_items)
+            print(f"[*] Standalone portal updated: {args.dashboard_out}")
+        except Exception as e:
+            print(f"[!] Auto-rebuild portal failed: {e}")
+        finally:
+            cb_conn.close()
+
     print(f"[*] Starting Watcher Engine on: {args.watch_dir}")
     print("[*] Press Ctrl+C to terminate.")
-    observer = start_watcher(args.watch_dir, args.db, args.realm)
+    observer = start_watcher(args.watch_dir, args.db, args.realm, callback=on_snapshot_ingested)
 
     try:
         while not stop_event.is_set():
