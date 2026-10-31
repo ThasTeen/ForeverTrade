@@ -9,44 +9,46 @@
 ## Границы, решённые в спецификации
 
 ### 1. Модуль базы данных (`src/database.py`)
-- **Ответственность:** Схема SQLite, инициализация таблиц, индексов, наполнение базовыми предметами Era 1.15 (`data/items_era_1_15.json`), оверрайдами Forever (`forever_overrides.json`), графом рецептов (5 профессий, включая Кулинарию), и очистка старых снимков.
+- **Ответственность:** Схема SQLite, первичная инициализация структуры (`init_schema`), фабрика соединений с таймаутами и WAL (`get_connection`), наполнение предметами Era 1.15 и оверрайдами Forever через честный UPSERT (`ON CONFLICT DO UPDATE`), загрузка рецептов и батчевая очистка устаревших снимков (`prune_snapshots`).
 - **Публичный интерфейс:**
+  - `init_schema(conn: sqlite3.Connection) -> None`
+  - `get_connection(db_path: str = "market.db") -> sqlite3.Connection`
   - `init_db(db_path: str = "market.db") -> sqlite3.Connection`
   - `load_catalog(conn: sqlite3.Connection, era_catalog_path: str = "data/items_era_1_15.json", overrides_path: str = "forever_overrides.json") -> int`
   - `load_recipes(conn: sqlite3.Connection) -> int`
-  - `prune_snapshots(conn: sqlite3.Connection, max_days: int = 30) -> int`
+  - `prune_snapshots(conn: sqlite3.Connection, max_days: int = 30, batch_size: int = 5000) -> int`
   - `get_item(conn: sqlite3.Connection, item_id: int) -> Optional[dict]`
 - **Скрывает:** DDL строки, детали SQL транзакций.
 
 ### 2. Модуль мониторинга и ETL (`src/etl.py`)
-- **Ответственность:** Конфигурируемый мониторинг пути к файлу `Auctionator.lua`, парсинг Lua-файла (с fallback на `.bak`), нормализация сигнатур `itemId`, дедупликация (окно 10 минут) и батч-инжест в `price_snapshots`.
+- **Ответственность:** Создание каталога SavedVariables при отсутствии, trailing-edge дебаунс (500 мс) с проверкой стабильности размера файла `Auctionator.lua`, парсинг цен из поля `'m'` (Auctionator v341), поддержка экипировки `gr:itemId:suffix`, fallback на `.bak` со штампом времени `mtime` файла (отсечение старше 2 часов), защита от `bool` цен, дедупликация и батч-инжест в `price_snapshots`.
 - **Публичный интерфейс:**
   - `parse_auctionator_data(file_path: str) -> dict`
   - `normalize_item_id(raw_id: str) -> Optional[int]`
-  - `ingest_price_snapshot(conn: sqlite3.Connection, raw_data: dict, realm: str, dedupe_window_minutes: int = 10) -> int`
-  - `start_watcher(watch_path: str, db_path: str, realm: str)` (на базе `watchdog`)
+  - `ingest_price_snapshot(conn: sqlite3.Connection, raw_data: dict, realm: str, dedupe_window_minutes: int = 10, source_mtime: Optional[int] = None) -> int`
+  - `start_watcher(watch_path: str, db_path: str, realm: str, on_snapshot_callback: Optional[Callable] = None)`
 - **Скрывает:** Работу потоков watchdog, десериализацию luadata, форматирование `watcher.log`.
 
 ### 3. Модуль аналитического ядра (`src/analytics.py`)
-- **Ответственность:** Расчет вендорного арбитража, маржинальности крафта (с учетом 5% Bartering, 1.1x Master Chef для кулинарии, 5% аукционной комиссии) и Z-score ценовых аномалий с защитой от деления на 0.
+- **Ответственность:** Расчет вендорного арбитража, маржинальности крафта (с белым списком вендорных реагентов `VENDOR_REAGENTS_WHITELIST`, вычетом AH депозита, разделением AH-комплектов и сдачи ящиков Waylaid Crates) и Z-score ценовых аномалий с выборкой $N \ge 6$ и несмещенной дисперсией.
 - **Публичный интерфейс:**
-  - `get_vendor_arbitrage(conn: sqlite3.Connection, min_profit_copper: int = 50) -> list[dict]`
-  - `get_crafting_margins(conn: sqlite3.Connection, has_bartering: bool = True, has_master_chef: bool = True, min_roi: float = 0.25) -> list[dict]`
-  - `get_zscore_anomalies(conn: sqlite3.Connection, window_size: int = 15, z_buy_threshold: float = -1.8, z_sell_threshold: float = 1.6) -> list[dict]`
+  - `get_vendor_arbitrage(conn: sqlite3.Connection, min_profit_copper: int = 50, realm: Optional[str] = None) -> list[dict]`
+  - `get_crafting_margins(conn: sqlite3.Connection, has_bartering: bool = True, has_master_chef: bool = True, min_roi: float = 0.25, realm: Optional[str] = None) -> list[dict]`
+  - `get_zscore_anomalies(conn: sqlite3.Connection, window_size: int = 15, z_buy_threshold: float = -1.8, z_sell_threshold: float = 1.6, min_samples: int = 6, realm: Optional[str] = None) -> list[dict]`
 - **Скрывает:** Внутренние SQL агрегации и вычисления стандартного отклонения.
 
 ### 4. Модуль дашборда и оповещений (`src/dashboard.py`)
-- **Ответственность:** Генерация автономного HTML-дашборда с 3 блоками сигналов («Вендорный арбитраж», «Крафт под Waylaid Crates», «Аномальные сбросы цен»), графиками динамики цен на сырье и расходники Plotly.js и форматированием валют (g/s/c). Локальные уведомления об арбитраже > 1g.
+- **Ответственность:** Генерация автономного HTML-дашборда с 3 блоками сигналов («Вендорный арбитраж», «Крафт под Waylaid Crates», «Аномальные сбросы цен»), защита от XSS через экранирование `html.escape()` и сериализации Plotly, децимация графиков (топ-8 предметов, <= 300 точек на кривую), безопасное форматирование валют (`OverflowError` handling) и корректный рендер шагов AI-баннера.
 - **Публичный интерфейс:**
-  - `format_currency(copper: int) -> str`
-  - `build_standalone_dashboard(conn: sqlite3.Connection, output_path: str = "portal.html", ai_advice: Optional[dict] = None) -> str`
+  - `format_currency(copper: Any) -> str`
+  - `build_standalone_dashboard(conn: sqlite3.Connection, output_path: str = "portal.html", ai_advice: Optional[dict] = None, realm: Optional[str] = None) -> str`
   - `notify_high_value_arbitrage(arbitrage_items: list[dict], threshold_copper: int = 10000) -> list[dict]`
 - **Скрывает:** Шаблонизацию HTML, сборку графиков Plotly.js в JSON, вызов системных нотификаций.
 
 ### 5. Модуль AI-ассистента (`src/ai_advisor.py`)
-- **Ответственность:** Агрегация компактного среза рыночных данных (топ-3 вендорных, топ-3 маржинальных ящиков, топ-3 ценовых просадок) и формирование структурированного чек-листа сессии через Antigravity Manager / Gemini 3.8.
+- **Ответственность:** Агрегация компактного среза рыночных данных с санитизацией имен и разметкой `<market_data>`, защищенный запуск CLI `agy` через `stdin` (защита от WinError 206), передача API ключа через HTTP header `x-goog-api-key`, надежный эвристический fallback (`_safe_int`, `_safe_float`).
 - **Публичный интерфейс:**
-  - `build_compact_context(conn: sqlite3.Connection) -> dict`
+  - `build_compact_context(conn: sqlite3.Connection, realm: Optional[str] = None) -> dict`
   - `generate_market_advice(context: dict, client: Optional[Any] = None) -> dict`
   - `class AntigravityManagerClient`
 - **Скрывает:** Промптинг LLM, парсинг JSON ответов, эвристический fallback при отсутствии соединения.

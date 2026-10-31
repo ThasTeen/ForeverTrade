@@ -2,7 +2,7 @@ window.STATE =
 {
   "version": 2,
   "slug": "wow-forever-trade",
-  "dir": "2026-10-31-wow-forever-trade",
+  "dir": "2026-10-31-wow-forever-trade--wip",
   "title": "Рыночный аналитический агент WoW: Forever",
   "mode": "full",
   "depth": "normal",
@@ -13,8 +13,8 @@ window.STATE =
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
   "baseCommit": "61181ce",
   "startedAt": "2026-10-31T19:41:42+03:00",
-  "updatedAt": "2026-10-31T21:00:56+03:00",
-  "finishedAt": "2026-10-31T21:00:50+03:00",
+  "updatedAt": "2026-10-31T22:52:41+03:00",
+  "finishedAt": null,
   "stages": [
     {
       "id": "preflight",
@@ -25,51 +25,44 @@ window.STATE =
     {
       "id": "manifest",
       "status": "done",
-      "startedAt": "2026-10-31T19:42:41+03:00",
-      "finishedAt": "2026-10-31T19:43:39+03:00"
+      "startedAt": "2026-10-31T22:46:57+03:00",
+      "finishedAt": "2026-10-31T22:48:43+03:00"
     },
     {
       "id": "briefing",
       "status": "skipped",
-      "startedAt": "2026-10-31T19:43:22+03:00",
-      "finishedAt": "2026-10-31T19:43:22+03:00",
+      "startedAt": "2026-10-31T22:48:40+03:00",
+      "finishedAt": "2026-10-31T22:48:40+03:00",
       "note": "полный автомат — самобрифинг"
     },
     {
       "id": "spec",
       "status": "done",
-      "startedAt": "2026-10-31T19:43:39+03:00",
-      "finishedAt": "2026-10-31T19:48:08+03:00"
+      "startedAt": "2026-10-31T22:48:43+03:00",
+      "finishedAt": "2026-10-31T22:50:12+03:00"
     },
     {
       "id": "plan",
-      "status": "done",
-      "startedAt": "2026-10-31T19:48:08+03:00",
-      "finishedAt": "2026-10-31T19:50:28+03:00"
+      "status": "active",
+      "startedAt": "2026-10-31T22:50:12+03:00"
     },
     {
       "id": "build",
-      "status": "done",
-      "startedAt": "2026-10-31T19:50:28+03:00",
-      "finishedAt": "2026-10-31T20:44:53+03:00"
+      "status": "pending"
     },
     {
       "id": "review",
-      "status": "done",
-      "startedAt": "2026-10-31T20:44:53+03:00",
-      "finishedAt": "2026-10-31T20:51:56+03:00"
+      "status": "pending"
     },
     {
       "id": "final",
-      "status": "done",
-      "startedAt": "2026-10-31T20:51:56+03:00",
-      "finishedAt": "2026-10-31T21:00:50+03:00"
+      "status": "pending"
     }
   ],
   "requirements": {
-    "total": 21,
+    "total": 39,
     "done": 21,
-    "inTicket": 0,
+    "inTicket": 18,
     "inSpec": 0,
     "placeholder": 0,
     "deferred": 0,
@@ -230,6 +223,124 @@ window.STATE =
       "commit": "6eada3a"
     },
     {
+      "id": "06",
+      "title": "Исправление базы данных: UPSERT, фабрика соединений и оптимизация ротации",
+      "requirements": [
+        "R22",
+        "R23",
+        "R24"
+      ],
+      "blockedBy": [
+        "01"
+      ],
+      "wave": 5,
+      "zone": [
+        "src/database.py",
+        "tests/test_database.py"
+      ],
+      "review": "да — фундамент",
+      "model": "сильная",
+      "status": "pending",
+      "retries": 0,
+      "repairs": 0
+    },
+    {
+      "id": "07",
+      "title": "ETL-конвейер: дебаунс, защита бэкапов, формат Auctionator v341 и асинхронный воркер",
+      "requirements": [
+        "R25",
+        "R26",
+        "R27",
+        "R28",
+        "R32",
+        "R33"
+      ],
+      "blockedBy": [
+        "06",
+        "02"
+      ],
+      "wave": 6,
+      "zone": [
+        "src/etl.py",
+        "run_watcher.py",
+        "tests/test_etl.py"
+      ],
+      "review": "нет",
+      "model": "сильная",
+      "status": "pending",
+      "retries": 0,
+      "repairs": 0
+    },
+    {
+      "id": "08",
+      "title": "Математика аналитики: Z-score Самуэльсона, вендорные реагенты, залог аукциона и Waylaid Crates",
+      "requirements": [
+        "R29",
+        "R30",
+        "R31",
+        "R34"
+      ],
+      "blockedBy": [
+        "06",
+        "03"
+      ],
+      "wave": 6,
+      "zone": [
+        "src/analytics.py",
+        "tests/test_analytics.py"
+      ],
+      "review": "да — деньги",
+      "model": "сильная",
+      "status": "pending",
+      "retries": 0,
+      "repairs": 0
+    },
+    {
+      "id": "09",
+      "title": "Дашборд: безопасность от XSS, оптимизация рендера и обработка пограничных случаев",
+      "requirements": [
+        "R35",
+        "R36",
+        "R37",
+        "R39"
+      ],
+      "blockedBy": [
+        "08",
+        "04"
+      ],
+      "wave": 7,
+      "zone": [
+        "src/dashboard.py",
+        "tests/test_dashboard.py"
+      ],
+      "review": "да — безопасность",
+      "model": "сильная",
+      "status": "pending",
+      "retries": 0,
+      "repairs": 0
+    },
+    {
+      "id": "10",
+      "title": "Модуль AI-ассистента: санитизация промпта, stdin в agy CLI и устойчивый fallback",
+      "requirements": [
+        "R38"
+      ],
+      "blockedBy": [
+        "08",
+        "05"
+      ],
+      "wave": 7,
+      "zone": [
+        "src/ai_advisor.py",
+        "tests/test_ai_advisor.py"
+      ],
+      "review": "да — безопасность",
+      "model": "сильная",
+      "status": "pending",
+      "retries": 0,
+      "repairs": 0
+    },
+    {
       "id": "F1",
       "title": "Устранение замечаний сквозного код-ревью",
       "requirements": [
@@ -238,17 +349,17 @@ window.STATE =
         "R12"
       ],
       "blockedBy": [],
-      "wave": 5,
+      "wave": 4,
       "zone": [
         "run_watcher.py"
       ],
       "review": "да — ремонт ветки",
       "model": "сильная",
       "status": "done",
-      "retries": 0,
-      "repairs": 0,
       "startedAt": "2026-10-31T20:49:19+03:00",
       "finishedAt": "2026-10-31T20:51:46+03:00",
+      "retries": 0,
+      "repairs": 0,
       "tests": {
         "passed": 69,
         "failed": 0
@@ -267,24 +378,13 @@ window.STATE =
   },
   "additions": [],
   "coverage": {
-    "found": 6,
-    "fixed": 6,
+    "found": 0,
+    "fixed": 0,
     "deferred": 0,
-    "items": [
-      "R02: источник данных каталога Era 1.15",
-      "R03/R10: связь Waylaid Crates и кулинарные рецепты для Master Chef",
-      "R05: конфигурация пути к Auctionator.lua",
-      "R08: очистка снапшотов старше 30 дней",
-      "R12/R13: детализация графиков сырья и трех секций сигналов",
-      "R16: спецификация клиента Antigravity Manager"
-    ]
+    "items": []
   },
   "concerns": [],
-  "blind": {
-    "checked": 21,
-    "matched": 21,
-    "mismatches": []
-  },
+  "blind": null,
   "beats": [
     "2026-10-31T19:41:42+03:00",
     "2026-10-31T19:42:41+03:00",
@@ -317,9 +417,20 @@ window.STATE =
     "2026-10-31T20:57:02+03:00",
     "2026-10-31T21:00:41+03:00",
     "2026-10-31T21:00:50+03:00",
-    "2026-10-31T21:00:56+03:00"
+    "2026-10-31T21:00:56+03:00",
+    "2026-10-31T22:46:57+03:00",
+    "2026-10-31T22:48:40+03:00",
+    "2026-10-31T22:48:43+03:00",
+    "2026-10-31T22:50:07+03:00",
+    "2026-10-31T22:50:12+03:00",
+    "2026-10-31T22:51:30+03:00",
+    "2026-10-31T22:51:33+03:00",
+    "2026-10-31T22:51:58+03:00",
+    "2026-10-31T22:52:02+03:00",
+    "2026-10-31T22:52:36+03:00",
+    "2026-10-31T22:52:41+03:00"
   ],
-  "rev": 34,
+  "rev": 49,
   "waiting": null,
   "waits": [],
   "log": [
@@ -566,6 +677,82 @@ window.STATE =
         "passed": 7,
         "failed": 0
       }
+    },
+    {
+      "t": "2026-10-31T22:46:57+03:00",
+      "k": "reopen"
+    },
+    {
+      "t": "2026-10-31T22:48:40+03:00",
+      "k": "stage",
+      "id": "briefing",
+      "act": "skip",
+      "note": "полный автомат — самобрифинг"
+    },
+    {
+      "t": "2026-10-31T22:48:43+03:00",
+      "k": "gate",
+      "g": "G1",
+      "ok": false,
+      "open": 18,
+      "total": 39
+    },
+    {
+      "t": "2026-10-31T22:48:43+03:00",
+      "k": "stage",
+      "id": "spec",
+      "act": "start"
+    },
+    {
+      "t": "2026-10-31T22:50:07+03:00",
+      "k": "gate",
+      "g": "G2",
+      "ok": true,
+      "found": 0,
+      "fixed": 0,
+      "deferred": 0
+    },
+    {
+      "t": "2026-10-31T22:50:12+03:00",
+      "k": "stage",
+      "id": "plan",
+      "act": "start"
+    },
+    {
+      "t": "2026-10-31T22:51:30+03:00",
+      "k": "tickets",
+      "n": 11
+    },
+    {
+      "t": "2026-10-31T22:51:33+03:00",
+      "k": "gate",
+      "g": "G3",
+      "ok": false,
+      "problems": 8
+    },
+    {
+      "t": "2026-10-31T22:51:58+03:00",
+      "k": "tickets",
+      "n": 11
+    },
+    {
+      "t": "2026-10-31T22:52:02+03:00",
+      "k": "gate",
+      "g": "G3",
+      "ok": false,
+      "problems": 1
+    },
+    {
+      "t": "2026-10-31T22:52:36+03:00",
+      "k": "tickets",
+      "n": 11
+    },
+    {
+      "t": "2026-10-31T22:52:41+03:00",
+      "k": "gate",
+      "g": "G3",
+      "ok": true,
+      "problems": 0
     }
   ],
   "reqList": [
@@ -673,35 +860,119 @@ window.STATE =
       "id": "R21",
       "text": "«Останавливаешь работу только после полного закрытия плана»",
       "status": "done"
+    },
+    {
+      "id": "R22",
+      "text": "«1.1 Заменить INSERT OR REPLACE на честный SQLite UPSERT (ON CONFLICT ... DO UPDATE) для предотвращения нарушения Foreign Keys»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R23",
+      "text": "«1.2 Разделить первичную инициализацию схемы init_schema() и фабрику соединений get_connection(), задать busy_timeout = 30000, synchronous = NORMAL и WAL»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R24",
+      "text": "«1.3 Оптимизировать prune_snapshots: индекс idx_snapshots_timestamp, INTEGER epoch timestamp, удаление батчами по 5000 строк»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R25",
+      "text": "«2.1 Внедрить trailing-edge дебаунс (500 мс) с проверкой стабилизации размера файла Auctionator.lua вместо 50мс паузы»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R26",
+      "text": "«2.2 Использовать mtime файла бэкапа при fallback вместо текущего time.time() и запретить инжест бэкапов старше 2 часов»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R27",
+      "text": "«2.3 Корректно создавать директорию watch_path через os.makedirs и сохранять target_filename = Auctionator.lua»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R28",
+      "text": "«2.4 Вынести тяжелый пересчет аналитики, обращение к AI и обновление дашборда в фоновую очередь задач queue.Queue, не блокируя watchdog»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R29",
+      "text": "«3.1 Устранить нарушение неравенства Самуэльсона в Z-score: установить min_samples >= 6 и использовать несмещенную дисперсию (n - 1)»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R30",
+      "text": "«3.2 Заменить эвристику v_buy > 0 на строгий белый список вендорных реагентов, исключив дикорастущую траву и рыбу»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R31",
+      "text": "«3.3 Учесть безвозвратный залог аукциона AH Deposit Fee: вычитать max(15, int(v_sell  0.05)) из расчетной прибыли крафта»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R32",
+      "text": "«4.1, 4.2 Поддержать формат Auctionator v341: извлекать цену из val['m'], поддержать префикс gr: и вложенные таблицы h/l/a»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R33",
+      "text": "«4.3 Поддержать разделитель имени реалма через пробел: ForeverRealm Alliance»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R34",
+      "text": "«5.1, 5.2 Корректная модель Waylaid Crates: учесть target_item_count и reward_copper, разделить AH-комплекты и сдачу ящиков, поддержать сырьевые ящики 211501-211507»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R35",
+      "text": "«6.1 Устранить Stored XSS в Plotly Chart: экранировать html.escape() и экранировать подстроки </script> при сериализации»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R36",
+      "text": "«6.2 Предотвратить зависание браузера: ограничить выборку истории графиков топ-8 предметами и даунсэмплить точки до <= 300»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R37",
+      "text": "«6.3 Исправить инверсию логики шага в AI-баннере: step_text = item.get('action') or item.get('text') or str(item.get('step') or item)»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R38",
+      "text": "«7.1-7.4 Защитить AI-модуль: санитизация имен предметов, теги <market_data>, передача промпта в agy через stdin, безопасный парсинг None, ключ в x-goog-api-key»",
+      "status": "in-ticket"
+    },
+    {
+      "id": "R39",
+      "text": "«8.1-8.3 Обработка фаззинга и пограничных случаев: OverflowError в format_currency при inf, фильтрация bool как цены, безопасный escape при name is None»",
+      "status": "in-ticket"
     }
   ],
   "gates": {
     "G1": {
       "ok": false,
-      "at": "2026-10-31T19:43:39+03:00",
-      "open": 21,
-      "total": 21
+      "at": "2026-10-31T22:48:43+03:00",
+      "open": 18,
+      "total": 39
     },
     "G2": {
       "ok": true,
-      "at": "2026-10-31T19:47:28+03:00",
-      "found": 6,
-      "fixed": 6,
+      "at": "2026-10-31T22:50:07+03:00",
+      "found": 0,
+      "fixed": 0,
       "deferred": 0
     },
     "G3": {
       "ok": true,
-      "at": "2026-10-31T19:49:07+03:00",
+      "at": "2026-10-31T22:52:41+03:00",
       "problems": 0
-    },
-    "G4": {
-      "ok": true,
-      "at": "2026-10-31T20:57:02+03:00",
-      "checked": 21,
-      "matched": 21
     }
   },
-  "result": "Автономный аналитический агент и торговый портал для World of Warcraft: Forever",
+  "result": null,
   "report": [
     "Автоматическая пересборка дашборда: при перехвате новых снимков данные пишутся в БД, а дашборд portal.html генерируется на старте (для автообновления страницы в рантайме можно подключить вызов build_standalone_dashboard в callback)",
     "Партиционирование реалмов: при работе с несколькими игровыми мирами рекомендуется всегда передавать параметр --realm для исключения коллизий цен между серверами",
