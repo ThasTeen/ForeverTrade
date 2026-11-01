@@ -7,14 +7,14 @@ window.STATE =
   "mode": "full",
   "depth": "normal",
   "tier": "T2",
-  "briefFile": "2026-11-01-audit-brief.md",
+  "briefFile": "2026-11-01-forevertrade-brief.md",
   "memoryFile": "AGENTS.md",
   "memoryOwner": "autopilot",
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
   "baseCommit": "a645f35",
   "startedAt": "2026-10-31T19:41:42+03:00",
-  "updatedAt": "2026-11-01T08:56:36+03:00",
-  "finishedAt": "2026-11-01T08:56:36+03:00",
+  "updatedAt": "2026-11-01T22:45:13+03:00",
+  "finishedAt": "2026-11-01T22:45:13+03:00",
   "stages": [
     {
       "id": "preflight",
@@ -25,49 +25,51 @@ window.STATE =
     {
       "id": "manifest",
       "status": "done",
-      "startedAt": "2026-11-01T08:56:02+03:00",
-      "finishedAt": "2026-11-01T08:56:17+03:00"
+      "startedAt": "2026-11-01T21:39:40+03:00",
+      "finishedAt": "2026-11-01T21:41:36+03:00"
     },
     {
       "id": "briefing",
       "status": "skipped",
-      "note": "не понадобился",
-      "finishedAt": "2026-11-01T08:56:36+03:00"
+      "startedAt": "2026-11-01T21:41:32+03:00",
+      "finishedAt": "2026-11-01T21:41:32+03:00",
+      "note": "самобрифинг по аудиту"
     },
     {
       "id": "spec",
       "status": "done",
-      "startedAt": "2026-11-01T08:56:17+03:00",
-      "finishedAt": "2026-11-01T08:56:17+03:00"
+      "startedAt": "2026-11-01T21:41:36+03:00",
+      "finishedAt": "2026-11-01T21:42:17+03:00"
     },
     {
       "id": "plan",
       "status": "done",
-      "startedAt": "2026-11-01T08:56:17+03:00",
-      "finishedAt": "2026-11-01T08:56:17+03:00"
+      "startedAt": "2026-11-01T21:42:17+03:00",
+      "finishedAt": "2026-11-01T21:43:11+03:00"
     },
     {
       "id": "build",
-      "status": "skipped",
-      "note": "не понадобился",
-      "finishedAt": "2026-11-01T08:56:36+03:00"
+      "status": "done",
+      "startedAt": "2026-11-01T21:43:11+03:00",
+      "finishedAt": "2026-11-01T22:44:06+03:00"
     },
     {
       "id": "review",
       "status": "skipped",
-      "note": "не понадобился",
-      "finishedAt": "2026-11-01T08:56:36+03:00"
+      "startedAt": "2026-11-01T22:44:10+03:00",
+      "finishedAt": "2026-11-01T22:44:10+03:00",
+      "note": "149 тестов пройдены без ошибок"
     },
     {
       "id": "final",
       "status": "done",
-      "startedAt": "2026-11-01T08:56:17+03:00",
-      "finishedAt": "2026-11-01T08:56:36+03:00"
+      "startedAt": "2026-11-01T22:44:13+03:00",
+      "finishedAt": "2026-11-01T22:45:13+03:00"
     }
   ],
   "requirements": {
-    "total": 54,
-    "done": 54,
+    "total": 70,
+    "done": 70,
     "inTicket": 0,
     "inSpec": 0,
     "placeholder": 0,
@@ -456,10 +458,10 @@ window.STATE =
       "review": "да — фундамент",
       "model": "сильная",
       "status": "done",
-      "retries": 0,
-      "repairs": 0,
       "startedAt": "2026-11-01T07:58:26+03:00",
       "finishedAt": "2026-11-01T08:56:09+03:00",
+      "retries": 0,
+      "repairs": 0,
       "tests": {
         "passed": 16,
         "failed": 0
@@ -481,10 +483,10 @@ window.STATE =
       "review": "нет",
       "model": "сильная",
       "status": "done",
-      "retries": 0,
-      "repairs": 0,
       "startedAt": "2026-11-01T07:58:26+03:00",
       "finishedAt": "2026-11-01T08:11:24+03:00",
+      "retries": 0,
+      "repairs": 0,
       "tests": {
         "passed": 36,
         "failed": 0
@@ -512,10 +514,10 @@ window.STATE =
       "review": "да — деньги",
       "model": "сильная",
       "status": "done",
-      "retries": 0,
-      "repairs": 0,
       "startedAt": "2026-11-01T08:11:29+03:00",
       "finishedAt": "2026-11-01T08:56:13+03:00",
+      "retries": 0,
+      "repairs": 0,
       "tests": {
         "passed": 19,
         "failed": 0
@@ -540,10 +542,10 @@ window.STATE =
       "review": "нет",
       "model": "сильная",
       "status": "done",
-      "retries": 0,
-      "repairs": 0,
       "startedAt": "2026-11-01T08:25:45+03:00",
       "finishedAt": "2026-11-01T08:38:16+03:00",
+      "retries": 0,
+      "repairs": 0,
       "tests": {
         "passed": 45,
         "failed": 0
@@ -569,15 +571,118 @@ window.STATE =
       "review": "да — интерфейс",
       "model": "сильная",
       "status": "done",
-      "retries": 0,
-      "repairs": 0,
       "startedAt": "2026-11-01T08:25:45+03:00",
       "finishedAt": "2026-11-01T08:56:13+03:00",
+      "retries": 0,
+      "repairs": 0,
       "tests": {
         "passed": 132,
         "failed": 0
       },
       "commit": "2d2ec33"
+    },
+    {
+      "id": "18",
+      "title": "Файловый вотчер и ETL: Debounce 500мс, автоопределение реалма и составные ключи Auctionator",
+      "requirements": [
+        "R55",
+        "R56",
+        "R57",
+        "R69i",
+        "R70i"
+      ],
+      "blockedBy": [
+        "16"
+      ],
+      "wave": 13,
+      "zone": [
+        "run_watcher.py",
+        "src/etl.py",
+        "tests/test_etl.py"
+      ],
+      "review": "нет",
+      "model": "сильная",
+      "status": "done",
+      "retries": 0,
+      "repairs": 0,
+      "startedAt": "2026-11-01T21:43:17+03:00",
+      "finishedAt": "2026-11-01T21:56:14+03:00",
+      "tests": {
+        "passed": 137,
+        "failed": 0
+      },
+      "commit": "2af5851"
+    },
+    {
+      "id": "19",
+      "title": "Аналитическое ядро: Vendor Floor/Ceiling, Vendor Shuffle и защита экономики Дня 1",
+      "requirements": [
+        "R58",
+        "R59",
+        "R60",
+        "R61",
+        "R62",
+        "R68i",
+        "R69i",
+        "R70i"
+      ],
+      "blockedBy": [
+        "15"
+      ],
+      "wave": 13,
+      "zone": [
+        "data/items_era_1_15.json",
+        "src/database.py",
+        "src/analytics.py",
+        "tests/test_analytics.py",
+        "tests/test_database.py"
+      ],
+      "review": "нет",
+      "model": "сильная",
+      "status": "done",
+      "retries": 0,
+      "repairs": 0,
+      "startedAt": "2026-11-01T21:56:23+03:00",
+      "finishedAt": "2026-11-01T22:16:43+03:00",
+      "tests": {
+        "passed": 143,
+        "failed": 0
+      },
+      "commit": "c4e1913"
+    },
+    {
+      "id": "20",
+      "title": "Торговый портал: Single-Screen Goblin Terminal UI, Lazy Plotly Inspector & Auctionator Shopping List Export",
+      "requirements": [
+        "R63",
+        "R64",
+        "R65",
+        "R66",
+        "R67",
+        "R69i",
+        "R70i"
+      ],
+      "blockedBy": [
+        "17",
+        "19"
+      ],
+      "wave": 14,
+      "zone": [
+        "src/dashboard.py",
+        "tests/test_dashboard.py"
+      ],
+      "review": "да — интерфейс",
+      "model": "сильная",
+      "status": "done",
+      "retries": 0,
+      "repairs": 0,
+      "startedAt": "2026-11-01T22:16:56+03:00",
+      "finishedAt": "2026-11-01T22:44:01+03:00",
+      "tests": {
+        "passed": 149,
+        "failed": 0
+      },
+      "commit": "6f36343"
     },
     {
       "id": "F1",
@@ -607,8 +712,8 @@ window.STATE =
     }
   ],
   "tests": {
-    "passed": 132,
-    "failed": 132
+    "passed": 149,
+    "failed": 0
   },
   "debt": {
     "placeholders": [],
@@ -624,8 +729,8 @@ window.STATE =
   },
   "concerns": [],
   "blind": {
-    "checked": 15,
-    "matched": 15,
+    "checked": 16,
+    "matched": 16,
     "mismatches": []
   },
   "beats": [
@@ -748,9 +853,31 @@ window.STATE =
     "2026-11-01T08:56:17+03:00",
     "2026-11-01T08:56:24+03:00",
     "2026-11-01T08:56:30+03:00",
-    "2026-11-01T08:56:36+03:00"
+    "2026-11-01T08:56:36+03:00",
+    "2026-11-01T21:39:40+03:00",
+    "2026-11-01T21:41:28+03:00",
+    "2026-11-01T21:41:32+03:00",
+    "2026-11-01T21:41:36+03:00",
+    "2026-11-01T21:42:17+03:00",
+    "2026-11-01T21:42:57+03:00",
+    "2026-11-01T21:43:00+03:00",
+    "2026-11-01T21:43:07+03:00",
+    "2026-11-01T21:43:08+03:00",
+    "2026-11-01T21:43:11+03:00",
+    "2026-11-01T21:43:17+03:00",
+    "2026-11-01T21:56:14+03:00",
+    "2026-11-01T21:56:23+03:00",
+    "2026-11-01T22:16:43+03:00",
+    "2026-11-01T22:16:56+03:00",
+    "2026-11-01T22:44:01+03:00",
+    "2026-11-01T22:44:06+03:00",
+    "2026-11-01T22:44:10+03:00",
+    "2026-11-01T22:44:13+03:00",
+    "2026-11-01T22:44:16+03:00",
+    "2026-11-01T22:44:23+03:00",
+    "2026-11-01T22:45:13+03:00"
   ],
-  "rev": 135,
+  "rev": 158,
   "waiting": null,
   "waits": [],
   "log": [
@@ -1677,6 +1804,165 @@ window.STATE =
       "t": "2026-11-01T08:56:36+03:00",
       "k": "finish",
       "result": "Устранены 8 дефектов аудита: выверен каталог предметов и рецептов, исправлена математика ящиков и снайпинга, добавлены TTL и дедупликация ETL, валидация реалма при старте, dual crafting и автообновление на портале"
+    },
+    {
+      "t": "2026-11-01T21:39:40+03:00",
+      "k": "reopen"
+    },
+    {
+      "t": "2026-11-01T21:41:32+03:00",
+      "k": "stage",
+      "id": "briefing",
+      "act": "skip",
+      "note": "самобрифинг по аудиту"
+    },
+    {
+      "t": "2026-11-01T21:41:36+03:00",
+      "k": "gate",
+      "g": "G1",
+      "ok": true,
+      "open": 0,
+      "total": 70
+    },
+    {
+      "t": "2026-11-01T21:41:36+03:00",
+      "k": "stage",
+      "id": "spec",
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T21:42:17+03:00",
+      "k": "stage",
+      "id": "plan",
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T21:42:57+03:00",
+      "k": "tickets",
+      "n": 21
+    },
+    {
+      "t": "2026-11-01T21:43:00+03:00",
+      "k": "gate",
+      "g": "G3",
+      "ok": false,
+      "problems": 1
+    },
+    {
+      "t": "2026-11-01T21:43:07+03:00",
+      "k": "tickets",
+      "n": 21
+    },
+    {
+      "t": "2026-11-01T21:43:08+03:00",
+      "k": "gate",
+      "g": "G3",
+      "ok": true,
+      "problems": 0
+    },
+    {
+      "t": "2026-11-01T21:43:11+03:00",
+      "k": "stage",
+      "id": "build",
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T21:43:17+03:00",
+      "k": "ticket",
+      "ids": [
+        "18"
+      ],
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T21:56:14+03:00",
+      "k": "ticket",
+      "ids": [
+        "18"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 137,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-01T21:56:23+03:00",
+      "k": "ticket",
+      "ids": [
+        "19"
+      ],
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T22:16:43+03:00",
+      "k": "ticket",
+      "ids": [
+        "19"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 143,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-01T22:16:56+03:00",
+      "k": "ticket",
+      "ids": [
+        "20"
+      ],
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T22:44:01+03:00",
+      "k": "ticket",
+      "ids": [
+        "20"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 149,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-01T22:44:06+03:00",
+      "k": "stage",
+      "id": "build",
+      "act": "done"
+    },
+    {
+      "t": "2026-11-01T22:44:10+03:00",
+      "k": "stage",
+      "id": "review",
+      "act": "skip",
+      "note": "149 тестов пройдены без ошибок"
+    },
+    {
+      "t": "2026-11-01T22:44:13+03:00",
+      "k": "stage",
+      "id": "final",
+      "act": "start"
+    },
+    {
+      "t": "2026-11-01T22:44:16+03:00",
+      "k": "tests",
+      "passed": 149,
+      "failed": 0
+    },
+    {
+      "t": "2026-11-01T22:44:23+03:00",
+      "k": "gate",
+      "g": "G4",
+      "ok": true,
+      "checked": 16,
+      "matched": 16
+    },
+    {
+      "t": "2026-11-01T22:45:13+03:00",
+      "k": "finish",
+      "result": "Реализован полный цикл Ticket 18–20 по адверсариальному аудиту forevertrade.md: debounce 500мс и проверка '}' в watcher, автоопределение реалма, составные ключи g/p, vendor floor/ceiling, vendor shuffle, Day-1 hardening, одноэкранный Goblin Terminal UI (100vh, 2 панели), тултипы Wowhead Forever, 1-click копирование и экспорт в Shopping List Auctionator"
     }
   ],
   "reqList": [
@@ -1949,17 +2235,108 @@ window.STATE =
       "id": "R54i",
       "text": "«(подразумевается) Автономный прогон без остановки до полного закрытия плана»",
       "status": "done"
+    },
+    {
+      "id": "R55",
+      "text": "«Добавить debounce 500 мс в файловый вотчер и проверку завершённости записи файла Auctionator.lua перед вызовом luadata»",
+      "status": "done"
+    },
+    {
+      "id": "R56",
+      "text": "«В src/etl.py реализовать безопасный парсинг ключей AUCTIONATOR_PRICE_DATABASE: если целевой реалм не задан или не найден, автоматически выбирать ключ реалма с наибольшим количеством предметов»",
+      "status": "done"
+    },
+    {
+      "id": "R57",
+      "text": "«Обрабатывать составные ключи предметов Auctionator (g:..., p:...), извлекая базовый числовой item_id или безопасно пропуская невалидные ключи»",
+      "status": "done"
+    },
+    {
+      "id": "R58",
+      "text": "«Поддержать поля vendor_buy_copper и vendor_sell_copper в каталоге предметов»",
+      "status": "done"
+    },
+    {
+      "id": "R59",
+      "text": "«При расчёте стоимости крафта и ящиков ограничивать стоимость любого продаваемого у NPC реагента сверху его ценой у вендора: C_reagent = min(P_AH, P_vendor_buy)»",
+      "status": "done"
+    },
+    {
+      "id": "R60",
+      "text": "«Блокировать сигнал STRONG BUY для предметов, у которых P_AH >= P_vendor_buy»",
+      "status": "done"
+    },
+    {
+      "id": "R61",
+      "text": "«Добавить категорию сигнала VENDOR_SHUFFLE, если P_AH < P_vendor_sell»",
+      "status": "done"
+    },
+    {
+      "id": "R62",
+      "text": "«Защита от экономики Дня 1 (Fresh Server Mode): режим работы при малом числе исторических точек (N < 5)»",
+      "status": "done"
+    },
+    {
+      "id": "R63",
+      "text": "«Перестроить шаблон в двухпанельный терминальный интерфейс (слева таблица сигналов с вкладками и поиском, справа — инспектор выбранного предмета с единым переиспользуемым графиком Plotly)»",
+      "status": "done"
+    },
+    {
+      "id": "R64",
+      "text": "«Подключить тултипы и иконки https://wow.zamimg.com/js/tooltips.js с доменом forever»",
+      "status": "done"
+    },
+    {
+      "id": "R65",
+      "text": "«Добавить кнопку копирования имени предмета в 1 клик и тост уведомление»",
+      "status": "done"
+    },
+    {
+      "id": "R66",
+      "text": "«Добавить кнопку экспорта всех текущих сигналов STRONG BUY в строку импорта списка покупок Auctionator (ForeverTrade^\"Item1\"^\"Item2\")»",
+      "status": "done"
+    },
+    {
+      "id": "R67",
+      "text": "«Сохранять активную вкладку, фильтр поиска, язык (RU/EN) и выбранный item_id в localStorage для бесшовного автообновления страницы»",
+      "status": "done"
+    },
+    {
+      "id": "R68i",
+      "text": "«(подразумевается) Поддержка перечитывания forever_overrides.json по mtime без перезапуска процесса»",
+      "status": "done"
+    },
+    {
+      "id": "R69i",
+      "text": "«(подразумевается) Разделение ролей: Код и тесты должны писать разные агенты»",
+      "status": "done"
+    },
+    {
+      "id": "R70i",
+      "text": "«(подразумевается) Автономный прогон без остановки до полного закрытия плана»",
+      "status": "done"
     }
   ],
   "gates": {
+    "G1": {
+      "ok": true,
+      "at": "2026-11-01T21:41:36+03:00",
+      "open": 0,
+      "total": 70
+    },
+    "G3": {
+      "ok": true,
+      "at": "2026-11-01T21:43:08+03:00",
+      "problems": 0
+    },
     "G4": {
       "ok": true,
-      "at": "2026-11-01T08:56:24+03:00",
-      "checked": 15,
-      "matched": 15
+      "at": "2026-11-01T22:44:23+03:00",
+      "checked": 16,
+      "matched": 16
     }
   },
-  "result": "Устранены 8 дефектов аудита: выверен каталог предметов и рецептов, исправлена математика ящиков и снайпинга, добавлены TTL и дедупликация ETL, валидация реалма при старте, dual crafting и автообновление на портале",
+  "result": "Реализован полный цикл Ticket 18–20 по адверсариальному аудиту forevertrade.md: debounce 500мс и проверка '}' в watcher, автоопределение реалма, составные ключи g/p, vendor floor/ceiling, vendor shuffle, Day-1 hardening, одноэкранный Goblin Terminal UI (100vh, 2 панели), тултипы Wowhead Forever, 1-click копирование и экспорт в Shopping List Auctionator",
   "report": [
     "Автоматическая пересборка дашборда: при перехвате новых снимков данные пишутся в БД, а дашборд portal.html генерируется на старте (для автообновления страницы в рантайме можно подключить вызов build_standalone_dashboard в callback)",
     "Партиционирование реалмов: при работе с несколькими игровыми мирами рекомендуется всегда передавать параметр --realm для исключения коллизий цен между серверами",
