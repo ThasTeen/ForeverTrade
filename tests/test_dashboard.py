@@ -5,6 +5,8 @@ Verifies real functional execution of:
 - notify_high_value_arbitrage() (R14): alert triggers, threshold filtering (>= 1g / 10,000c), terminal bell
 - build_standalone_dashboard() (R12, R13): standalone HTML creation, Plotly.js charts, 3 signal tables,
   AI advisor banner integration, database data rendering, offline autonomy, realm filtering.
+- Task 17 (R52): Dual crafting display (Waylaid crates + classic recipes), meta auto-refresh (30s),
+  header generation and snapshot freshness timestamps, parameter forwarding (has_bartering, has_master_chef, max_age_hours).
 No paper tests: invokes actual functions and validates generated files and DOM structures.
 """
 
@@ -756,4 +758,249 @@ def test_dashboard_item_modal_empty_snapshots_state(memory_db, tmp_path, monkeyp
     empty_msg_en = "Waiting for first price snapshot from Auctionator.lua..."
     assert empty_msg_ru in html_content
     assert empty_msg_en in html_content
+
+
+# ===========================================================================
+# 6. Task 17: Dashboard Polish & Auto-refresh (R52)
+# ===========================================================================
+
+def test_dashboard_meta_refresh_tag(populated_dashboard_db, tmp_path):
+    """Verify presence of <meta http-equiv="refresh" content="30"> tag in <head> (R52)."""
+    out_file = tmp_path / "refresh_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file))
+
+    # Read from generated file on disk
+    disk_html = out_file.read_text(encoding="utf-8")
+    assert disk_html == html_content
+
+    # Check meta tag presence
+    assert '<meta http-equiv="refresh" content="30">' in disk_html
+
+    # Check that it is located within the <head> block
+    head_match = re.search(r"<head>(.*?)</head>", disk_html, re.DOTALL | re.IGNORECASE)
+    assert head_match is not None, "<head> block not found in HTML"
+    head_content = head_match.group(1)
+    assert '<meta http-equiv="refresh" content="30">' in head_content
+
+
+def test_dashboard_header_timestamps(populated_dashboard_db, tmp_path):
+    """Verify display of generation timestamp and snapshot freshness in dashboard header (R52)."""
+    # 1. Populated DB with recent snapshots
+    out_file = tmp_path / "timestamps_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file))
+
+    assert "header-timestamps" in html_content
+    assert "timestamp-badge timestamp-gen" in html_content
+    assert "timestamp-badge timestamp-snap" in html_content
+
+    # Verify generation timestamp format (YYYY-MM-DD HH:MM:SS)
+    gen_match = re.search(r"Generated:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", html_content)
+    assert gen_match is not None, "Generated timestamp not found or has invalid format"
+
+    # Verify snapshot freshness localized strings
+    assert 'data-ru="Актуальность снимка цен:' in html_content
+    assert 'data-en="Snapshot freshness:' in html_content
+    # Since populated_dashboard_db snapshots are timestamped `now`, freshness should show seconds/minutes
+    assert ("сек. назад" in html_content) or ("мин. назад" in html_content) or ("s ago" in html_content) or ("m ago" in html_content)
+
+    # 2. Fresh empty DB with no snapshots
+    empty_conn = init_db(":memory:")
+    try:
+        out_empty = tmp_path / "empty_timestamps_portal.html"
+        html_empty = build_standalone_dashboard(empty_conn, output_path=str(out_empty))
+        assert ("нет снимков" in html_empty) or ("no snapshots" in html_empty)
+    finally:
+        empty_conn.close()
+
+
+def test_dashboard_dual_crafting_display(memory_db, tmp_path):
+    """Verify dual crafting display: both Waylaid Crates targets and classic profitable crafts are rendered (R52)."""
+    now = int(time.time())
+    with memory_db:
+        # Items: 1 Waylaid crate pair + 1 classic craft pair
+        memory_db.executemany(
+            """INSERT INTO items (
+                item_id, name, quality, item_class, category,
+                vendor_sell_price, vendor_buy_price, target_item_id, target_item_count, reward_copper
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                # Waylaid craft target
+                (601, "Waylaid Copper Dagger", 2, 2, "craftable", 150, 0, None, 0, 0),
+                (602, "Copper Bar", 1, 7, "raw", 10, 0, None, 0, 0),
+                (603, "Waylaid Shipment: Copper Daggers", 2, 0, "waylaid_crate", 0, 0, 601, 1, 4000),
+                # Classic profitable craft (Alchemy potion, no Waylaid crate)
+                (701, "Elixir of Giant Growth", 2, 0, "consumable", 200, 0, None, 0, 0),
+                (702, "Deviate Fish", 1, 7, "raw", 20, 0, None, 0, 0),
+                (703, "Earthroot", 1, 7, "herb", 15, 0, None, 0, 0),
+            ],
+        )
+
+        # Recipes
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (10, "Waylaid Copper Dagger", "Blacksmithing", 601, 1.0),
+                (20, "Elixir of Giant Growth", "Alchemy", 701, 1.0),
+            ],
+        )
+
+        # Reagents
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (10, 602, 602, 2, 2),  # 2x Copper Bar = 200c cost
+                (20, 702, 702, 1, 1),  # 1x Deviate Fish = 100c cost
+                (20, 703, 703, 1, 1),  # 1x Earthroot = 100c cost -> total cost 200c
+            ],
+        )
+
+        # Snapshots: high selling price to guarantee ROI >= 25%
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (601, "Everlook", 1000, now),   # Revenue 950c, cost 200c, profit 750c, crate turnin profit 3050c
+                (602, "Everlook", 100, now),
+                (701, "Everlook", 1200, now),   # Revenue 1140c, cost 200c, profit 940c, ROI 470% (Classic)
+                (702, "Everlook", 100, now),
+                (703, "Everlook", 100, now),
+            ],
+        )
+
+    out_file = tmp_path / "dual_craft_portal.html"
+    html_content = build_standalone_dashboard(memory_db, output_path=str(out_file), realm="Everlook")
+
+    # 1. Verify table exists
+    assert 'id="waylaid-crates"' in html_content
+
+    # 2. Verify BOTH items are present in the HTML table (classic craft is not filtered out)
+    assert "Waylaid Copper Dagger" in html_content
+    assert "Elixir of Giant Growth" in html_content
+
+    # 3. Verify badges distinguish Waylaid crate craft from classic craft
+    assert "badge-waylaid" in html_content
+    assert "[Ящик]" in html_content
+    assert "badge-craft" in html_content
+    assert "[Крафт]" in html_content
+
+    # 4. Verify specific badge assignments per item
+    # Waylaid Copper Dagger row must contain badge-waylaid
+    dagger_row_match = re.search(r"<tr[^>]*>.*?Waylaid Copper Dagger.*?</tr>", html_content, re.DOTALL)
+    assert dagger_row_match is not None, "Waylaid Copper Dagger table row not found"
+    assert "badge-waylaid" in dagger_row_match.group(0)
+
+    # Elixir of Giant Growth row must contain badge-craft
+    elixir_row_match = re.search(r"<tr[^>]*>.*?Elixir of Giant Growth.*?</tr>", html_content, re.DOTALL)
+    assert elixir_row_match is not None, "Elixir of Giant Growth table row not found"
+    assert "badge-craft" in elixir_row_match.group(0)
+
+
+def test_dashboard_parameter_forwarding(memory_db, tmp_path, monkeypatch):
+    """Verify build_standalone_dashboard accurately forwards has_bartering, has_master_chef, max_age_hours (R52)."""
+    crafting_kwargs = {}
+    arbitrage_kwargs = {}
+    anomaly_kwargs = {}
+
+    import src.dashboard as dashboard_mod
+
+    orig_get_crafting = dashboard_mod.get_crafting_margins
+    orig_get_arbitrage = dashboard_mod.get_vendor_arbitrage
+    orig_get_anomalies = dashboard_mod.get_zscore_anomalies
+
+    def mock_crafting_margins(conn, **kwargs):
+        crafting_kwargs.update(kwargs)
+        return orig_get_crafting(conn, **kwargs)
+
+    def mock_vendor_arbitrage(conn, **kwargs):
+        arbitrage_kwargs.update(kwargs)
+        return orig_get_arbitrage(conn, **kwargs)
+
+    def mock_zscore_anomalies(conn, **kwargs):
+        anomaly_kwargs.update(kwargs)
+        return orig_get_anomalies(conn, **kwargs)
+
+    monkeypatch.setattr(dashboard_mod, "get_crafting_margins", mock_crafting_margins)
+    monkeypatch.setattr(dashboard_mod, "get_vendor_arbitrage", mock_vendor_arbitrage)
+    monkeypatch.setattr(dashboard_mod, "get_zscore_anomalies", mock_zscore_anomalies)
+
+    out_file = tmp_path / "forwarding_portal.html"
+    build_standalone_dashboard(
+        memory_db,
+        output_path=str(out_file),
+        realm="Everlook",
+        has_bartering=True,
+        has_master_chef=True,
+        max_age_hours=12.5,
+    )
+
+    # Verify get_crafting_margins received all parameters
+    assert crafting_kwargs.get("has_bartering") is True
+    assert crafting_kwargs.get("has_master_chef") is True
+    assert crafting_kwargs.get("max_age_hours") == 12.5
+    assert crafting_kwargs.get("realm") == "Everlook"
+
+    # Verify get_vendor_arbitrage received max_age_hours and realm
+    assert arbitrage_kwargs.get("max_age_hours") == 12.5
+    assert arbitrage_kwargs.get("realm") == "Everlook"
+
+    # Verify get_zscore_anomalies received max_age_hours and realm
+    assert anomaly_kwargs.get("max_age_hours") == 12.5
+    assert anomaly_kwargs.get("realm") == "Everlook"
+
+
+def test_dashboard_max_age_hours_functional_filtering(memory_db, tmp_path):
+    """Verify max_age_hours functionally excludes stale price snapshots from dashboard table rows (R52)."""
+    now = int(time.time())
+    stale_ts = now - int(48 * 3600)  # 48 hours ago
+    fresh_ts = now - int(10 * 60)    # 10 minutes ago
+
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (801, "Stale Arbitrage Item", 1, 7, "raw", 500, 0),
+                (802, "Fresh Arbitrage Item", 1, 7, "raw", 500, 0),
+            ],
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (801, "Everlook", 100, stale_ts),  # Vendor arbitrage 48h old
+                (802, "Everlook", 100, fresh_ts),  # Vendor arbitrage 10m old
+            ],
+        )
+
+    # 1. With max_age_hours=2.0 -> Stale item must be excluded from vendor arbitrage table rows
+    out_filtered = tmp_path / "portal_filtered.html"
+    html_filtered = build_standalone_dashboard(
+        memory_db,
+        output_path=str(out_filtered),
+        realm="Everlook",
+        max_age_hours=2.0,
+    )
+    # Check vendor arbitrage tbody specifically
+    match_filtered = re.search(r'id=["\']vendor-arbitrage["\'].*?<tbody>(.*?)</tbody>', html_filtered, re.DOTALL)
+    assert match_filtered is not None, "vendor-arbitrage tbody not found in filtered HTML"
+    tbody_filtered = match_filtered.group(1)
+    assert "Fresh Arbitrage Item" in tbody_filtered
+    assert "Stale Arbitrage Item" not in tbody_filtered
+
+    # 2. With max_age_hours=None -> Both items must appear in vendor arbitrage table rows
+    out_all = tmp_path / "portal_all.html"
+    html_all = build_standalone_dashboard(
+        memory_db,
+        output_path=str(out_all),
+        realm="Everlook",
+        max_age_hours=None,
+    )
+    match_all = re.search(r'id=["\']vendor-arbitrage["\'].*?<tbody>(.*?)</tbody>', html_all, re.DOTALL)
+    assert match_all is not None, "vendor-arbitrage tbody not found in unfiltered HTML"
+    tbody_all = match_all.group(1)
+    assert "Fresh Arbitrage Item" in tbody_all
+    assert "Stale Arbitrage Item" in tbody_all
+
 

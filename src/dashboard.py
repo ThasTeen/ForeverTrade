@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
+import time
 from typing import Any, Optional, Union
 
 import plotly.graph_objects as go
@@ -473,17 +474,84 @@ def _get_all_items_market_data(
     return market_data
 
 
+def _get_snapshot_freshness(
+    conn: sqlite3.Connection,
+    realm: Optional[str] = None,
+    now_ts: Optional[float] = None,
+) -> tuple[Optional[int], str, str]:
+    """Query the most recent price snapshot timestamp for target realm and format its age.
+
+    Returns:
+        (latest_ts, freshness_ru, freshness_en)
+    """
+    if now_ts is None:
+        now_ts = time.time()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT MAX(timestamp) FROM price_snapshots WHERE (? IS NULL OR realm = ?)",
+            (realm, realm),
+        )
+        row = cursor.fetchone()
+        latest_ts = row[0] if row and row[0] is not None else None
+    except Exception:
+        latest_ts = None
+
+    if latest_ts is None:
+        return None, "нет снимков", "no snapshots"
+
+    try:
+        latest_ts_val = float(latest_ts)
+    except (ValueError, TypeError):
+        return None, "нет снимков", "no snapshots"
+
+    if latest_ts_val < 1_000_000_000:
+        return int(latest_ts_val), f"снимок #{int(latest_ts_val)}", f"snapshot #{int(latest_ts_val)}"
+
+    age_sec = max(0, int(now_ts - latest_ts_val))
+    try:
+        snap_dt = datetime.datetime.fromtimestamp(latest_ts_val)
+        dt_str = snap_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        dt_str = f"ts:{int(latest_ts_val)}"
+
+    if age_sec < 60:
+        age_ru = f"{age_sec} сек. назад"
+        age_en = f"{age_sec}s ago"
+    elif age_sec < 3600:
+        m = age_sec // 60
+        age_ru = f"{m} мин. назад"
+        age_en = f"{m}m ago"
+    elif age_sec < 86400:
+        h = age_sec // 3600
+        m = (age_sec % 3600) // 60
+        age_ru = f"{h} ч. {m} мин. назад"
+        age_en = f"{h}h {m}m ago"
+    else:
+        d = age_sec // 86400
+        h = (age_sec % 86400) // 3600
+        age_ru = f"{d} дн. {h} ч. назад"
+        age_en = f"{d}d {h}h ago"
+
+    freshness_ru = f"{dt_str} ({age_ru})"
+    freshness_en = f"{dt_str} ({age_en})"
+    return int(latest_ts_val), freshness_ru, freshness_en
+
+
 def build_standalone_dashboard(
     conn: sqlite3.Connection,
     output_path: str = "portal.html",
     ai_advice: Optional[dict] = None,
     realm: Optional[str] = None,
+    has_bartering: bool = False,
+    has_master_chef: bool = False,
+    max_age_hours: Optional[float] = None,
 ) -> str:
     """Build a standalone, single-file HTML market portal with Plotly charts and 3 signal tables.
 
     Tables:
     1. «Вендорный арбитраж» (Vendor Arbitrage)
-    2. «Крафт под Waylaid Crates» (Crafting Margins for Waylaid Crates)
+    2. «Крафт под Waylaid Crates» (Crafting Margins for Waylaid Crates & standard recipes)
     3. «Аномальные сбросы цен» (Z-score price anomaly signals)
 
     Writes the HTML file to output_path and returns the HTML string.
@@ -492,13 +560,46 @@ def build_standalone_dashboard(
         output_path = str(output_path)
 
     # 1. Fetch signal data
-    vendor_arbitrage = get_vendor_arbitrage(conn, realm=realm)
-    all_crafting = get_crafting_margins(conn, realm=realm)
-    anomalies = get_zscore_anomalies(conn, realm=realm)
+    try:
+        vendor_arbitrage = get_vendor_arbitrage(conn, realm=realm, max_age_hours=max_age_hours)
+    except TypeError:
+        vendor_arbitrage = get_vendor_arbitrage(conn, realm=realm)
 
-    # Filter crafting margins for Waylaid Crates (with fallback to all crafting if none are tagged)
-    waylaid_crafting = [c for c in all_crafting if c.get("is_waylaid_target")]
-    crafting_display = waylaid_crafting if waylaid_crafting else all_crafting
+    try:
+        all_crafting = get_crafting_margins(
+            conn,
+            has_bartering=has_bartering,
+            has_master_chef=has_master_chef,
+            realm=realm,
+            max_age_hours=max_age_hours,
+        )
+    except TypeError:
+        try:
+            all_crafting = get_crafting_margins(
+                conn,
+                has_bartering=has_bartering,
+                has_master_chef=has_master_chef,
+                realm=realm,
+            )
+        except TypeError:
+            all_crafting = get_crafting_margins(conn, realm=realm)
+
+    try:
+        anomalies = get_zscore_anomalies(conn, realm=realm, max_age_hours=max_age_hours)
+    except TypeError:
+        anomalies = get_zscore_anomalies(conn, realm=realm)
+
+    # Both Waylaid Crates and classic profitable crafting recipes are displayed (R52)
+    crafting_display = all_crafting
+
+    # Timestamps for portal generation and latest market price snapshot
+    now_dt = datetime.datetime.now()
+    generated_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    _, snap_freshness_ru, snap_freshness_en = _get_snapshot_freshness(
+        conn, realm=realm, now_ts=now_dt.timestamp()
+    )
+    escaped_freshness_ru = html.escape(snap_freshness_ru)
+    escaped_freshness_en = html.escape(snap_freshness_en)
 
     # Collect extra item records from signals to guarantee inspector availability
     extra_items = list(vendor_arbitrage) + list(crafting_display) + list(anomalies)
@@ -593,12 +694,22 @@ def build_standalone_dashboard(
         click_attr = f"onclick=\"onRowClick(event, {crafted_id})\"" if crafted_id is not None else ""
         graph_btn = f"<button class='graph-btn' title='График / Chart' onclick='openItemModal({crafted_id}, event)'>📈</button>" if crafted_id is not None else ""
 
+        is_waylaid = bool(item.get("is_waylaid_target"))
+        badge_html = (
+            "<span class='badge badge-waylaid i18n' data-ru='[Ящик]' data-en='[Waylaid]'>[Ящик]</span>"
+            if is_waylaid
+            else "<span class='badge badge-craft i18n' data-ru='[Крафт]' data-en='[Craft]'>[Крафт]</span>"
+        )
+
         crafting_rows.append(
             f"<tr {id_attr} {click_attr} class='clickable-row'>"
             f"<td data-value='{escaped_name_ru}'>"
             f"<div class='item-cell-wrap'>"
             f"<div>"
+            f"<div class='item-title-row'>"
+            f"{badge_html} "
             f"<strong><span class='item-name i18n' data-ru='{escaped_name_ru}' data-en='{escaped_name_en}'>{escaped_name_ru}</span></strong>"
+            f"</div>"
             f"{reagents_html}"
             f"</div>"
             f"<div class='item-actions'>"
@@ -616,7 +727,7 @@ def build_standalone_dashboard(
             f"</tr>"
         )
     if not crafting_rows:
-        crafting_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='Нет активных маржинальных рецептов под Waylaid Crates (ROI ≥ 25%)' data-en='No active profitable recipes for Waylaid Crates (ROI ≥ 25%)'>Нет активных маржинальных рецептов под Waylaid Crates (ROI ≥ 25%)</td></tr>"
+        crafting_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='Нет активных маржинальных рецептов (ROI ≥ 25%)' data-en='No active profitable recipes (ROI ≥ 25%)'>Нет активных маржинальных рецептов (ROI ≥ 25%)</td></tr>"
     else:
         crafting_tbody = "\n".join(crafting_rows)
 
@@ -698,6 +809,7 @@ def build_standalone_dashboard(
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="30">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Forever Trade — Рыночный портал</title>
     <style>
@@ -811,6 +923,34 @@ def build_standalone_dashboard(
 
         .stat-pill strong {{
             color: var(--accent-blue);
+        }}
+
+        .header-timestamps {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 8px;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            flex-wrap: wrap;
+        }}
+
+        .timestamp-badge {{
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            padding: 4px 10px;
+            border-radius: 6px;
+        }}
+
+        .timestamp-gen {{
+            font-weight: 500;
+        }}
+
+        .item-title-row {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
         }}
 
         /* AI Banner */
@@ -1150,6 +1290,22 @@ def build_standalone_dashboard(
             border: 1px solid rgba(248, 81, 73, 0.4);
         }}
 
+        .badge-waylaid {{
+            background: rgba(163, 53, 238, 0.2);
+            color: #c27aff;
+            border: 1px solid rgba(163, 53, 238, 0.4);
+            font-size: 0.72rem;
+            margin-right: 4px;
+        }}
+
+        .badge-craft {{
+            background: rgba(88, 166, 255, 0.2);
+            color: #58a6ff;
+            border: 1px solid rgba(88, 166, 255, 0.4);
+            font-size: 0.72rem;
+            margin-right: 4px;
+        }}
+
         /* Item Modal & Dedicated Inspector */
         .modal-backdrop {{
             position: fixed;
@@ -1255,6 +1411,10 @@ def build_standalone_dashboard(
             <div class="brand">
                 <h1>Forever Trade Portal</h1>
                 <p class="i18n" data-ru="Автономный аналитический портал и торговый навигатор WoW: Forever" data-en="Autonomous analytical portal & market navigator for WoW: Forever">Автономный аналитический портал и торговый навигатор WoW: Forever</p>
+                <div class="header-timestamps">
+                    <span class="timestamp-badge timestamp-gen">Generated: {generated_str}</span>
+                    <span class="timestamp-badge timestamp-snap"><span class="i18n" data-ru="Актуальность снимка цен: {escaped_freshness_ru}" data-en="Snapshot freshness: {escaped_freshness_en}">Актуальность снимка цен: {escaped_freshness_ru}</span></span>
+                </div>
             </div>
             <div class="header-right">
                 <div class="lang-switcher">
