@@ -212,12 +212,36 @@ def init_schema(conn: sqlite3.Connection) -> None:
                 item_subclass INTEGER DEFAULT 0,
                 vendor_sell_price INTEGER DEFAULT 0,
                 vendor_buy_price INTEGER DEFAULT 0,
+                vendor_sell_copper INTEGER DEFAULT 0,
+                vendor_buy_copper INTEGER DEFAULT 0,
                 target_item_id INTEGER,
                 target_item_count INTEGER DEFAULT 0,
                 reward_copper INTEGER DEFAULT 0,
                 category TEXT,
                 is_override INTEGER DEFAULT 0
             );
+
+            CREATE TRIGGER IF NOT EXISTS trg_items_vendor_copper_ins
+            AFTER INSERT ON items
+            BEGIN
+                UPDATE items
+                SET vendor_sell_copper = CASE WHEN (vendor_sell_copper IS NULL OR vendor_sell_copper = 0) AND vendor_sell_price > 0 THEN vendor_sell_price ELSE vendor_sell_copper END,
+                    vendor_buy_copper = CASE WHEN (vendor_buy_copper IS NULL OR vendor_buy_copper = 0) AND vendor_buy_price > 0 THEN vendor_buy_price ELSE vendor_buy_copper END,
+                    vendor_sell_price = CASE WHEN (vendor_sell_price IS NULL OR vendor_sell_price = 0) AND vendor_sell_copper > 0 THEN vendor_sell_copper ELSE vendor_sell_price END,
+                    vendor_buy_price = CASE WHEN (vendor_buy_price IS NULL OR vendor_buy_price = 0) AND vendor_buy_copper > 0 THEN vendor_buy_copper ELSE vendor_buy_price END
+                WHERE item_id = NEW.item_id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_items_vendor_copper_upd
+            AFTER UPDATE OF vendor_sell_price, vendor_sell_copper, vendor_buy_price, vendor_buy_copper ON items
+            BEGIN
+                UPDATE items
+                SET vendor_sell_copper = CASE WHEN NEW.vendor_sell_price != OLD.vendor_sell_price THEN NEW.vendor_sell_price ELSE vendor_sell_copper END,
+                    vendor_sell_price = CASE WHEN NEW.vendor_sell_copper != OLD.vendor_sell_copper THEN NEW.vendor_sell_copper ELSE vendor_sell_price END,
+                    vendor_buy_copper = CASE WHEN NEW.vendor_buy_price != OLD.vendor_buy_price THEN NEW.vendor_buy_price ELSE vendor_buy_copper END,
+                    vendor_buy_price = CASE WHEN NEW.vendor_buy_copper != OLD.vendor_buy_copper THEN NEW.vendor_buy_copper ELSE vendor_buy_price END
+                WHERE item_id = NEW.item_id;
+            END;
 
             CREATE TABLE IF NOT EXISTS price_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -259,6 +283,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE items ADD COLUMN name_ru TEXT;")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE items ADD COLUMN vendor_sell_copper INTEGER DEFAULT 0;")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE items ADD COLUMN vendor_buy_copper INTEGER DEFAULT 0;")
+        except Exception:
+            pass
 
 
 def init_db(db_path: str = "market.db") -> sqlite3.Connection:
@@ -274,6 +306,15 @@ def load_catalog(
     overrides_path: str = "forever_overrides.json"
 ) -> int:
     """Load Classic Era catalog and apply Forever overrides into items table."""
+    try:
+        conn.execute("ALTER TABLE items ADD COLUMN vendor_sell_copper INTEGER DEFAULT 0;")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE items ADD COLUMN vendor_buy_copper INTEGER DEFAULT 0;")
+    except Exception:
+        pass
+
     def _extract_items(data):
         if isinstance(data, list):
             return data
@@ -299,6 +340,8 @@ def load_catalog(
             else:
                 name = raw_name
             name_ru = item.get("name_ru") or loc.get("ru")
+            v_sell = int(item.get("vendor_sell_copper", item.get("vendor_sell_price", 0)) or 0)
+            v_buy = int(item.get("vendor_buy_copper", item.get("vendor_buy_price", 0)) or 0)
 
             items_to_upsert.append((
                 i_id,
@@ -307,8 +350,10 @@ def load_catalog(
                 int(item.get("quality", 1)),
                 int(item.get("item_class", 0)),
                 int(item.get("item_subclass", 0)),
-                int(item.get("vendor_sell_price", 0)),
-                int(item.get("vendor_buy_price", 0)),
+                v_sell,
+                v_buy,
+                v_sell,
+                v_buy,
                 item.get("target_item_id"),
                 int(item.get("target_item_count", 0)),
                 int(item.get("reward_copper", 0)),
@@ -328,6 +373,8 @@ def load_catalog(
             else:
                 name = raw_name
             name_ru = item.get("name_ru") or loc.get("ru")
+            v_sell = int(item.get("vendor_sell_copper", item.get("vendor_sell_price", 0)) or 0)
+            v_buy = int(item.get("vendor_buy_copper", item.get("vendor_buy_price", 0)) or 0)
 
             items_to_upsert.append((
                 i_id,
@@ -336,8 +383,10 @@ def load_catalog(
                 int(item.get("quality", 1)),
                 int(item.get("item_class", 0)),
                 int(item.get("item_subclass", 0)),
-                int(item.get("vendor_sell_price", 0)),
-                int(item.get("vendor_buy_price", 0)),
+                v_sell,
+                v_buy,
+                v_sell,
+                v_buy,
                 item.get("target_item_id"),
                 int(item.get("target_item_count", 0)),
                 int(item.get("reward_copper", 0)),
@@ -349,9 +398,9 @@ def load_catalog(
         conn.executemany("""
             INSERT INTO items (
                 item_id, name, name_ru, quality, item_class, item_subclass,
-                vendor_sell_price, vendor_buy_price, target_item_id,
-                target_item_count, reward_copper, category, is_override
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                vendor_sell_price, vendor_buy_price, vendor_sell_copper, vendor_buy_copper,
+                target_item_id, target_item_count, reward_copper, category, is_override
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(item_id) DO UPDATE SET
                 name = excluded.name,
                 name_ru = excluded.name_ru,
@@ -360,6 +409,8 @@ def load_catalog(
                 item_subclass = excluded.item_subclass,
                 vendor_sell_price = excluded.vendor_sell_price,
                 vendor_buy_price = excluded.vendor_buy_price,
+                vendor_sell_copper = excluded.vendor_sell_copper,
+                vendor_buy_copper = excluded.vendor_buy_copper,
                 target_item_id = excluded.target_item_id,
                 target_item_count = excluded.target_item_count,
                 reward_copper = excluded.reward_copper,
@@ -883,6 +934,15 @@ def get_item(conn: sqlite3.Connection, item_id: int) -> Optional[dict]:
     else:
         columns = [col[0] for col in cursor.description]
         item = dict(zip(columns, row))
+
+    if "vendor_sell_copper" not in item or item["vendor_sell_copper"] is None or item["vendor_sell_copper"] == 0:
+        item["vendor_sell_copper"] = item.get("vendor_sell_price", 0)
+    if "vendor_buy_copper" not in item or item["vendor_buy_copper"] is None or item["vendor_buy_copper"] == 0:
+        item["vendor_buy_copper"] = item.get("vendor_buy_price", 0)
+    if "vendor_sell_price" not in item or item["vendor_sell_price"] is None or item["vendor_sell_price"] == 0:
+        item["vendor_sell_price"] = item.get("vendor_sell_copper", 0)
+    if "vendor_buy_price" not in item or item["vendor_buy_price"] is None or item["vendor_buy_price"] == 0:
+        item["vendor_buy_price"] = item.get("vendor_buy_copper", 0)
 
     loc = ITEM_LOCALIZATION.get(int(item_id))
     if loc:

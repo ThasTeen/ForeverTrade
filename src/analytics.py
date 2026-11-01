@@ -1,10 +1,93 @@
 """Analytics and arbitrage calculation engine for WoW: Forever."""
 
 from collections import defaultdict
+import json
 import math
+import os
 import sqlite3
 import time
 from typing import Optional
+
+_OVERRIDES_PATH: str = "forever_overrides.json"
+try:
+    _OVERRIDES_MTIME: float = os.path.getmtime(_OVERRIDES_PATH) if os.path.exists(_OVERRIDES_PATH) else 0.0
+except OSError:
+    _OVERRIDES_MTIME: float = 0.0
+
+
+def check_and_reload_overrides(
+    conn: Optional[sqlite3.Connection] = None,
+    overrides_path: str = _OVERRIDES_PATH,
+    force: bool = False,
+) -> bool:
+    """Check if overrides_path has a newer mtime on disk; if so, reload crate mappings into DB.
+
+    Returns True if reloaded, False otherwise.
+    """
+    global _OVERRIDES_MTIME
+    if not os.path.exists(overrides_path):
+        return False
+    try:
+        current_mtime = os.path.getmtime(overrides_path)
+    except OSError:
+        return False
+
+    if not force and current_mtime <= _OVERRIDES_MTIME:
+        return False
+
+    _OVERRIDES_MTIME = current_mtime
+    if conn is not None:
+        try:
+            with open(overrides_path, "r", encoding="utf-8") as f:
+                override_data = json.load(f)
+            items = (
+                override_data
+                if isinstance(override_data, list)
+                else override_data.get("items", override_data.get("overrides", []))
+            )
+            with conn:
+                for it in items:
+                    i_id = int(it["item_id"])
+                    name = it.get("name", f"Item {i_id}")
+                    cat = it.get("category")
+                    t_id = it.get("target_item_id")
+                    t_count = int(it.get("target_item_count", 0))
+                    reward = int(it.get("reward_copper", 0))
+                    v_sell = int(it.get("vendor_sell_copper", it.get("vendor_sell_price", 0)) or 0)
+                    v_buy = int(it.get("vendor_buy_copper", it.get("vendor_buy_price", 0)) or 0)
+                    conn.execute("""
+                        INSERT INTO items (
+                            item_id, name, quality, item_class, item_subclass,
+                            vendor_sell_price, vendor_buy_price, vendor_sell_copper, vendor_buy_copper,
+                            target_item_id, target_item_count, reward_copper, category, is_override
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        ON CONFLICT(item_id) DO UPDATE SET
+                            name = excluded.name,
+                            vendor_sell_price = excluded.vendor_sell_price,
+                            vendor_buy_price = excluded.vendor_buy_price,
+                            vendor_sell_copper = excluded.vendor_sell_copper,
+                            vendor_buy_copper = excluded.vendor_buy_copper,
+                            target_item_id = excluded.target_item_id,
+                            target_item_count = excluded.target_item_count,
+                            reward_copper = excluded.reward_copper,
+                            category = excluded.category,
+                            is_override = 1
+                    """, (
+                        i_id, name, int(it.get("quality", 1)), int(it.get("item_class", 0)),
+                        int(it.get("item_subclass", 0)), v_sell, v_buy, v_sell, v_buy,
+                        t_id, t_count, reward, cat
+                    ))
+        except Exception:
+            pass
+    return True
+
+
+def reload_overrides(
+    conn: Optional[sqlite3.Connection] = None,
+    overrides_path: str = _OVERRIDES_PATH,
+) -> bool:
+    """Force reload overrides from disk into DB and update _OVERRIDES_MTIME."""
+    return check_and_reload_overrides(conn, overrides_path=overrides_path, force=True)
 
 # Strict whitelist of vendor-bought reagents across professions (Classic 1.15)
 VENDOR_REAGENTS_WHITELIST: set[int] = {
@@ -136,12 +219,32 @@ def get_vendor_arbitrage(
             "buyout_price": int(row[3]),
             "price": int(row[3]),
             "vendor_sell_price": int(row[4]),
+            "vendor_sell_copper": int(row[4]),
             "profit_copper": int(row[5]),
             "profit": int(row[5]),
+            "signal": "VENDOR_SHUFFLE",
             "realm": str(row[6]) if row[6] is not None else None,
             "timestamp": row[7],
         })
     return results
+
+
+def get_vendor_shuffle(
+    conn: sqlite3.Connection,
+    min_profit_copper: int = 50,
+    realm: Optional[str] = None,
+    max_age_hours: Optional[float] = None,
+) -> list[dict]:
+    """Find instant vendor shuffle flip opportunities (buyout_price < vendor_sell_price).
+
+    Alias and convenience wrapper around get_vendor_arbitrage returning VENDOR_SHUFFLE signals.
+    """
+    return get_vendor_arbitrage(
+        conn=conn,
+        min_profit_copper=min_profit_copper,
+        realm=realm,
+        max_age_hours=max_age_hours,
+    )
 
 
 def get_crafting_margins(
@@ -160,6 +263,7 @@ def get_crafting_margins(
     Filters recipes where profit > 0 and ROI >= min_roi, sorted by ROI and profit descending.
     Perks default to False for starting characters.
     """
+    check_and_reload_overrides(conn)
     min_ts = _get_cutoff_timestamp(conn, realm, max_age_hours)
     cursor = conn.cursor()
 
@@ -181,16 +285,27 @@ def get_crafting_margins(
     latest_prices = {row[0]: row[1] for row in cursor.fetchall()}
 
     # 2. Items metadata
-    cursor.execute(
-        "SELECT item_id, name, vendor_sell_price, vendor_buy_price, quality, category FROM items"
-    )
+    try:
+        cursor.execute(
+            "SELECT item_id, name, vendor_sell_price, vendor_buy_price, quality, category, vendor_sell_copper, vendor_buy_copper FROM items"
+        )
+        has_copper_cols = True
+    except sqlite3.OperationalError:
+        cursor.execute(
+            "SELECT item_id, name, vendor_sell_price, vendor_buy_price, quality, category FROM items"
+        )
+        has_copper_cols = False
     items_by_id = {}
     for r in cursor.fetchall():
+        v_sell = r[6] if (has_copper_cols and r[6]) else (r[2] or 0)
+        v_buy = r[7] if (has_copper_cols and r[7]) else (r[3] or 0)
         items_by_id[r[0]] = {
             "item_id": r[0],
             "name": r[1] or f"Item {r[0]}",
-            "vendor_sell_price": r[2] or 0,
-            "vendor_buy_price": r[3] or 0,
+            "vendor_sell_price": v_sell,
+            "vendor_buy_price": v_buy,
+            "vendor_sell_copper": v_sell,
+            "vendor_buy_copper": v_buy,
             "quality": r[4] or 0,
             "category": r[5],
         }
@@ -255,18 +370,25 @@ def get_crafting_margins(
 
         for reagent_id, count in reagents:
             reagent_meta = items_by_id.get(reagent_id, {})
-            v_buy = reagent_meta.get("vendor_buy_price") or 0
+            v_buy = reagent_meta.get("vendor_buy_price") or reagent_meta.get("vendor_buy_copper") or 0
             category = reagent_meta.get("category")
 
             is_vendor = (
                 reagent_id in VENDOR_REAGENTS_WHITELIST or
-                category == "vendor_reagent"
+                category in ("vendor_reagent", "vendor") or
+                (v_buy > 0 and reagent_id not in (13759, 13464) and "wild" not in (reagent_meta.get("name") or "").lower())
             ) and (v_buy > 0)
 
+            p_ah = latest_prices.get(reagent_id)
+
             if is_vendor:
-                unit_cost = (v_buy * 0.95) if has_bartering else float(v_buy)
+                eff_v_buy = (v_buy * 0.95) if has_bartering else float(v_buy)
+                if p_ah is not None and p_ah > 0:
+                    unit_cost = min(float(p_ah), eff_v_buy)
+                else:
+                    unit_cost = eff_v_buy
             else:
-                unit_cost = latest_prices.get(reagent_id)
+                unit_cost = p_ah
                 if unit_cost is None or unit_cost <= 0:
                     missing_reagent = True
                     break
@@ -387,14 +509,30 @@ def get_crafting_margins(
             continue
 
         p_out = latest_prices.get(target_id)
-        if p_out is None or p_out <= 0:
-            continue
-
         target_meta = items_by_id.get(target_id, {})
+        v_buy = target_meta.get("vendor_buy_price") or target_meta.get("vendor_buy_copper") or 0
+        category = target_meta.get("category")
+        is_vendor = (
+            target_id in VENDOR_REAGENTS_WHITELIST or
+            category in ("vendor_reagent", "vendor") or
+            (v_buy > 0 and target_id not in (13759, 13464) and "wild" not in (target_meta.get("name") or "").lower())
+        ) and (v_buy > 0)
+
+        if is_vendor:
+            eff_v_buy = float(v_buy)
+            if p_out is not None and p_out > 0:
+                eff_p_out = min(float(p_out), eff_v_buy)
+            else:
+                eff_p_out = eff_v_buy
+        else:
+            if p_out is None or p_out <= 0:
+                continue
+            eff_p_out = float(p_out)
+
         target_count = crate.get("target_item_count") or 1
         reward_copper = crate.get("reward_copper") or 0
-        pack_cost = float(target_count * p_out)
-        pack_revenue = p_out * target_count * 0.95
+        pack_cost = float(target_count * eff_p_out)
+        pack_revenue = eff_p_out * target_count * 0.95
         turnin_profit = reward_copper - pack_cost
         turnin_roi = turnin_profit / pack_cost if pack_cost > 0 else 0.0
 
@@ -426,7 +564,7 @@ def get_crafting_margins(
             "profession": "Gathering",
             "crafted_item_id": target_id,
             "crafted_item_name": target_meta.get("name", f"Item {target_id}"),
-            "crafted_item_price": p_out,
+            "crafted_item_price": p_out if p_out is not None else eff_p_out,
             "yield": 1.0,
             "base_yield": 1.0,
             "expected_yield": 1.0,
@@ -456,9 +594,9 @@ def get_crafting_margins(
                 "item_id": target_id,
                 "name": target_meta.get("name", f"Item {target_id}"),
                 "count": target_count,
-                "unit_cost": round(float(p_out), 2),
+                "unit_cost": round(float(eff_p_out), 2),
                 "total_cost": round(pack_cost, 2),
-                "is_vendor": False,
+                "is_vendor": is_vendor,
             }],
             "realm": realm,
         })
@@ -477,6 +615,7 @@ def get_waylaid_crate_arbitrage(
     Supports both crafted items and raw-resource crates (211501-211507).
     Excludes crates where turn-in profit is non-positive (<= 0).
     """
+    check_and_reload_overrides(conn)
     margins = get_crafting_margins(conn, realm=realm, min_roi=-999.0, max_age_hours=max_age_hours)
     return [
         m for m in margins
@@ -506,64 +645,102 @@ def get_zscore_anomalies(
       expected_revenue = mu * 0.95
       deposit = max(15, int(v_sell * 0.05))
       expected_net_profit = expected_revenue - current_price - deposit > 0
+    Blocks STRONG_BUY when vendor_buy_price > 0 and current_price >= vendor_buy_price.
     Triggers STRONG_SELL for local peaks (Z >= z_sell_threshold).
-    Safe against division by zero (sigma == 0 -> Z = 0.0).
+    Safe against division by zero (sigma == 0 -> Z = 0.0) and small sample counts (Day 1 / N < min_samples).
     """
     min_ts = _get_cutoff_timestamp(conn, realm, max_age_hours)
     cursor = conn.cursor()
-    query = """
-        WITH ranked_snapshots AS (
-            SELECT s.item_id, s.realm, s.price, s.timestamp, s.id,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY s.item_id, s.realm
-                       ORDER BY s.timestamp DESC, s.id DESC
-                   ) as rn
-            FROM price_snapshots s
-            WHERE (? IS NULL OR s.realm = ?)
-              AND (? IS NULL OR s.timestamp >= ?)
-        )
-        SELECT rs.item_id, rs.realm, rs.price, rs.timestamp, rs.rn, i.name, i.vendor_sell_price
-        FROM ranked_snapshots rs
-        JOIN items i ON rs.item_id = i.item_id
-        WHERE rs.rn <= ?
-        ORDER BY rs.item_id, rs.realm, rs.rn ASC
-    """
-    cursor.execute(query, (realm, realm, min_ts, min_ts, window_size))
-    rows = cursor.fetchall()
+    try:
+        query = """
+            WITH ranked_snapshots AS (
+                SELECT s.item_id, s.realm, s.price, s.timestamp, s.id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY s.item_id, s.realm
+                           ORDER BY s.timestamp DESC, s.id DESC
+                       ) as rn
+                FROM price_snapshots s
+                WHERE (? IS NULL OR s.realm = ?)
+                  AND (? IS NULL OR s.timestamp >= ?)
+            )
+            SELECT rs.item_id, rs.realm, rs.price, rs.timestamp, rs.rn, i.name, i.vendor_sell_price,
+                   COALESCE(NULLIF(i.vendor_buy_price, 0), i.vendor_buy_copper, 0) AS vendor_buy_price
+            FROM ranked_snapshots rs
+            JOIN items i ON rs.item_id = i.item_id
+            WHERE rs.rn <= ?
+            ORDER BY rs.item_id, rs.realm, rs.rn ASC
+        """
+        cursor.execute(query, (realm, realm, min_ts, min_ts, window_size))
+        rows = cursor.fetchall()
+    except sqlite3.OperationalError:
+        query = """
+            WITH ranked_snapshots AS (
+                SELECT s.item_id, s.realm, s.price, s.timestamp, s.id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY s.item_id, s.realm
+                           ORDER BY s.timestamp DESC, s.id DESC
+                       ) as rn
+                FROM price_snapshots s
+                WHERE (? IS NULL OR s.realm = ?)
+                  AND (? IS NULL OR s.timestamp >= ?)
+            )
+            SELECT rs.item_id, rs.realm, rs.price, rs.timestamp, rs.rn, i.name, i.vendor_sell_price, i.vendor_buy_price
+            FROM ranked_snapshots rs
+            JOIN items i ON rs.item_id = i.item_id
+            WHERE rs.rn <= ?
+            ORDER BY rs.item_id, rs.realm, rs.rn ASC
+        """
+        cursor.execute(query, (realm, realm, min_ts, min_ts, window_size))
+        rows = cursor.fetchall()
 
     grouped = defaultdict(list)
     item_names = {}
     item_vendor_sells = {}
+    item_vendor_buys = {}
     for r in rows:
         item_id, r_realm, price, ts, rn, name, v_sell = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
+        v_buy = r[7] if len(r) > 7 else 0
         grouped[(item_id, r_realm)].append((rn, price))
         item_names[item_id] = name
         item_vendor_sells[item_id] = v_sell or 0
+        item_vendor_buys[item_id] = v_buy or 0
 
     results = []
     for (item_id, item_realm), entries in grouped.items():
-        if len(entries) < min_samples:
+        if len(entries) < min_samples or len(entries) < 2:
             continue
 
         # entries sorted by rn ASC, so rn=1 is the most recent snapshot
         current_price = entries[0][1]
         all_prices = [p for _, p in entries]
         n = len(all_prices)
+        if n < 2:
+            continue
         mu = sum(all_prices) / n
 
         denom = max(1, n - ddof)
-        var = sum((p - mu) ** 2 for p in all_prices) / denom
+        var = max(0.0, sum((p - mu) ** 2 for p in all_prices) / denom)
         sigma = math.sqrt(var)
         z = ((current_price - mu) / sigma) if sigma > 0 else 0.0
 
+        if math.isnan(z) or math.isinf(z):
+            z = 0.0
+        if math.isnan(sigma) or math.isinf(sigma):
+            sigma = 0.0
+        if math.isnan(mu) or math.isinf(mu):
+            mu = 0.0
+
         v_sell = item_vendor_sells.get(item_id, 0) or 0
+        v_buy = item_vendor_buys.get(item_id, 0) or 0
+        is_vendor_markup = (v_buy > 0 and current_price >= v_buy)
+
         deposit = max(15, int(v_sell * 0.05))
         expected_revenue = mu * 0.95
         expected_net_profit = expected_revenue - current_price - deposit
         expected_roi = (expected_net_profit / current_price) if current_price > 0 else 0.0
 
         signal = None
-        if z <= z_buy_threshold and expected_net_profit >= min_profit_copper:
+        if z <= z_buy_threshold and expected_net_profit >= min_profit_copper and not is_vendor_markup:
             signal = "STRONG_BUY"
         elif z >= z_sell_threshold:
             signal = "STRONG_SELL"

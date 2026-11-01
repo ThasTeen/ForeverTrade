@@ -7,7 +7,9 @@ Verifies real functional execution of:
 No paper tests (no source reading / regex); executes actual SQLite database transactions and math.
 """
 
+import json
 import math
+import os
 import sqlite3
 import time
 import pytest
@@ -15,9 +17,12 @@ import pytest
 from src.database import init_db, load_catalog, load_recipes
 from src.analytics import (
     get_vendor_arbitrage,
+    get_vendor_shuffle,
     get_crafting_margins,
     get_zscore_anomalies,
     get_waylaid_crate_arbitrage,
+    check_and_reload_overrides,
+    reload_overrides,
     VENDOR_REAGENTS_WHITELIST,
 )
 
@@ -1307,3 +1312,322 @@ def test_analytics_max_age_hours_ttl_filtering(memory_db):
     anoms_all = get_zscore_anomalies(memory_db, max_age_hours=None)
     anom_ids_all = {a["item_id"] for a in anoms_all}
     assert 8407 in anom_ids_all
+
+
+# ---------------------------------------------------------------------------
+# Ticket 19 Tests
+# ---------------------------------------------------------------------------
+
+def test_crafting_margins_reagent_cost_capped_at_vendor_buy(memory_db):
+    """Verify reagent unit cost is capped at min(P_AH, P_vendor_buy) when vendor_buy > 0."""
+    now = int(time.time())
+    with memory_db:
+        # Items setup:
+        # 7001: Crafted potion, AH price = 400 copper, vendor_sell_price = 10 -> deposit = 15.
+        # 7002: Reagent A with vendor_buy_price = 100. Inflated AH price = 250 -> must cap at 100.
+        # 7003: Reagent B with vendor_buy_price = 80. Discounted AH price = 50 -> must take AH 50.
+        # 7004: Reagent C with vendor_buy_copper = 40 (only copper column set). No AH snapshot -> takes vendor 40.
+        memory_db.executemany(
+            """INSERT INTO items (
+                   item_id, name, quality, vendor_sell_price, vendor_buy_price,
+                   vendor_sell_copper, vendor_buy_copper
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (7001, "Test Crafted Elixir", 1, 10, 0, 10, 0),
+                (7002, "Inflated AH Vendor Reagent", 1, 5, 100, 5, 100),
+                (7003, "Discounted AH Vendor Reagent", 1, 5, 80, 5, 80),
+                (7004, "No AH Vendor Reagent", 1, 5, 0, 5, 40),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (7001, "Everlook", 400, now),
+                (7002, "Everlook", 250, now),
+                (7003, "Everlook", 50, now),
+            ]
+        )
+        memory_db.execute(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            (701, "Elixir of Capped Costs", "Alchemy", 7001, 1.0)
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (701, 7002, 7002, 2, 2),  # 2x 7002: unit cost min(250, 100) = 100 -> total 200
+                (701, 7003, 7003, 1, 1),  # 1x 7003: unit cost min(50, 80) = 50 -> total 50
+                (701, 7004, 7004, 1, 1),  # 1x 7004: unit cost 40 (no AH) -> total 40
+            ]
+        )
+
+    # 1. Base crafting (has_bartering=False)
+    results = get_crafting_margins(memory_db, has_bartering=False, min_roi=0.25)
+    matching = [r for r in results if r["recipe_id"] == 701]
+    assert len(matching) == 1
+    r701 = matching[0]
+
+    # Total cost = 2*100 + 1*50 + 1*40 = 290.0
+    # Net revenue = 400 * 0.95 = 380.0
+    # Deposit = max(15, int(10 * 0.05)) = 15
+    # Profit = 380.0 - 290.0 - 15 = 75.0
+    # ROI = 75.0 / 290.0 = 0.2586 (25.86% >= 25%)
+    assert r701["cost"] == 290.0
+    assert r701["revenue"] == 380.0
+    assert r701["deposit"] == 15
+    assert r701["profit"] == 75.0
+    assert r701["roi"] == 0.2586
+
+    reagents_dict = {rg["item_id"]: rg for rg in r701["reagents"]}
+    assert reagents_dict[7002]["unit_cost"] == 100.0
+    assert reagents_dict[7002]["total_cost"] == 200.0
+    assert reagents_dict[7002]["is_vendor"] is True
+
+    assert reagents_dict[7003]["unit_cost"] == 50.0
+    assert reagents_dict[7003]["total_cost"] == 50.0
+    assert reagents_dict[7003]["is_vendor"] is True
+
+    assert reagents_dict[7004]["unit_cost"] == 40.0
+    assert reagents_dict[7004]["total_cost"] == 40.0
+    assert reagents_dict[7004]["is_vendor"] is True
+
+    # 2. With bartering (has_bartering=True): 5% vendor discount on vendor buy prices
+    # 7002: eff_v_buy = 95 -> min(250, 95) = 95 -> 2*95 = 190
+    # 7003: eff_v_buy = 76 -> min(50, 76) = 50 -> 1*50 = 50
+    # 7004: eff_v_buy = 38 -> 1*38 = 38
+    # Total cost = 190 + 50 + 38 = 278.0
+    # Profit = 380.0 - 278.0 - 15 = 87.0
+    # ROI = 87.0 / 278.0 = 0.3129
+    results_barter = get_crafting_margins(memory_db, has_bartering=True, min_roi=0.25)
+    r701_barter = next(r for r in results_barter if r["recipe_id"] == 701)
+    assert r701_barter["cost"] == 278.0
+    assert r701_barter["profit"] == 87.0
+    assert r701_barter["roi"] == 0.3129
+
+
+def test_zscore_anomalies_blocks_vendor_markup_strong_buy(memory_db):
+    """Verify get_zscore_anomalies blocks STRONG_BUY when vendor_buy_price > 0 and current_price >= vendor_buy_price."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (
+                   item_id, name, quality, vendor_sell_price, vendor_buy_price,
+                   vendor_sell_copper, vendor_buy_copper
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                # 7101: vendor item (vendor_buy = 100), current AH price 200 >= 100 -> BLOCKED
+                (7101, "Vendor Markup Trap", 1, 10, 100, 10, 100),
+                # 7102: vendor item (vendor_buy = 100), current AH price 30 < 100 -> ALLOWED STRONG_BUY
+                (7102, "True Panic Dump Vendor Item", 1, 10, 100, 10, 100),
+                # 7103: vendor item via vendor_buy_copper alias (100), current AH price 150 >= 100 -> BLOCKED
+                (7103, "Copper Alias Markup Trap", 1, 10, 0, 10, 100),
+                # 7104: non-vendor item (vendor_buy = 0), current AH price 200 -> ALLOWED STRONG_BUY
+                (7104, "Normal Non-Vendor Item", 1, 10, 0, 10, 0),
+            ]
+        )
+
+        # Insert 7 snapshots per item: 6 historical at 500, then recent drop
+        snapshots = []
+        for item_id in [7101, 7102, 7103, 7104]:
+            for t_offset in range(60, 0, -10):
+                snapshots.append((item_id, "Everlook", 500, now - t_offset))
+
+        # Recent snapshot (current price):
+        snapshots.append((7101, "Everlook", 200, now))  # 200 >= 100 -> trap
+        snapshots.append((7102, "Everlook", 30, now))   # 30 < 100 -> real dump
+        snapshots.append((7103, "Everlook", 150, now))  # 150 >= 100 -> trap
+        snapshots.append((7104, "Everlook", 200, now))  # normal item -> real dump
+
+        memory_db.executemany(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            snapshots
+        )
+
+    anomalies = get_zscore_anomalies(memory_db, window_size=15, min_samples=6)
+    signals_by_id = {a["item_id"]: a["signal"] for a in anomalies}
+
+    # 7101 and 7103 must be blocked from STRONG_BUY
+    assert 7101 not in signals_by_id
+    assert 7103 not in signals_by_id
+
+    # 7102 (current_price 30 < vendor 100) must trigger STRONG_BUY
+    assert signals_by_id.get(7102) == "STRONG_BUY"
+
+    # 7104 (non-vendor item) must trigger STRONG_BUY
+    assert signals_by_id.get(7104) == "STRONG_BUY"
+
+
+def test_vendor_shuffle_signal_and_wrapper(memory_db):
+    """Verify VENDOR_SHUFFLE signal in get_vendor_arbitrage and get_vendor_shuffle wrapper."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (7201, "Vendor Shuffle Gold", 1, 200, 0),
+                (7202, "Vendor Shuffle Silver", 1, 160, 0),
+                (7203, "Sub-threshold Item", 1, 120, 0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (7201, "Everlook", 80, now),   # profit 120 >= 50 -> INCLUDED
+                (7202, "Everlook", 100, now),  # profit 60 >= 50 -> INCLUDED
+                (7203, "Everlook", 100, now),  # profit 20 < 50 -> EXCLUDED
+            ]
+        )
+
+    # 1. get_vendor_arbitrage outputs VENDOR_SHUFFLE signal
+    arb_results = get_vendor_arbitrage(memory_db, min_profit_copper=50)
+    assert len(arb_results) == 2
+    for r in arb_results:
+        assert r["signal"] == "VENDOR_SHUFFLE"
+        assert r["profit_copper"] >= 50
+
+    # 2. get_vendor_shuffle alias outputs identical results with VENDOR_SHUFFLE signal
+    shuffle_results = get_vendor_shuffle(memory_db, min_profit_copper=50)
+    assert shuffle_results == arb_results
+    assert shuffle_results[0]["item_id"] == 7201
+    assert shuffle_results[0]["signal"] == "VENDOR_SHUFFLE"
+    assert shuffle_results[0]["profit_copper"] == 120
+    assert shuffle_results[1]["item_id"] == 7202
+    assert shuffle_results[1]["signal"] == "VENDOR_SHUFFLE"
+    assert shuffle_results[1]["profit_copper"] == 60
+
+
+def test_zscore_anomalies_day1_hardening_small_samples(memory_db):
+    """Verify Day-1 hardening in get_zscore_anomalies: safe against N < min_samples and sigma == 0."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (7400, "Zero Samples Item", 1, 10, 0),
+                (7401, "1 Sample Item", 1, 10, 0),
+                (7402, "2 Samples Item", 1, 10, 0),
+                (7403, "3 Samples Item", 1, 10, 0),
+                (7404, "4 Samples Item", 1, 10, 0),
+                (7405, "5 Samples Item", 1, 10, 0),
+                (7406, "Zero Variance 6 Samples", 1, 10, 0),
+            ]
+        )
+        # 7401 has 1 snapshot
+        memory_db.execute("INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (7401, 'Everlook', 100, ?)", (now,))
+        # 7402 has 2 snapshots
+        memory_db.executemany("INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (7402, 'Everlook', ?, ?)", [(100, now - 10), (100, now)])
+        # 7403 has 3 snapshots
+        memory_db.executemany("INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (7403, 'Everlook', ?, ?)", [(100, now - 20), (100, now - 10), (50, now)])
+        # 7404 has 4 snapshots
+        memory_db.executemany("INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (7404, 'Everlook', ?, ?)", [(100, now - 30), (100, now - 20), (100, now - 10), (50, now)])
+        # 7405 has 5 snapshots
+        memory_db.executemany("INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (7405, 'Everlook', ?, ?)", [(100, now - 40), (100, now - 30), (100, now - 20), (100, now - 10), (50, now)])
+        # 7406 has 6 snapshots all identical price 100 (sigma = 0)
+        memory_db.executemany("INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (7406, 'Everlook', 100, ?)", [(now - t,) for t in [50, 40, 30, 20, 10, 0]])
+
+    # 1. Under default min_samples=6: items 7400-7405 have N < 6, 7406 has sigma=0
+    # Must NOT raise any ZeroDivisionError, ValueError or KeyError; returns safe empty list
+    results = get_zscore_anomalies(memory_db, min_samples=6)
+    assert isinstance(results, list)
+    assert len(results) == 0
+
+    # 2. Test with min_samples=3: items with N=1, 2 safely skipped, items with N=3, 4, 5 evaluated without error
+    results_min3 = get_zscore_anomalies(memory_db, min_samples=3)
+    assert isinstance(results_min3, list)
+    for r in results_min3:
+        assert not math.isnan(r["z_score"])
+        assert not math.isinf(r["z_score"])
+        assert not math.isnan(r["std_dev"])
+
+    # 3. Test with min_samples=1: len(entries) < 2 guard prevents crash on N=1
+    results_min1 = get_zscore_anomalies(memory_db, min_samples=1)
+    assert isinstance(results_min1, list)
+    emitted_ids = {r["item_id"] for r in results_min1}
+    assert 7401 not in emitted_ids  # N=1 skipped by n < 2 guard safely
+
+
+def test_dynamic_reload_of_overrides_on_mtime_change(memory_db, tmp_path):
+    """Verify check_and_reload_overrides detects mtime changes and updates database records."""
+    overrides_file = tmp_path / "test_overrides.json"
+
+    # Initial file state
+    initial_data = [
+        {
+            "item_id": 7501,
+            "name": "Waylaid Supplies: Initial Wool",
+            "category": "waylaid_crate",
+            "target_item_id": 2592,
+            "target_item_count": 10,
+            "reward_copper": 1000,
+            "is_override": 1
+        }
+    ]
+    overrides_file.write_text(json.dumps(initial_data), encoding="utf-8")
+
+    # 1. Initial reload: returns True because mtime > 0
+    loaded = check_and_reload_overrides(memory_db, overrides_path=str(overrides_file))
+    assert loaded is True
+
+    row = memory_db.execute(
+        "SELECT name, reward_copper, category FROM items WHERE item_id = 7501"
+    ).fetchone()
+    assert row is not None
+    assert row["name"] == "Waylaid Supplies: Initial Wool"
+    assert row["reward_copper"] == 1000
+    assert row["category"] == "waylaid_crate"
+
+    # 2. Second check without file change: returns False
+    loaded_again = check_and_reload_overrides(memory_db, overrides_path=str(overrides_file))
+    assert loaded_again is False
+
+    # 3. Modify file content and bump mtime into the future
+    updated_data = [
+        {
+            "item_id": 7501,
+            "name": "Waylaid Supplies: Updated Wool",
+            "category": "waylaid_crate",
+            "target_item_id": 2592,
+            "target_item_count": 10,
+            "reward_copper": 3500,
+            "is_override": 1
+        },
+        {
+            "item_id": 7502,
+            "name": "Waylaid Supplies: Silk",
+            "category": "waylaid_crate",
+            "target_item_id": 4306,
+            "target_item_count": 15,
+            "reward_copper": 5000,
+            "is_override": 1
+        }
+    ]
+    overrides_file.write_text(json.dumps(updated_data), encoding="utf-8")
+    future_mtime = time.time() + 100.0
+    os.utime(str(overrides_file), (future_mtime, future_mtime))
+
+    # 4. Check again: mtime changed -> reloads and returns True
+    reloaded = check_and_reload_overrides(memory_db, overrides_path=str(overrides_file))
+    assert reloaded is True
+
+    row_7501 = memory_db.execute(
+        "SELECT name, reward_copper FROM items WHERE item_id = 7501"
+    ).fetchone()
+    assert row_7501["name"] == "Waylaid Supplies: Updated Wool"
+    assert row_7501["reward_copper"] == 3500
+
+    row_7502 = memory_db.execute(
+        "SELECT name, reward_copper FROM items WHERE item_id = 7502"
+    ).fetchone()
+    assert row_7502 is not None
+    assert row_7502["name"] == "Waylaid Supplies: Silk"
+    assert row_7502["reward_copper"] == 5000
+
+    # 5. Force reload via reload_overrides returns True even if mtime hasn't changed
+    forced = reload_overrides(memory_db, overrides_path=str(overrides_file))
+    assert forced is True
+

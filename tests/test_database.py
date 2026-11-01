@@ -1,6 +1,7 @@
 """Tests for src.database module under Ponytail doctrine (real functional execution, no paper tests)."""
 
 import datetime
+import json
 import sqlite3
 import time
 import pytest
@@ -544,4 +545,139 @@ def test_r45_recipes_and_reagents(populated_db):
     reagents_4005 = {row["reagent_item_id"] for row in cursor.fetchall()}
     assert 2450 in reagents_4005, "Recipe 4005 must use Briarthorn (2450)"
     assert 2452 not in reagents_4005, "Recipe 4005 must NOT use Swiftthistle (2452)"
+
+
+def test_vendor_copper_columns_and_bidirectional_sync(memory_db, tmp_path):
+    """Verify vendor_buy_copper and vendor_sell_copper fields in load_catalog and items table.
+
+    Asserts column aliases work and bidirectional synchronization holds via triggers.
+    """
+    # 1. Verify schema: vendor_sell_copper and vendor_buy_copper exist in items table
+    cursor = memory_db.cursor()
+    cursor.execute("PRAGMA table_info(items);")
+    cols = {row["name"] for row in cursor.fetchall()}
+    assert "vendor_sell_copper" in cols
+    assert "vendor_buy_copper" in cols
+    assert "vendor_sell_price" in cols
+    assert "vendor_buy_price" in cols
+
+    # 2. Verify load_catalog populates vendor_*_copper and matches vendor_*_price
+    total_loaded = load_catalog(memory_db)
+    assert total_loaded > 0
+
+    # Copper Bar (2840): vendor_sell = 10, vendor_buy = 0
+    row_copper = memory_db.execute(
+        "SELECT vendor_sell_price, vendor_sell_copper, vendor_buy_price, vendor_buy_copper FROM items WHERE item_id = 2840"
+    ).fetchone()
+    assert row_copper is not None
+    assert row_copper["vendor_sell_price"] == 10
+    assert row_copper["vendor_sell_copper"] == 10
+    assert row_copper["vendor_buy_price"] == 0
+    assert row_copper["vendor_buy_copper"] == 0
+
+    # get_item returns both aliases consistently
+    item_copper = get_item(memory_db, 2840)
+    assert item_copper["vendor_sell_copper"] == item_copper["vendor_sell_price"] == 10
+    assert item_copper["vendor_buy_copper"] == item_copper["vendor_buy_price"] == 0
+
+    # 3. Custom catalog files: one using *_copper, another using *_price
+    custom_era = tmp_path / "custom_era.json"
+    custom_era.write_text(json.dumps([
+        {
+            "item_id": 9101,
+            "name": "Copper Only Item",
+            "vendor_sell_copper": 150,
+            "vendor_buy_copper": 500,
+        },
+        {
+            "item_id": 9102,
+            "name": "Price Only Item",
+            "vendor_sell_price": 250,
+            "vendor_buy_price": 600,
+        }
+    ]), encoding="utf-8")
+
+    db2 = init_db(":memory:")
+    try:
+        load_catalog(db2, era_catalog_path=str(custom_era), overrides_path=str(tmp_path / "empty_overrides.json"))
+
+        row_9101 = db2.execute(
+            "SELECT vendor_sell_price, vendor_sell_copper, vendor_buy_price, vendor_buy_copper FROM items WHERE item_id = 9101"
+        ).fetchone()
+        assert row_9101["vendor_sell_copper"] == 150
+        assert row_9101["vendor_sell_price"] == 150
+        assert row_9101["vendor_buy_copper"] == 500
+        assert row_9101["vendor_buy_price"] == 500
+
+        row_9102 = db2.execute(
+            "SELECT vendor_sell_price, vendor_sell_copper, vendor_buy_price, vendor_buy_copper FROM items WHERE item_id = 9102"
+        ).fetchone()
+        assert row_9102["vendor_sell_price"] == 250
+        assert row_9102["vendor_sell_copper"] == 250
+        assert row_9102["vendor_buy_price"] == 600
+        assert row_9102["vendor_buy_copper"] == 600
+    finally:
+        db2.close()
+
+    # 4. Direct INSERT triggers bidirectional synchronization
+    with memory_db:
+        # Insert specifying only vendor_*_price
+        memory_db.execute(
+            "INSERT INTO items (item_id, name, vendor_sell_price, vendor_buy_price) VALUES (?, ?, ?, ?)",
+            (9201, "Sync Test Price", 120, 340)
+        )
+        # Insert specifying only vendor_*_copper
+        memory_db.execute(
+            "INSERT INTO items (item_id, name, vendor_sell_copper, vendor_buy_copper) VALUES (?, ?, ?, ?)",
+            (9202, "Sync Test Copper", 220, 440)
+        )
+
+    r_9201 = memory_db.execute(
+        "SELECT vendor_sell_price, vendor_sell_copper, vendor_buy_price, vendor_buy_copper FROM items WHERE item_id = 9201"
+    ).fetchone()
+    assert r_9201["vendor_sell_copper"] == 120
+    assert r_9201["vendor_buy_copper"] == 340
+
+    r_9202 = memory_db.execute(
+        "SELECT vendor_sell_price, vendor_sell_copper, vendor_buy_price, vendor_buy_copper FROM items WHERE item_id = 9202"
+    ).fetchone()
+    assert r_9202["vendor_sell_price"] == 220
+    assert r_9202["vendor_buy_price"] == 440
+
+    # 5. Direct UPDATE triggers bidirectional synchronization
+    with memory_db:
+        # Update vendor_sell_price -> syncs vendor_sell_copper
+        memory_db.execute("UPDATE items SET vendor_sell_price = 555 WHERE item_id = 9201")
+    r = memory_db.execute("SELECT vendor_sell_price, vendor_sell_copper FROM items WHERE item_id = 9201").fetchone()
+    assert r["vendor_sell_price"] == 555
+    assert r["vendor_sell_copper"] == 555
+
+    with memory_db:
+        # Update vendor_sell_copper -> syncs vendor_sell_price
+        memory_db.execute("UPDATE items SET vendor_sell_copper = 666 WHERE item_id = 9201")
+    r = memory_db.execute("SELECT vendor_sell_price, vendor_sell_copper FROM items WHERE item_id = 9201").fetchone()
+    assert r["vendor_sell_price"] == 666
+    assert r["vendor_sell_copper"] == 666
+
+    with memory_db:
+        # Update vendor_buy_price -> syncs vendor_buy_copper
+        memory_db.execute("UPDATE items SET vendor_buy_price = 777 WHERE item_id = 9201")
+    r = memory_db.execute("SELECT vendor_buy_price, vendor_buy_copper FROM items WHERE item_id = 9201").fetchone()
+    assert r["vendor_buy_price"] == 777
+    assert r["vendor_buy_copper"] == 777
+
+    with memory_db:
+        # Update vendor_buy_copper -> syncs vendor_buy_price
+        memory_db.execute("UPDATE items SET vendor_buy_copper = 888 WHERE item_id = 9201")
+    r = memory_db.execute("SELECT vendor_buy_price, vendor_buy_copper FROM items WHERE item_id = 9201").fetchone()
+    assert r["vendor_buy_price"] == 888
+    assert r["vendor_buy_copper"] == 888
+
+    # Verify get_item helper returns updated synchronized values
+    item_9201 = get_item(memory_db, 9201)
+    assert item_9201["vendor_sell_price"] == 666
+    assert item_9201["vendor_sell_copper"] == 666
+    assert item_9201["vendor_buy_price"] == 888
+    assert item_9201["vendor_buy_copper"] == 888
+
 
