@@ -1,5 +1,6 @@
 """File system watcher and ETL pipeline for Auctionator SavedVariables."""
 
+import hashlib
 import logging
 import os
 import sqlite3
@@ -163,6 +164,19 @@ def _parse_single_lua_file(path: str) -> dict:
     raise ValueError(f"Unserialized data from '{path}' is not a valid dictionary")
 
 
+def _compute_file_meta(path: str) -> Tuple[int, str]:
+    """Compute file modification time and sha256 content hash."""
+    mtime = int(os.path.getmtime(path))
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            hasher.update(chunk)
+    return mtime, hasher.hexdigest()
+
+
+_IN_MEMORY_ETL_META: Dict[Tuple[int, str], Dict[str, Any]] = {}
+
+
 def parse_auctionator_data(file_path: str) -> dict:
     """Safely parse AUCTIONATOR_PRICE_DATABASE via luadata with automatic fallback to .bak."""
     if file_path.endswith(".bak") and os.path.isfile(file_path):
@@ -176,7 +190,9 @@ def parse_auctionator_data(file_path: str) -> dict:
             raise ValueError(f"Backup file '{file_path}' is older than 2 hours")
         data = _parse_single_lua_file(file_path)
         if isinstance(data, dict):
-            data["_source_mtime"] = bak_mtime
+            mtime, content_hash = _compute_file_meta(file_path)
+            data["_source_mtime"] = mtime
+            data["_content_hash"] = content_hash
         return data
 
     bak_candidates = [f"{file_path}.bak"]
@@ -185,7 +201,12 @@ def parse_auctionator_data(file_path: str) -> dict:
 
     primary_error: Optional[Exception] = None
     try:
-        return _parse_single_lua_file(file_path)
+        data = _parse_single_lua_file(file_path)
+        if isinstance(data, dict):
+            mtime, content_hash = _compute_file_meta(file_path)
+            data["_source_mtime"] = mtime
+            data["_content_hash"] = content_hash
+        return data
     except Exception as e:
         primary_error = e
         logger.warning(
@@ -208,7 +229,9 @@ def parse_auctionator_data(file_path: str) -> dict:
             try:
                 data = _parse_single_lua_file(bak_path)
                 if isinstance(data, dict):
-                    data["_source_mtime"] = bak_mtime
+                    mtime, content_hash = _compute_file_meta(bak_path)
+                    data["_source_mtime"] = mtime
+                    data["_content_hash"] = content_hash
                 logger.info(
                     "Successfully loaded fallback backup file '%s' (mtime=%d)",
                     bak_path,
@@ -235,10 +258,14 @@ def ingest_price_snapshot(
     dedupe_window_minutes: int = 10,
     source_mtime: Optional[int] = None,
     current_time: Optional[int] = None,
+    content_hash: Optional[str] = None,
 ) -> int:
     """Ingest price snapshot for the given realm with 10-minute deduplication and batch insertion."""
     if source_mtime is None and isinstance(raw_data, dict):
         source_mtime = raw_data.get("_source_mtime")
+
+    if content_hash is None and isinstance(raw_data, dict):
+        content_hash = raw_data.get("_content_hash")
 
     effective_time = source_mtime if source_mtime is not None else current_time
     now = int(time.time()) if effective_time is None else int(effective_time)
@@ -271,13 +298,46 @@ def ingest_price_snapshot(
         if realm_data is None and any(normalize_item_id(k) is not None for k in raw_data.keys()):
             realm_data = raw_data
 
+    if source_mtime is None and isinstance(realm_data, dict):
+        source_mtime = realm_data.get("_source_mtime")
+    if content_hash is None and isinstance(realm_data, dict):
+        content_hash = realm_data.get("_content_hash")
+
     if not realm_data or not isinstance(realm_data, dict):
         logger.info("Ingested 0 price snapshots for realm '%s' (no realm data found)", realm)
         return 0
 
+    cur = conn.cursor()
+    last_hash: Optional[str] = None
+    last_mtime: Optional[int] = None
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _etl_metadata (
+                realm TEXT PRIMARY KEY,
+                content_hash TEXT,
+                source_mtime INTEGER,
+                last_imported_time INTEGER
+            )
+            """
+        )
+        cur.execute(
+            "SELECT content_hash, source_mtime FROM _etl_metadata WHERE realm = ?",
+            (realm,),
+        )
+        row = cur.fetchone()
+        if row:
+            last_hash, last_mtime = row[0], row[1]
+    except sqlite3.Error:
+        pass
+
+    mem_key = (id(conn), realm)
+    if last_hash is None and last_mtime is None and mem_key in _IN_MEMORY_ETL_META:
+        last_hash = _IN_MEMORY_ETL_META[mem_key].get("content_hash")
+        last_mtime = _IN_MEMORY_ETL_META[mem_key].get("source_mtime")
+
     # Query latest snapshot for each item in the realm for deduplication
     existing_latest: Dict[int, Tuple[int, int]] = {}
-    cur = conn.cursor()
     try:
         cur.execute(
             "SELECT item_id, price, MAX(timestamp) FROM price_snapshots WHERE realm = ? GROUP BY item_id",
@@ -291,7 +351,7 @@ def ingest_price_snapshot(
     batch_to_insert: List[Tuple[int, str, int, int]] = []
 
     for raw_key, val in realm_data.items():
-        if raw_key == "_source_mtime":
+        if raw_key in ("_source_mtime", "_content_hash"):
             continue
         item_id = normalize_item_id(raw_key)
         if item_id is None and isinstance(val, dict):
@@ -368,19 +428,39 @@ def ingest_price_snapshot(
         if isinstance(price, bool):
             price = None
 
-        if price is None or price < 0:
+        if price is None or price <= 0:
             continue
 
-        # Deduplication: identical price within dedupe window is skipped
+        # Deduplication: identical price within dedupe window or unchanged file cache is skipped
         if item_id in existing_latest:
             prev_price, prev_time = existing_latest[item_id]
-            if prev_price == price and abs(now - prev_time) < window_seconds:
-                continue
+            if prev_price == price:
+                if (
+                    (source_mtime is not None and prev_time == source_mtime)
+                    or (content_hash is not None and last_hash is not None and content_hash == last_hash)
+                    or (source_mtime is not None and last_mtime is not None and source_mtime == last_mtime)
+                    or abs(now - prev_time) < window_seconds
+                ):
+                    continue
 
         existing_latest[item_id] = (price, now)
         batch_to_insert.append((item_id, realm, price, now))
 
     if not batch_to_insert:
+        if content_hash is not None or source_mtime is not None:
+            _IN_MEMORY_ETL_META[mem_key] = {
+                "content_hash": content_hash,
+                "source_mtime": source_mtime,
+                "last_imported_time": now,
+            }
+            try:
+                with conn:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO _etl_metadata (realm, content_hash, source_mtime, last_imported_time) VALUES (?, ?, ?, ?)",
+                        (realm, content_hash, source_mtime, now),
+                    )
+            except sqlite3.Error:
+                pass
         logger.info(
             "Ingested 0 price snapshots for realm '%s' (all lots deduplicated or empty)",
             realm,
@@ -403,6 +483,19 @@ def ingest_price_snapshot(
                 "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
                 batch_to_insert,
             )
+            if content_hash is not None or source_mtime is not None:
+                _IN_MEMORY_ETL_META[mem_key] = {
+                    "content_hash": content_hash,
+                    "source_mtime": source_mtime,
+                    "last_imported_time": now,
+                }
+                try:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO _etl_metadata (realm, content_hash, source_mtime, last_imported_time) VALUES (?, ?, ?, ?)",
+                        (realm, content_hash, source_mtime, now),
+                    )
+                except sqlite3.Error:
+                    pass
 
         inserted_count = len(batch_to_insert)
         logger.info("Ingested %d price snapshots for realm '%s'", inserted_count, realm)

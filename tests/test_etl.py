@@ -1,5 +1,6 @@
-"""Tests for File Watcher and ETL Pipeline (Ticket 02, R05, R06, R07, R08)."""
+"""Tests for File Watcher and ETL Pipeline (Ticket 02, R05, R06, R07, R08, R48)."""
 
+import hashlib
 import logging
 import os
 import sqlite3
@@ -226,6 +227,54 @@ class TestParseAuctionatorData:
         assert isinstance(data, dict)
         assert data.get("_source_mtime") == fresh_mtime
 
+    def test_parse_returns_mtime_and_content_hash_metadata(self, tmp_path):
+        """Verify parse_auctionator_data attaches _source_mtime (int) and _content_hash (sha256 hex) (R48)."""
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["2589"] = { ["m"] = 1500 }\n'
+            '  }\n'
+            '}\n'
+        )
+        lua_file = tmp_path / "Auctionator.lua"
+        lua_file.write_text(lua_content, encoding="utf-8")
+
+        expected_mtime = int(os.path.getmtime(str(lua_file)))
+        expected_hash = hashlib.sha256(lua_file.read_bytes()).hexdigest()
+
+        data = parse_auctionator_data(str(lua_file))
+        assert isinstance(data, dict)
+        assert "_source_mtime" in data
+        assert isinstance(data["_source_mtime"], int)
+        assert data["_source_mtime"] == expected_mtime
+        assert "_content_hash" in data
+        assert isinstance(data["_content_hash"], str)
+        assert data["_content_hash"] == expected_hash
+        assert len(data["_content_hash"]) == 64
+
+    def test_parse_fallback_bak_preserves_content_hash_and_mtime(self, tmp_path):
+        """Verify fallback to .bak also extracts valid _source_mtime and _content_hash (R48)."""
+        primary_file = tmp_path / "Auctionator.lua"
+        primary_file.write_text("invalid lua syntax !!!", encoding="utf-8")
+
+        bak_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["2589"] = { ["m"] = 800 }\n'
+            '  }\n'
+            '}\n'
+        )
+        bak_file = tmp_path / "Auctionator.lua.bak"
+        bak_file.write_text(bak_content, encoding="utf-8")
+
+        expected_bak_mtime = int(os.path.getmtime(str(bak_file)))
+        expected_bak_hash = hashlib.sha256(bak_file.read_bytes()).hexdigest()
+
+        data = parse_auctionator_data(str(primary_file))
+        assert isinstance(data, dict)
+        assert data.get("_source_mtime") == expected_bak_mtime
+        assert data.get("_content_hash") == expected_bak_hash
+
 
 class TestIngestPriceSnapshot:
     """Tests for batch ingestion, field extraction, deduplication, and logging (R07, R08)."""
@@ -425,6 +474,123 @@ class TestIngestPriceSnapshot:
         cur.execute("SELECT timestamp, price FROM price_snapshots WHERE item_id = 3000")
         row = cur.fetchone()
         assert tuple(row) == (fixed_mtime, 888)
+
+    def test_ingest_discards_zero_and_negative_prices(self, memory_db):
+        """Verify ingest_price_snapshot discards price <= 0 and records nothing into price_snapshots (R48)."""
+        raw_data = {
+            "Everlook": {
+                # Valid positive prices
+                "100": {"m": 500},
+                "200": 1200,
+                # Zero prices across different structures
+                "101": {"m": 0},
+                "102": {"mr": 0},
+                "103": {"price": 0},
+                "104": 0,
+                "105": "0",
+                "106": {"h": {"1700000000": 0}},
+                # Negative prices
+                "107": {"m": -50},
+                "108": -100,
+                "109": {"mr": -1},
+            }
+        }
+        count = ingest_price_snapshot(memory_db, raw_data, realm="Everlook", current_time=1000)
+        # Only items 100 and 200 should be ingested
+        assert count == 2
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT item_id, price FROM price_snapshots WHERE realm = 'Everlook' ORDER BY item_id")
+        rows = [tuple(r) for r in cur.fetchall()]
+        assert len(rows) == 2
+        assert rows[0] == (100, 500)
+        assert rows[1] == (200, 1200)
+
+        # Confirm explicitly that zero or negative prices are never recorded
+        cur.execute("SELECT COUNT(*) FROM price_snapshots WHERE price <= 0")
+        assert cur.fetchone()[0] == 0
+
+    def test_ingest_repeated_unchanged_file_prevents_false_observations(self, memory_db):
+        """Verify unchanged content_hash / source_mtime returns 0 and prevents duplicate rows after > 600s (R48)."""
+        file_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        source_mtime = 1700000000
+
+        raw_data = {
+            "_content_hash": file_hash,
+            "_source_mtime": source_mtime,
+            "Everlook": {
+                "2589": {"m": 1500},
+                "1205": {"m": 320},
+            },
+        }
+
+        # First import at t = 1700000000: inserts both items
+        inserted_1 = ingest_price_snapshot(
+            memory_db, raw_data, realm="Everlook", current_time=source_mtime
+        )
+        assert inserted_1 == 2
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT COUNT(*) FROM price_snapshots WHERE realm = 'Everlook'")
+        assert cur.fetchone()[0] == 2
+
+        # Second import at t = 1700001500 (1500 seconds later, > 600s dedupe window):
+        # File has identical content_hash and source_mtime -> must return 0 inserts
+        t_later = source_mtime + 1500
+        inserted_2 = ingest_price_snapshot(
+            memory_db, raw_data, realm="Everlook", current_time=t_later
+        )
+        assert inserted_2 == 0
+
+        # Verify no duplicate entries were created in price_snapshots
+        cur.execute("SELECT COUNT(*) FROM price_snapshots WHERE realm = 'Everlook'")
+        assert cur.fetchone()[0] == 2
+
+        # Third import with explicit arguments passing identical hash and mtime
+        inserted_3 = ingest_price_snapshot(
+            memory_db,
+            raw_data,
+            realm="Everlook",
+            current_time=source_mtime + 3600,
+            content_hash=file_hash,
+            source_mtime=source_mtime,
+        )
+        assert inserted_3 == 0
+
+        cur.execute("SELECT COUNT(*) FROM price_snapshots WHERE realm = 'Everlook'")
+        assert cur.fetchone()[0] == 2
+
+    def test_ingest_repeated_unchanged_file_persists_in_db_metadata(self, temp_db):
+        """Verify _etl_metadata table in SQLite persists file hash across connections to prevent duplicates (R48)."""
+        db_path, conn = temp_db
+        file_hash = "abcde1234567890f" * 4
+        fixed_mtime = 1710000000
+
+        raw_data = {
+            "_content_hash": file_hash,
+            "_source_mtime": fixed_mtime,
+            "Everlook": {
+                "5001": {"m": 9999},
+            },
+        }
+
+        # 1. Ingest on initial connection
+        assert ingest_price_snapshot(conn, raw_data, realm="Everlook", current_time=fixed_mtime) == 1
+
+        # 2. Open a brand new connection to simulate restarting process / new session
+        conn2 = sqlite3.connect(db_path)
+        try:
+            # More than 600 seconds later (2000s later)
+            count2 = ingest_price_snapshot(
+                conn2, raw_data, realm="Everlook", current_time=fixed_mtime + 2000
+            )
+            assert count2 == 0
+
+            cur = conn2.cursor()
+            cur.execute("SELECT COUNT(*) FROM price_snapshots WHERE item_id = 5001")
+            assert cur.fetchone()[0] == 1
+        finally:
+            conn2.close()
 
 
 class TestWatcherEngine:
