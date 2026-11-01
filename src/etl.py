@@ -35,26 +35,38 @@ if not any(
 
 
 def normalize_item_id(raw_id: Any) -> Optional[int]:
-    """Extract integer item ID from string or numeric signature (e.g., '2589:0:0:0:0' -> 2589, 'gr:1234:567' -> 1234)."""
+    """Extract integer item ID from string or numeric signature (e.g., '2589:0:0:0:0' -> 2589, 'g:1234:567' -> 1234, 'p:3858' -> 3858)."""
     if raw_id is None or isinstance(raw_id, bool):
         return None
     if isinstance(raw_id, int):
         return raw_id if raw_id > 0 else None
 
-    s = str(raw_id).strip()
+    try:
+        s = str(raw_id).strip()
+    except Exception:
+        return None
+
     if not s:
         return None
 
+    skip_prefixes = ("item", "gr", "g", "p", "i")
     parts = s.split(":")
     for part in parts:
         token = part.strip()
-        if not token or token.lower() in ("item", "gr"):
+        if not token:
             continue
+        low = token.lower()
+        if low in skip_prefixes:
+            continue
+        for pfx in skip_prefixes:
+            if low.startswith(pfx) and low[len(pfx) :].isdigit():
+                token = low[len(pfx) :]
+                break
         try:
             val = int(token)
             if val > 0:
                 return val
-        except ValueError:
+        except (ValueError, TypeError):
             continue
     return None
 
@@ -280,20 +292,53 @@ def ingest_price_snapshot(
     if alt_underscore not in realm_candidates:
         realm_candidates.append(alt_underscore)
 
+    target_realm = realm
     realm_data: Optional[dict] = None
+    db_dict = raw_data
     if isinstance(raw_data, dict):
+        if (
+            "AUCTIONATOR_PRICE_DATABASE" in raw_data
+            and isinstance(raw_data["AUCTIONATOR_PRICE_DATABASE"], dict)
+        ):
+            db_dict = raw_data["AUCTIONATOR_PRICE_DATABASE"]
+
         for cand in realm_candidates:
-            if cand in raw_data and isinstance(raw_data[cand], dict):
+            if cand in db_dict and isinstance(db_dict[cand], dict):
+                realm_data = db_dict[cand]
+                target_realm = cand
+                break
+            elif cand in raw_data and isinstance(raw_data[cand], dict):
                 realm_data = raw_data[cand]
+                target_realm = cand
                 break
-            elif (
-                "AUCTIONATOR_PRICE_DATABASE" in raw_data
-                and isinstance(raw_data["AUCTIONATOR_PRICE_DATABASE"], dict)
-                and cand in raw_data["AUCTIONATOR_PRICE_DATABASE"]
-                and isinstance(raw_data["AUCTIONATOR_PRICE_DATABASE"][cand], dict)
-            ):
-                realm_data = raw_data["AUCTIONATOR_PRICE_DATABASE"][cand]
-                break
+
+        # Realm auto-discovery: if realm not found among candidates and realm dictionaries exist
+        if realm_data is None and isinstance(db_dict, dict):
+            potential_realms = {}
+            for k, v in db_dict.items():
+                k_str = str(k)
+                if k_str.startswith("_") or k_str.lower() == "__dbversion":
+                    continue
+                if normalize_item_id(k) is not None:
+                    continue
+                if isinstance(v, dict):
+                    potential_realms[k_str] = v
+
+            if potential_realms:
+                discovered_realm = max(
+                    potential_realms.keys(),
+                    key=lambda r: len(potential_realms[r]),
+                )
+                realm_data = potential_realms[discovered_realm]
+                target_realm = discovered_realm
+                logger.warning(
+                    "Target realm '%s' not found in Auctionator data. Auto-discovered and selected realm '%s' with %d items.",
+                    realm,
+                    discovered_realm,
+                    len(realm_data),
+                )
+                if isinstance(raw_data, dict):
+                    raw_data["_discovered_realm"] = discovered_realm
 
         if realm_data is None and any(normalize_item_id(k) is not None for k in raw_data.keys()):
             realm_data = raw_data
@@ -323,7 +368,7 @@ def ingest_price_snapshot(
         )
         cur.execute(
             "SELECT content_hash, source_mtime FROM _etl_metadata WHERE realm = ?",
-            (realm,),
+            (target_realm,),
         )
         row = cur.fetchone()
         if row:
@@ -331,7 +376,7 @@ def ingest_price_snapshot(
     except sqlite3.Error:
         pass
 
-    mem_key = (id(conn), realm)
+    mem_key = (id(conn), target_realm)
     if last_hash is None and last_mtime is None and mem_key in _IN_MEMORY_ETL_META:
         last_hash = _IN_MEMORY_ETL_META[mem_key].get("content_hash")
         last_mtime = _IN_MEMORY_ETL_META[mem_key].get("source_mtime")
@@ -341,7 +386,7 @@ def ingest_price_snapshot(
     try:
         cur.execute(
             "SELECT item_id, price, MAX(timestamp) FROM price_snapshots WHERE realm = ? GROUP BY item_id",
-            (realm,),
+            (target_realm,),
         )
         for row in cur.fetchall():
             existing_latest[int(row[0])] = (int(row[1]), int(row[2]))
@@ -444,7 +489,7 @@ def ingest_price_snapshot(
                     continue
 
         existing_latest[item_id] = (price, now)
-        batch_to_insert.append((item_id, realm, price, now))
+        batch_to_insert.append((item_id, target_realm, price, now))
 
     if not batch_to_insert:
         if content_hash is not None or source_mtime is not None:
@@ -457,13 +502,13 @@ def ingest_price_snapshot(
                 with conn:
                     cur.execute(
                         "INSERT OR REPLACE INTO _etl_metadata (realm, content_hash, source_mtime, last_imported_time) VALUES (?, ?, ?, ?)",
-                        (realm, content_hash, source_mtime, now),
+                        (target_realm, content_hash, source_mtime, now),
                     )
             except sqlite3.Error:
                 pass
         logger.info(
             "Ingested 0 price snapshots for realm '%s' (all lots deduplicated or empty)",
-            realm,
+            target_realm,
         )
         return 0
 
@@ -492,17 +537,17 @@ def ingest_price_snapshot(
                 try:
                     cur.execute(
                         "INSERT OR REPLACE INTO _etl_metadata (realm, content_hash, source_mtime, last_imported_time) VALUES (?, ?, ?, ?)",
-                        (realm, content_hash, source_mtime, now),
+                        (target_realm, content_hash, source_mtime, now),
                     )
                 except sqlite3.Error:
                     pass
 
         inserted_count = len(batch_to_insert)
-        logger.info("Ingested %d price snapshots for realm '%s'", inserted_count, realm)
+        logger.info("Ingested %d price snapshots for realm '%s'", inserted_count, target_realm)
         return inserted_count
     except sqlite3.Error as e:
         logger.error(
-            "Failed to insert price snapshots for realm '%s': %s", realm, e, exc_info=True
+            "Failed to insert price snapshots for realm '%s': %s", target_realm, e, exc_info=True
         )
         return 0
 
@@ -547,27 +592,55 @@ class AuctionatorEventHandler(FileSystemEventHandler):
         if not event.is_directory and self._should_handle(dest):
             self._trigger_etl(dest)
 
+    def _wait_for_file_ready(self, file_path: str) -> bool:
+        """Wait for trailing-edge debounce, size stabilization, and file completeness ending with '}'."""
+        if self.debounce_seconds > 0:
+            time.sleep(self.debounce_seconds)
+
+        if not os.path.isfile(file_path):
+            return False
+
+        check_interval = min(0.2, self.debounce_seconds) if self.debounce_seconds > 0 else 0.05
+        try:
+            size1 = os.path.getsize(file_path)
+            time.sleep(check_interval)
+            size2 = os.path.getsize(file_path)
+            retries = 0
+            while size1 != size2 and retries < 5:
+                size1 = size2
+                time.sleep(check_interval)
+                size2 = os.path.getsize(file_path)
+                retries += 1
+        except OSError:
+            time.sleep(check_interval)
+
+        def _ends_with_brace(path: str) -> bool:
+            try:
+                with open(path, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    if size == 0:
+                        return False
+                    f.seek(max(0, size - 1024))
+                    tail = f.read().decode("utf-8", errors="replace").rstrip()
+                    return tail.endswith("}")
+            except OSError:
+                return False
+
+        if not _ends_with_brace(file_path):
+            retry_delay = 0.2 if self.debounce_seconds >= 0.2 else self.debounce_seconds
+            for _ in range(5):
+                time.sleep(retry_delay)
+                if _ends_with_brace(file_path):
+                    break
+
+        return True
+
     def _trigger_etl(self, file_path: str):
         with self._lock:
             target_file = file_path if os.path.isfile(file_path) else self.full_target_path
 
-            # Trailing-edge debounce: silence timer + file size stabilization
-            time.sleep(self.debounce_seconds)
-
-            check_interval = min(0.2, self.debounce_seconds)
-            if os.path.isfile(target_file):
-                try:
-                    size1 = os.path.getsize(target_file)
-                    time.sleep(check_interval)
-                    size2 = os.path.getsize(target_file)
-                    retries = 0
-                    while size1 != size2 and retries < 5:
-                        size1 = size2
-                        time.sleep(check_interval)
-                        size2 = os.path.getsize(target_file)
-                        retries += 1
-                except OSError:
-                    time.sleep(check_interval)
+            self._wait_for_file_ready(target_file)
 
             now = time.time()
             self._last_processed = now
@@ -581,6 +654,8 @@ class AuctionatorEventHandler(FileSystemEventHandler):
                 conn = init_db(self.db_path)
                 try:
                     count = ingest_price_snapshot(conn, raw_data, self.realm, source_mtime=src_mtime)
+                    if isinstance(raw_data, dict) and "_discovered_realm" in raw_data:
+                        self.realm = raw_data["_discovered_realm"]
                     logger.info(
                         "Watcher ETL finished: %d snapshots ingested from '%s'",
                         count,

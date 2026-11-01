@@ -115,18 +115,26 @@ def initial_ingest(conn: sqlite3.Connection, watch_dir: str, realm: str) -> int:
     if alt_underscore not in realm_candidates:
         realm_candidates.append(alt_underscore)
 
+    effective_realm = realm
     if available_realms and not any(cand in available_realms for cand in realm_candidates):
+        discovered_realm = max(
+            available_realms,
+            key=lambda r: len(db_table[r]) if isinstance(db_table.get(r), dict) else 0,
+        )
+        realm_item_count = len(db_table[discovered_realm]) if isinstance(db_table.get(discovered_realm), dict) else 0
         warning_msg = (
             f"Realm '{realm}' not found in '{lua_path}'. "
-            f"Available realms: {', '.join(sorted(available_realms))}"
+            f"Available realms: {', '.join(sorted(available_realms))}. "
+            f"Auto-discovered and selected realm '{discovered_realm}' with {realm_item_count} items."
         )
         print(f"[!] Warning: {warning_msg}")
         logger.warning(warning_msg)
+        effective_realm = discovered_realm
 
     source_mtime = raw_data.get("_source_mtime") if isinstance(raw_data, dict) else None
-    count = ingest_price_snapshot(conn, raw_data, realm, source_mtime=source_mtime)
-    print(f"[*] Initial ingest from existing '{lua_path}': {count} snapshots for realm '{realm}'.")
-    logger.info("Initial ingest from existing '%s': %d snapshots for realm '%s'.", lua_path, count, realm)
+    count = ingest_price_snapshot(conn, raw_data, effective_realm, source_mtime=source_mtime)
+    print(f"[*] Initial ingest from existing '{lua_path}': {count} snapshots for realm '{effective_realm}'.")
+    logger.info("Initial ingest from existing '%s': %d snapshots for realm '%s'.", lua_path, count, effective_realm)
     return count
 
 

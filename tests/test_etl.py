@@ -81,6 +81,24 @@ class TestNormalizeItemId:
         assert normalize_item_id(-10) is None
         assert normalize_item_id("-10:0:0") is None
 
+    def test_normalize_composite_auctionator_keys(self):
+        """Verify normalization of composite Auctionator keys and safe handling of malformed keys."""
+        assert normalize_item_id("g:1234:567") == 1234
+        assert normalize_item_id("p:3858") == 3858
+        assert normalize_item_id("item:2450:0") == 2450
+        assert normalize_item_id("2452:0:0:0") == 2452
+
+        # Invalid/malformed keys safely return None
+        assert normalize_item_id("g:") is None
+        assert normalize_item_id("p:") is None
+        assert normalize_item_id("item:") is None
+        assert normalize_item_id(":::") is None
+        assert normalize_item_id("g:abc:def") is None
+        assert normalize_item_id("p:xyz") is None
+        assert normalize_item_id("unknown:format") is None
+        assert normalize_item_id("") is None
+        assert normalize_item_id(None) is None
+
 
 class TestParseAuctionatorData:
     """Tests for safe Lua parsing and fallback mechanism (R06)."""
@@ -595,6 +613,66 @@ class TestIngestPriceSnapshot:
         finally:
             conn2.close()
 
+    def test_ingest_price_snapshot_realm_autodiscovery(self, memory_db, caplog):
+        """Verify ingest_price_snapshot auto-discovers realm with max item count when target realm is missing."""
+        raw_data = {
+            "__dbversion": 1,
+            "_source_mtime": 1700000000,
+            "SmallRealm": {
+                "1001": {"m": 150},
+            },
+            "DominantRealm": {
+                "2001": {"m": 250},
+                "2002": {"m": 350},
+                "2003": {"m": 450},
+            },
+        }
+
+        with caplog.at_level(logging.WARNING, logger="watcher"):
+            count = ingest_price_snapshot(
+                memory_db,
+                raw_data,
+                realm="NonExistentRealm",
+                current_time=1700000000,
+            )
+
+        assert count == 3
+        assert raw_data.get("_discovered_realm") == "DominantRealm"
+        assert any(
+            "NonExistentRealm" in record.message
+            and "DominantRealm" in record.message
+            and "3 items" in record.message
+            for record in caplog.records
+        )
+
+        cur = memory_db.cursor()
+        cur.execute(
+            "SELECT item_id, realm, price FROM price_snapshots WHERE realm = 'DominantRealm' ORDER BY item_id"
+        )
+        rows = [tuple(r) for r in cur.fetchall()]
+        assert len(rows) == 3
+        assert rows[0] == (2001, "DominantRealm", 250)
+        assert rows[1] == (2002, "DominantRealm", 350)
+        assert rows[2] == (2003, "DominantRealm", 450)
+
+    def test_ingest_price_snapshot_realm_autodiscovery_nested_table(self, memory_db):
+        """Verify realm auto-discovery works when table is nested inside AUCTIONATOR_PRICE_DATABASE."""
+        nested_data = {
+            "AUCTIONATOR_PRICE_DATABASE": {
+                "DiscoveredRealm": {
+                    "3001": {"m": 500},
+                    "3002": {"m": 600},
+                }
+            }
+        }
+        count = ingest_price_snapshot(memory_db, nested_data, realm="MissingRealm", current_time=1000)
+        assert count == 2
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT item_id, realm, price FROM price_snapshots WHERE realm = 'DiscoveredRealm'")
+        rows = cur.fetchall()
+        assert len(rows) == 2
+
 
 class TestWatcherEngine:
     """Tests for file system watcher and event handling (R05)."""
@@ -874,6 +952,44 @@ class TestWatcherEngine:
             observer.join(timeout=2.0)
         assert not observer.is_alive()
 
+    def test_wait_for_file_ready_stability_and_closing_brace(self, tmp_path):
+        """Verify _wait_for_file_ready verifies size stability and closing brace '}' before proceeding."""
+        test_file = tmp_path / "Auctionator.lua"
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        handler = AuctionatorEventHandler(
+            target_filename="Auctionator.lua",
+            full_target_path=str(test_file),
+            db_path=db_path,
+            realm="Everlook",
+            debounce_seconds=0.02,
+        )
+
+        # 1. Non-existent file returns False
+        assert handler._wait_for_file_ready(str(tmp_path / "nonexistent.lua")) is False
+
+        # 2. Complete file ending with '}' stabilizes and returns True
+        test_file.write_text('AUCTIONATOR_PRICE_DATABASE = {\n  ["Everlook"] = {}\n}', encoding="utf-8")
+        assert handler._wait_for_file_ready(str(test_file)) is True
+
+        # 3. Size stability & closing brace wait: write incomplete file, then append closing brace in background thread
+        incomplete_file = tmp_path / "Incomplete.lua"
+        incomplete_file.write_text('AUCTIONATOR_PRICE_DATABASE = {\n  ["Everlook"] = {', encoding="utf-8")
+
+        def append_closing():
+            time.sleep(0.03)
+            with open(incomplete_file, "a", encoding="utf-8") as f:
+                f.write(' ["100"] = { ["m"] = 50 } }\n}\n')
+
+        t = threading.Thread(target=append_closing)
+        t.start()
+        try:
+            ready = handler._wait_for_file_ready(str(incomplete_file))
+            assert ready is True
+        finally:
+            t.join()
+
 
 class TestInitialIngestAndCLI:
     """Tests for initial database ingestion, realm validation, and CLI configuration (R51)."""
@@ -935,12 +1051,16 @@ class TestInitialIngestAndCLI:
         count = initial_ingest(memory_db, str(tmp_path), "ForeverRealm_Alliance")
         assert count == 0
 
-    def test_initial_ingest_realm_mismatch_warns_and_returns_zero(self, tmp_path, memory_db, caplog):
-        """Verify realm mismatch logs a warning, does not crash, and returns 0 without inserting snapshots."""
+    def test_initial_ingest_realm_autodiscovery_when_realm_not_found(self, tmp_path, memory_db, caplog):
+        """Verify initial_ingest auto-discovers and imports from realm with max item count when target realm is missing."""
         lua_content = (
             'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["SmallRealm"] = {\n'
+            '    ["1205"] = { ["mr"] = 320 }\n'
+            '  },\n'
             '  ["Everlook"] = {\n'
-            '    ["2589"] = { ["mr"] = 1500 }\n'
+            '    ["2589"] = { ["mr"] = 1500 },\n'
+            '    ["2450"] = { ["mr"] = 600 }\n'
             '  }\n'
             '}\n'
         )
@@ -950,8 +1070,31 @@ class TestInitialIngestAndCLI:
         with caplog.at_level(logging.WARNING, logger="watcher"):
             count = initial_ingest(memory_db, str(tmp_path), "ForeverRealm_Alliance")
 
+        assert count == 2
+        assert any(
+            "ForeverRealm_Alliance" in record.message
+            and "Everlook" in record.message
+            and "2 items" in record.message
+            for record in caplog.records
+        )
+
+        cur = memory_db.cursor()
+        cur.execute(
+            "SELECT item_id, price, realm FROM price_snapshots WHERE realm = 'Everlook' ORDER BY item_id"
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 2
+        assert tuple(rows[0]) == (2450, 600, "Everlook")
+        assert tuple(rows[1]) == (2589, 1500, "Everlook")
+
+    def test_initial_ingest_no_realms_available_returns_zero(self, tmp_path, memory_db):
+        """Verify initial_ingest returns 0 when no realms exist in parsed Lua data."""
+        lua_content = 'AUCTIONATOR_PRICE_DATABASE = {}\n'
+        lua_file = tmp_path / "Auctionator.lua"
+        lua_file.write_text(lua_content, encoding="utf-8")
+
+        count = initial_ingest(memory_db, str(tmp_path), "ForeverRealm_Alliance")
         assert count == 0
-        assert any("ForeverRealm_Alliance" in record.message and "Everlook" in record.message for record in caplog.records)
 
         cur = memory_db.cursor()
         cur.execute("SELECT COUNT(*) FROM price_snapshots")
