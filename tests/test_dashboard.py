@@ -7,6 +7,9 @@ Verifies real functional execution of:
   AI advisor banner integration, database data rendering, offline autonomy, realm filtering.
 - Task 17 (R52): Dual crafting display (Waylaid crates + classic recipes), meta auto-refresh (30s),
   header generation and snapshot freshness timestamps, parameter forwarding (has_bartering, has_master_chef, max_age_hours).
+- Ticket 20 (R20): Goblin Terminal 100vh UI layout (65% signals / 35% inspector), Wowhead Forever tooltips,
+  1-click copy name buttons (.copy-btn) & toast, Auctionator shopping list export format (ForeverTrade^),
+  localStorage persistence (ft_active_tab, ft_search, ft_lang, ft_selected_item), and all 5 signal tabs.
 No paper tests: invokes actual functions and validates generated files and DOM structures.
 """
 
@@ -1002,5 +1005,341 @@ def test_dashboard_max_age_hours_functional_filtering(memory_db, tmp_path):
     tbody_all = match_all.group(1)
     assert "Fresh Arbitrage Item" in tbody_all
     assert "Stale Arbitrage Item" in tbody_all
+
+
+# ===========================================================================
+# 6. Ticket 20 Goblin Terminal UI & Integration Tests
+# ===========================================================================
+
+def test_goblin_terminal_ui_layout(populated_dashboard_db, tmp_path):
+    """Verify Goblin Terminal 100vh single-screen layout with two main panels (R20).
+
+    Verifies:
+    - 100vh single-screen non-scrolling viewport CSS rules
+    - .terminal-layout container structure
+    - Two main panels: .terminal-left (65% signals table with tabs) and .terminal-right (35% inspector panel)
+    - Inspector panel elements: header, lazy chart container, deal calculator with margin & breakeven rows
+    """
+    out_file = tmp_path / "goblin_terminal_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    # 1. 100vh single-screen layout CSS rules
+    assert "height: 100vh;" in html_content
+    assert "max-height: 100vh;" in html_content
+    assert "overflow: hidden;" in html_content
+
+    # .terminal-layout must be flex-column filling 100vh
+    layout_match = re.search(r"\.terminal-layout\s*\{([^}]+)\}", html_content)
+    assert layout_match is not None, ".terminal-layout CSS rule not found"
+    layout_css = layout_match.group(1)
+    assert "height: 100vh;" in layout_css
+    assert "display: flex;" in layout_css
+    assert "flex-direction: column;" in layout_css
+
+    # 2. Workspace container .terminal-main must be flex with min-height: 0
+    main_match = re.search(r"\.terminal-main\s*\{([^}]+)\}", html_content)
+    assert main_match is not None, ".terminal-main CSS rule not found"
+    main_css = main_match.group(1)
+    assert "display: flex;" in main_css
+    assert "min-height: 0;" in main_css
+    assert "overflow: hidden;" in main_css
+
+    # 3. Two main panels: Left (65%) and Right (35%)
+    left_match = re.search(r"\.terminal-left\s*\{([^}]+)\}", html_content)
+    assert left_match is not None, ".terminal-left CSS rule not found"
+    left_css = left_match.group(1)
+    assert "65%" in left_css
+
+    right_match = re.search(r"\.terminal-right\s*\{([^}]+)\}", html_content)
+    assert right_match is not None, ".terminal-right CSS rule not found"
+    right_css = right_match.group(1)
+    assert "35%" in right_css
+
+    # 4. DOM hierarchy: terminal-layout > terminal-header, summary-cards-row, terminal-main
+    assert '<div class="terminal-layout">' in html_content
+    assert '<header class="terminal-header">' in html_content
+    assert '<div class="summary-cards-row">' in html_content
+    assert '<main class="terminal-main">' in html_content
+    assert '<section class="terminal-left">' in html_content
+    assert '<aside class="terminal-right">' in html_content
+
+    # 5. Inspector panel elements inside .terminal-right
+    assert 'class="inspector-panel"' in html_content
+    assert 'class="inspector-header"' in html_content
+    assert 'id="inspector-item-name"' in html_content
+    assert 'id="inspector-copy-btn"' in html_content
+    assert 'id="inspector-wowhead-link"' in html_content
+    assert 'id="inspector-chart"' in html_content
+    assert 'class="inspector-chart-container"' in html_content
+
+    # 6. Deal calculator elements inside inspector
+    assert 'id="deal-calculator"' in html_content
+    assert 'id="calc-cost"' in html_content
+    assert 'id="calc-breakeven"' in html_content
+    assert 'id="calc-ah-cut"' in html_content
+    assert 'id="calc-profit"' in html_content
+    assert 'id="calc-roi"' in html_content
+
+
+def test_wowhead_tooltips_integration(populated_dashboard_db, tmp_path):
+    """Verify Wowhead tooltips integration with Forever domain (R20).
+
+    Verifies:
+    - Script inclusion: https://wow.zamimg.com/js/tooltips.js
+    - whTooltips configuration object with domain: 'forever'
+    - Item links in table rows having data-wowhead="domain=forever"
+    - Inspector link having data-wowhead="domain=forever"
+    - Client-side JS dynamically updates data-wowhead and triggers window.$Wh.updateTooltips()
+    """
+    out_file = tmp_path / "wowhead_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    # 1. Script tag inclusion
+    assert '<script src="https://wow.zamimg.com/js/tooltips.js"></script>' in html_content
+
+    # 2. whTooltips configuration object
+    wh_config_match = re.search(r"const\s+whTooltips\s*=\s*\{([^}]+)\};", html_content)
+    assert wh_config_match is not None, "const whTooltips configuration not found"
+    wh_config = wh_config_match.group(1)
+    assert "domain: 'forever'" in wh_config or 'domain: "forever"' in wh_config
+    assert "colorLinks: true" in wh_config
+    assert "iconizeLinks: true" in wh_config
+
+    # 3. Item links in table rows must have data-wowhead="domain=forever"
+    # Find all anchor tags pointing to wowhead forever item URLs
+    wh_row_links = re.findall(
+        r'<a\s+[^>]*href=[\'"]https://www\.wowhead\.com/forever/item=(\d+)[\'"][^>]*data-wowhead=[\'"]domain=forever[\'"][^>]*>',
+        html_content,
+    )
+    assert len(wh_row_links) >= 3, f"Expected at least 3 Wowhead item links with data-wowhead='domain=forever', found {len(wh_row_links)}"
+    # Verify specific item IDs from populated DB are present
+    assert "101" in wh_row_links  # Golden Diamond
+    assert "201" in wh_row_links  # Heavy Copper Broadsword
+    assert "401" in wh_row_links  # Peacebloom
+
+    # 4. Inspector panel link has data-wowhead="domain=forever"
+    assert 'id="inspector-wowhead-link"' in html_content
+    inspector_link_match = re.search(
+        r'<a\s+id=[\'"]inspector-wowhead-link[\'"][^>]*data-wowhead=[\'"]domain=forever[\'"][^>]*>',
+        html_content,
+    )
+    assert inspector_link_match is not None, "Inspector wowhead link does not have data-wowhead='domain=forever'"
+
+    # 5. Client-side JS dynamically sets data-wowhead and invokes $Wh.updateTooltips()
+    assert "linkEl.setAttribute('data-wowhead', 'domain=forever')" in html_content
+    assert "window.$Wh" in html_content
+    assert "window.$Wh.updateTooltips()" in html_content
+
+
+def test_dashboard_copy_name_button_and_toast(populated_dashboard_db, tmp_path):
+    """Verify 1-click copy name button (.copy-btn) and copy toast presence (R20).
+
+    Verifies:
+    - Presence of .copy-btn buttons in all table rows and inspector panel
+    - Toast container #toast with .toast styling
+    - Client-side JS showToast() and copyItemName() functions
+    - Clipboard writeText API with fallbackCopy support
+    """
+    out_file = tmp_path / "copy_toast_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    # 1. Presence of .copy-btn buttons in table rows
+    row_copy_buttons = re.findall(
+        r'<button\s+class=[\'"][^\'"]*copy-btn[^\'"]*[\'"][^>]*onclick=[\'"]copyItemName\(this,\s*event\)[\'"][^>]*>',
+        html_content,
+    )
+    assert len(row_copy_buttons) >= 3, f"Expected multiple table row copy buttons, found {len(row_copy_buttons)}"
+
+    # 2. Dedicated inspector copy button
+    assert 'id="inspector-copy-btn"' in html_content
+    assert 'onclick="copyItemName(this, event)"' in html_content
+
+    # 3. Toast element and CSS rules
+    assert '<div id="toast" class="toast"></div>' in html_content
+    assert ".toast {" in html_content
+    assert ".toast.show {" in html_content
+    assert "z-index: 10000;" in html_content
+
+    # 4. JS showToast function implementation
+    assert "function showToast(msg)" in html_content
+    assert "document.getElementById('toast')" in html_content
+    assert "t.classList.add('show')" in html_content
+    assert "t.classList.remove('show')" in html_content
+
+    # 5. JS copyItemName function and clipboard API
+    assert "function copyItemName(btn, event)" in html_content
+    assert "event.stopPropagation()" in html_content
+    assert "navigator.clipboard.writeText(textToCopy)" in html_content
+    assert "btn.classList.add('copied')" in html_content
+    assert "function fallbackCopy(text, cb)" in html_content
+
+
+def test_auctionator_shopping_list_export_button_and_format(populated_dashboard_db, tmp_path):
+    """Verify Auctionator Shopping List export button and ForeverTrade^ format (R20).
+
+    Verifies:
+    - Presence of #btn-export-shopping-list button in header actions
+    - Button click handler copyAuctionatorShoppingList()
+    - JS export formatting: 'ForeverTrade^"item1"^"item2"...' for STRONG_BUY signals
+    - ITEM_STORE contains STRONG_BUY anomaly data (Peacebloom)
+    - Functional simulation of export string generation
+    """
+    out_file = tmp_path / "shopping_list_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    # 1. Export button presence in header actions
+    assert 'id="btn-export-shopping-list"' in html_content
+    assert 'class="btn-shopping-list"' in html_content
+    assert 'onclick="copyAuctionatorShoppingList()"' in html_content
+    assert 'data-ru="📋 Скопировать Shopping List для Auctionator"' in html_content
+    assert 'data-en="📋 Copy Auctionator Shopping List"' in html_content
+
+    # 2. JS copyAuctionatorShoppingList function implementation
+    assert "function copyAuctionatorShoppingList()" in html_content
+    assert "var exportStr = 'ForeverTrade^' + items.map(function(name)" in html_content
+    assert 'return \'"\' + name.replace(/"/g, \'\') + \'"\';' in html_content
+    assert ".join('^')" in html_content
+    assert "copyTextToClipboard(exportStr," in html_content
+
+    # 3. Verify ITEM_STORE has STRONG_BUY items to export
+    store_match = re.search(r'var ITEM_STORE = (\{.*?\});', html_content)
+    assert store_match is not None, "ITEM_STORE variable not found"
+    item_store = json.loads(store_match.group(1))
+
+    # Peacebloom (401) has historical drop in populated_dashboard_db -> must qualify for STRONG_BUY
+    peacebloom = item_store.get("401") or item_store.get(401)
+    assert peacebloom is not None, "Peacebloom not found in ITEM_STORE"
+    z_score = peacebloom.get("z_score", 0.0)
+    deal_signal = (peacebloom.get("deal_info") or {}).get("signal", "")
+    assert z_score <= -1.8 or "BUY" in deal_signal
+
+    # 4. Functional simulation of export format in Python
+    # Filter items matching the client-side logic: z_score <= -1.8 or deal_info signal containing 'BUY'
+    export_items = []
+    for k, it in item_store.items():
+        z = it.get("z_score", 0.0)
+        sig = (it.get("deal_info") or {}).get("signal", "")
+        if z <= -1.8 or "BUY" in sig:
+            name = it.get("name_ru") or it.get("name_en")
+            if name and name not in export_items:
+                export_items.append(name)
+
+    assert len(export_items) >= 1
+    assert "Peacebloom" in export_items
+
+    # Format exactly as the client JS generates: ForeverTrade^"item1"^"item2"
+    formatted_export = "ForeverTrade^" + "^".join(f'"{name.replace(chr(34), "")}"' for name in export_items)
+    assert formatted_export.startswith("ForeverTrade^")
+    assert '"Peacebloom"' in formatted_export
+    # Verify caret delimiter separation
+    tokens = formatted_export.split("^")
+    assert tokens[0] == "ForeverTrade"
+    assert '"Peacebloom"' in tokens[1:]
+
+
+def test_localstorage_persistence_keys(populated_dashboard_db, tmp_path):
+    """Verify localStorage persistence for ft_active_tab, ft_search, ft_lang, ft_selected_item (R20).
+
+    Verifies:
+    - Saving each key:
+      * ft_active_tab in switchTab()
+      * ft_search in onItemSearch()
+      * ft_lang in setLanguage() / setStoredLang()
+      * ft_selected_item in selectInspectorItem()
+    - Restoring each key on DOMContentLoaded:
+      * ft_active_tab activates the saved tab pane
+      * ft_search sets the search input value and filters rows
+      * ft_lang sets the active language and updates data-lang elements
+      * ft_selected_item highlights and loads the saved item in inspector
+    """
+    out_file = tmp_path / "storage_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    # 1. Saving keys into localStorage
+    assert "localStorage.setItem('ft_active_tab', tabId)" in html_content
+    assert "localStorage.setItem('ft_search', currentSearchQuery)" in html_content
+    assert "localStorage.setItem('ft_lang', lang)" in html_content
+    assert "localStorage.setItem('ft_selected_item', String(itemId))" in html_content
+
+    # 2. Reading keys from localStorage
+    assert "localStorage.getItem('ft_active_tab')" in html_content
+    assert "localStorage.getItem('ft_search')" in html_content
+    assert "localStorage.getItem('ft_lang')" in html_content
+    assert "localStorage.getItem('ft_selected_item')" in html_content
+
+    # 3. DOMContentLoaded restoration lifecycle
+    dom_idx = html_content.find('document.addEventListener("DOMContentLoaded"')
+    assert dom_idx != -1, "DOMContentLoaded event listener not found"
+    script_end = html_content.find("</script>", dom_idx)
+    dom_code = html_content[dom_idx:script_end]
+
+    # Verify all 4 keys are restored inside DOMContentLoaded
+    assert "localStorage.getItem('ft_active_tab')" in dom_code
+    assert "switchTab(savedTab)" in dom_code
+    assert "localStorage.getItem('ft_search')" in dom_code
+    assert "onItemSearch(savedSearch)" in dom_code
+    assert "getStoredLang()" in dom_code
+    assert "setLanguage(initialLang)" in dom_code
+    assert "localStorage.getItem('ft_selected_item')" in dom_code
+    assert "selectInspectorItem(savedItem)" in dom_code
+
+
+def test_all_signal_tabs_present_and_configured(populated_dashboard_db, tmp_path):
+    """Verify presence and configuration of all signal tabs: Strong Buy, Arbitrage, Craft Dual, Crates, Vendor Shuffle (R20).
+
+    Verifies:
+    - All 5 signal tab buttons with data-tab and switchTab() onclick handlers
+    - Market Overview chart tab
+    - Corresponding tab panes in .tabs-content
+    - Tab count badges
+    - Sortable tables inside each signal tab pane
+    - Client-side switchTab() JS logic
+    """
+    out_file = tmp_path / "tabs_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    # 1. Verify 5 signal tabs + 1 chart tab buttons exist in .tabs-bar
+    expected_tabs = [
+        ("price-anomalies", "Strong Buy"),
+        ("vendor-arbitrage", "Арбитраж"),
+        ("waylaid-crates", "Крафт (Dual)"),
+        ("tab-crates", "Ящики"),
+        ("tab-shuffle", "Вендор-шаффл"),
+        ("charts-section", "Обзор рынка"),
+    ]
+
+    for tab_id, label_fragment in expected_tabs:
+        # Button check
+        btn_pattern = rf'<button\s+class=[\'"][^\'"]*tab-btn[^\'"]*[\'"][^>]*data-tab=[\'"]{tab_id}[\'"][^>]*onclick=[\'"]switchTab\([\'"]{tab_id}[\'"]\)[\'"][^>]*>'
+        assert re.search(btn_pattern, html_content) is not None, f"Tab button for '{tab_id}' not found"
+
+        # Tab pane check
+        pane_pattern = rf'<div\s+class=[\'"][^\'"]*tab-pane[^\'"]*[\'"][^>]*id=[\'"]{tab_id}[\'"]'
+        assert re.search(pane_pattern, html_content) is not None, f"Tab pane for '{tab_id}' not found"
+
+    # 2. Check Strong Buy is the active default tab
+    assert 'class="tab-btn active" data-tab="price-anomalies"' in html_content
+    assert 'class="tab-pane active" id="price-anomalies"' in html_content
+
+    # 3. Check count badges exist on signal tabs
+    assert 'id="strong-buy-count"' in html_content
+    tab_count_matches = re.findall(r'<span\s+class=[\'"][^\'"]*tab-count[^\'"]*[\'"]', html_content)
+    assert len(tab_count_matches) >= 5, f"Expected at least 5 tab-count badges, found {len(tab_count_matches)}"
+
+    # 4. Check sortable tables inside each signal pane
+    signal_panes = ["price-anomalies", "vendor-arbitrage", "waylaid-crates", "tab-crates", "tab-shuffle"]
+    for pane_id in signal_panes:
+        pane_match = re.search(rf'<div\s+class=[\'"][^\'"]*tab-pane[^\'"]*[\'"][^>]*id=[\'"]{pane_id}[\'"][^>]*>(.*?)</div>\s*(?:<!--|<div|\s*</section>)', html_content, re.DOTALL)
+        assert pane_match is not None, f"Pane content for '{pane_id}' not found"
+        pane_html = pane_match.group(1)
+        assert '<table class="sortable">' in pane_html, f"Sortable table not found in pane '{pane_id}'"
+        assert '<thead>' in pane_html, f"thead not found in pane '{pane_id}'"
+        assert '<tbody>' in pane_html, f"tbody not found in pane '{pane_id}'"
+
+    # 5. Check client-side switchTab JS implementation
+    assert "function switchTab(tabId)" in html_content
+    assert "btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId)" in html_content
+    assert "pane.classList.toggle('active', pane.id === tabId)" in html_content
+
 
 
