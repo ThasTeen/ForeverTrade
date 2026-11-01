@@ -463,3 +463,85 @@ def test_items_schema_and_name_ru_migration(memory_db):
     assert item_copper is not None
     assert item_copper["name"] == "Copper Bar"
     assert item_copper["name_ru"] == "Медный слиток"
+
+
+def test_r45_catalog_items_and_vendor_prices(populated_db):
+    """Verify R45: items 2450, 2452, 2313, 2316 have expected catalog data and vendor prices."""
+    # 1. Briarthorn (2450)
+    item_2450 = get_item(populated_db, 2450)
+    assert item_2450 is not None
+    assert item_2450["name"] == "Briarthorn"
+    assert item_2450["vendor_sell_price"] == 50
+
+    # 2. Swiftthistle (2452)
+    item_2452 = get_item(populated_db, 2452)
+    assert item_2452 is not None
+    assert item_2452["name"] == "Swiftthistle"
+    assert item_2452["vendor_sell_price"] == 40
+
+    # 3. Medium Armor Kit (2313)
+    item_2313 = get_item(populated_db, 2313)
+    assert item_2313 is not None
+    assert item_2313["name"] == "Medium Armor Kit"
+    assert item_2313["vendor_sell_price"] == 60
+    assert item_2313["vendor_buy_price"] == 250
+
+    # 4. Toughened Leather Gloves (2316)
+    item_2316 = get_item(populated_db, 2316)
+    assert item_2316 is not None
+    assert item_2316["name"] == "Toughened Leather Gloves"
+    assert item_2316["vendor_sell_price"] == 137
+
+
+def test_r45_localization_mappings(populated_db):
+    """Verify R45: en and ru localization for items 2450, 2452, 2313, 2316."""
+    expected_l10n = {
+        2450: ("Briarthorn", "Остротерн"),
+        2452: ("Swiftthistle", "Свистоцвет"),
+        2313: ("Medium Armor Kit", "Накладки из средней кожи"),
+        2316: ("Toughened Leather Gloves", "Плотные кожаные перчатки"),
+    }
+
+    for item_id, (en_name, ru_name) in expected_l10n.items():
+        # Check ITEM_LOCALIZATION constant dictionary
+        assert item_id in ITEM_LOCALIZATION
+        assert ITEM_LOCALIZATION[item_id]["en"] == en_name
+        assert ITEM_LOCALIZATION[item_id]["ru"] == ru_name
+
+        # Check get_item_name with DB connection
+        assert get_item_name(populated_db, item_id, lang="en") == en_name
+        assert get_item_name(populated_db, item_id, lang="ru") == ru_name
+
+        # Check get_item_name with None connection (pure dictionary fallback)
+        assert get_item_name(None, item_id, lang="en") == en_name
+        assert get_item_name(None, item_id, lang="ru") == ru_name
+
+        # Check loaded items table in SQLite
+        row = get_item(populated_db, item_id)
+        assert row is not None
+        assert row["name"] == en_name
+        assert row["name_ru"] == ru_name
+
+
+def test_r45_recipes_and_reagents(populated_db):
+    """Verify R45: recipe 3004 crafts item 2313; recipes 4004 & 4005 use reagent 2450 (Briarthorn), not 2452."""
+    cursor = populated_db.cursor()
+
+    # Recipe 3004: Medium Armor Kit -> crafts 2313
+    cursor.execute("SELECT recipe_id, crafted_item_id FROM recipes WHERE recipe_id = 3004;")
+    r_3004 = cursor.fetchone()
+    assert r_3004 is not None
+    assert r_3004["crafted_item_id"] == 2313
+
+    # Recipe 4004: Lesser Healing Potion -> uses reagent 2450 (Briarthorn), NOT 2452 (Swiftthistle)
+    cursor.execute("SELECT reagent_item_id FROM recipe_reagents WHERE recipe_id = 4004;")
+    reagents_4004 = {row["reagent_item_id"] for row in cursor.fetchall()}
+    assert 2450 in reagents_4004, "Recipe 4004 must use Briarthorn (2450)"
+    assert 2452 not in reagents_4004, "Recipe 4004 must NOT use Swiftthistle (2452)"
+
+    # Recipe 4005: Healing Potion -> uses reagent 2450 (Briarthorn), NOT 2452 (Swiftthistle)
+    cursor.execute("SELECT reagent_item_id FROM recipe_reagents WHERE recipe_id = 4005;")
+    reagents_4005 = {row["reagent_item_id"] for row in cursor.fetchall()}
+    assert 2450 in reagents_4005, "Recipe 4005 must use Briarthorn (2450)"
+    assert 2452 not in reagents_4005, "Recipe 4005 must NOT use Swiftthistle (2452)"
+

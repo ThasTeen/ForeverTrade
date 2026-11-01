@@ -54,7 +54,8 @@ ITEM_LOCALIZATION: dict[int, dict[str, str]] = {
     # Herbs
     2449: {"en": "Earthroot", "ru": "Земляной корень"},
     785: {"en": "Mageroyal", "ru": "Магороза"},
-    2452: {"en": "Briarthorn", "ru": "Остротерн"},
+    2450: {"en": "Briarthorn", "ru": "Остротерн"},
+    2452: {"en": "Swiftthistle", "ru": "Свистоцвет"},
     2453: {"en": "Bruiseweed", "ru": "Синячник"},
     3820: {"en": "Stranglekelp", "ru": "Удавник"},
     3355: {"en": "Wild Steelbloom", "ru": "Дикий сталец"},
@@ -135,7 +136,8 @@ ITEM_LOCALIZATION: dict[int, dict[str, str]] = {
     14046: {"en": "Runecloth Bag", "ru": "Сумка из рунической ткани"},
     2304: {"en": "Light Armor Kit", "ru": "Накладки из тонкой кожи"},
     2309: {"en": "Fine Leather Boots", "ru": "Тонкие кожаные сапоги"},
-    2316: {"en": "Medium Armor Kit", "ru": "Накладки из средней кожи"},
+    2313: {"en": "Medium Armor Kit", "ru": "Накладки из средней кожи"},
+    2316: {"en": "Toughened Leather Gloves", "ru": "Плотные кожаные перчатки"},
     4252: {"en": "Hillman's Leather Gloves", "ru": "Кожаные перчатки жителя холмов"},
     2317: {"en": "Heavy Armor Kit", "ru": "Накладки из тяжелой кожи"},
     8173: {"en": "Thick Armor Kit", "ru": "Накладки из толстой кожи"},
@@ -176,6 +178,8 @@ ITEM_LOCALIZATION: dict[int, dict[str, str]] = {
     10938: {"en": "Lesser Magic Essence", "ru": "Простая магическая субстанция"},
     10939: {"en": "Greater Magic Essence", "ru": "Великая магическая субстанция"},
 }
+
+_DEFAULT_LOCALIZATION = ITEM_LOCALIZATION
 
 
 def get_connection(db_path: str = "market.db") -> sqlite3.Connection:
@@ -564,7 +568,7 @@ def load_recipes(conn: sqlite3.Connection) -> int:
             "recipe_id": 3004,
             "name": "Medium Armor Kit",
             "profession": "Leatherworking",
-            "crafted_item_id": 2316,
+            "crafted_item_id": 2313,
             "yield": 1.0,
             "reagents": [(2319, 4), (2320, 1)]  # Medium Leather x4, Coarse Thread x1
         },
@@ -656,7 +660,7 @@ def load_recipes(conn: sqlite3.Connection) -> int:
             "profession": "Alchemy",
             "crafted_item_id": 858,
             "yield": 1.0,
-            "reagents": [(118, 1), (2452, 1)]  # Minor Healing Potion x1, Briarthorn x1
+            "reagents": [(118, 1), (2450, 1)]  # Minor Healing Potion x1, Briarthorn x1
         },
         {
             "recipe_id": 4005,
@@ -664,7 +668,7 @@ def load_recipes(conn: sqlite3.Connection) -> int:
             "profession": "Alchemy",
             "crafted_item_id": 929,
             "yield": 1.0,
-            "reagents": [(2453, 1), (2452, 1), (3372, 1)]  # Bruiseweed x1, Briarthorn x1, Leaded Vial x1
+            "reagents": [(2453, 1), (2450, 1), (3372, 1)]  # Bruiseweed x1, Briarthorn x1, Leaded Vial x1
         },
         {
             "recipe_id": 4006,
