@@ -11,4 +11,6 @@ watcher.log
 *.log
 market.db
 *.db
+*.db-wal
+*.db-shm
 portal.html
