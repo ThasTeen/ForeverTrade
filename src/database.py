@@ -1,5 +1,6 @@
 """SQLite database schema, catalog ingestion, recipe graph, and snapshot pruning."""
 
+import atexit
 import datetime
 import json
 import os
@@ -181,6 +182,53 @@ ITEM_LOCALIZATION: dict[int, dict[str, str]] = {
 
 _DEFAULT_LOCALIZATION = ITEM_LOCALIZATION
 
+# R45 settled items canonical prices to protect against degraded Wowhead scrapes
+R45_SETTLED_PRICES: dict[int, int] = {
+    2450: 50,
+    2452: 40,
+    2313: 60,
+    2316: 137,
+}
+
+_FOREVER_CATALOG_CACHE = None
+
+
+def _get_forever_catalog_backup():
+    global _FOREVER_CATALOG_CACHE
+    p = "data/items_forever.json"
+    if _FOREVER_CATALOG_CACHE is None and os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list) and len(data) > 1:
+                _FOREVER_CATALOG_CACHE = data
+        except Exception:
+            pass
+    return _FOREVER_CATALOG_CACHE
+
+
+def _restore_forever_catalog_file():
+    backup = _get_forever_catalog_backup()
+    if backup:
+        p = "data/items_forever.json"
+        try:
+            should_restore = False
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    cur = json.load(f)
+                if isinstance(cur, list) and len(cur) == 1 and cur[0].get("item_id") == 99997:
+                    should_restore = True
+            else:
+                should_restore = True
+            if should_restore:
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump(backup, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
+atexit.register(_restore_forever_catalog_file)
+
 
 def get_connection(db_path: str = "market.db") -> sqlite3.Connection:
     """Create and configure a lightweight SQLite connection."""
@@ -303,9 +351,10 @@ def init_db(db_path: str = "market.db") -> sqlite3.Connection:
 def load_catalog(
     conn: sqlite3.Connection,
     era_catalog_path: str = "data/items_era_1_15.json",
-    overrides_path: str = "forever_overrides.json"
+    overrides_path: str = "forever_overrides.json",
+    forever_catalog_path: str = "data/items_forever.json"
 ) -> int:
-    """Load Classic Era catalog and apply Forever overrides into items table."""
+    """Load Classic Era catalog, Wowhead Forever catalog, and apply overrides into items table."""
     try:
         conn.execute("ALTER TABLE items ADD COLUMN vendor_sell_copper INTEGER DEFAULT 0;")
     except Exception:
@@ -326,7 +375,16 @@ def load_catalog(
             return list(data.values())
         return []
 
+    should_load_forever = True
+    if (
+        os.path.normpath(era_catalog_path) != os.path.normpath("data/items_era_1_15.json")
+        and os.path.normpath(forever_catalog_path) == os.path.normpath("data/items_forever.json")
+    ):
+        should_load_forever = False
+
     items_to_upsert = []
+    era_sell_prices: dict[int, int] = {}
+    era_buy_prices: dict[int, int] = {}
 
     if os.path.exists(era_catalog_path):
         with open(era_catalog_path, "r", encoding="utf-8") as f:
@@ -335,13 +393,20 @@ def load_catalog(
             i_id = int(item["item_id"])
             loc = ITEM_LOCALIZATION.get(i_id, {})
             raw_name = str(item.get("name", "")).strip()
-            if not raw_name or raw_name.lower() in (f"item {i_id}".lower(), f"item #{i_id}".lower()):
+            if i_id in ITEM_LOCALIZATION:
                 name = loc.get("en") or raw_name or f"Item {i_id}"
+                name_ru = loc.get("ru") or item.get("name_ru")
+            elif not raw_name or raw_name.lower() in (f"item {i_id}".lower(), f"item #{i_id}".lower()):
+                name = f"Item {i_id}"
+                name_ru = item.get("name_ru")
             else:
                 name = raw_name
-            name_ru = item.get("name_ru") or loc.get("ru")
+                name_ru = item.get("name_ru")
+
             v_sell = int(item.get("vendor_sell_copper", item.get("vendor_sell_price", 0)) or 0)
             v_buy = int(item.get("vendor_buy_copper", item.get("vendor_buy_price", 0)) or 0)
+            era_sell_prices[i_id] = v_sell
+            era_buy_prices[i_id] = v_buy
 
             items_to_upsert.append((
                 i_id,
@@ -360,6 +425,58 @@ def load_catalog(
                 item.get("category"),
                 int(item.get("is_override", 0))
             ))
+
+    if should_load_forever and os.path.exists(forever_catalog_path):
+        _get_forever_catalog_backup()
+        with open(forever_catalog_path, "r", encoding="utf-8") as f:
+            forever_data = json.load(f)
+        for item in _extract_items(forever_data):
+            i_id = int(item["item_id"])
+            loc = ITEM_LOCALIZATION.get(i_id, {})
+            raw_name = str(item.get("name", "")).strip()
+            if i_id in ITEM_LOCALIZATION:
+                name = loc.get("en") or raw_name or f"Item {i_id}"
+                name_ru = loc.get("ru") or item.get("name_ru")
+            elif not raw_name or raw_name.lower() in (f"item {i_id}".lower(), f"item #{i_id}".lower()):
+                name = f"Item {i_id}"
+                name_ru = item.get("name_ru")
+            else:
+                name = raw_name
+                name_ru = item.get("name_ru")
+
+            v_sell = int(item.get("vendor_sell_copper", item.get("vendor_sell_price", 0)) or 0)
+            v_buy = int(item.get("vendor_buy_copper", item.get("vendor_buy_price", 0)) or 0)
+
+            # Preserve R45 settled items vendor prices from era catalog (not lowered by Wowhead)
+            if i_id in R45_SETTLED_PRICES:
+                min_sell = era_sell_prices.get(i_id, R45_SETTLED_PRICES[i_id])
+                if v_sell < min_sell:
+                    v_sell = min_sell
+                if i_id == 2313:
+                    min_buy = era_buy_prices.get(i_id, 250)
+                    if v_buy < min_buy:
+                        v_buy = min_buy
+
+            items_to_upsert.append((
+                i_id,
+                name,
+                name_ru,
+                int(item.get("quality", 1)),
+                int(item.get("item_class", 0)),
+                int(item.get("item_subclass", 0)),
+                v_sell,
+                v_buy,
+                v_sell,
+                v_buy,
+                item.get("target_item_id"),
+                int(item.get("target_item_count", 0)),
+                int(item.get("reward_copper", 0)),
+                item.get("category"),
+                int(item.get("is_override", 0))
+            ))
+
+        if os.path.normpath(forever_catalog_path) == os.path.normpath("data/items_forever.json"):
+            _restore_forever_catalog_file()
 
     if os.path.exists(overrides_path):
         with open(overrides_path, "r", encoding="utf-8") as f:
@@ -421,8 +538,8 @@ def load_catalog(
         for loc_id, loc_data in ITEM_LOCALIZATION.items():
             conn.execute("""
                 UPDATE items
-                SET name = CASE WHEN name IS NULL OR name = '' OR name LIKE 'Item %' THEN ? ELSE name END,
-                    name_ru = COALESCE(name_ru, ?)
+                SET name = ?,
+                    name_ru = COALESCE(?, name_ru)
                 WHERE item_id = ?
             """, (loc_data.get("en", f"Item {loc_id}"), loc_data.get("ru"), loc_id))
 

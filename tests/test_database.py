@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import os
 import sqlite3
 import time
 import pytest
@@ -679,5 +680,171 @@ def test_vendor_copper_columns_and_bidirectional_sync(memory_db, tmp_path):
     assert item_9201["vendor_sell_copper"] == 666
     assert item_9201["vendor_buy_price"] == 888
     assert item_9201["vendor_buy_copper"] == 888
+
+
+def test_load_catalog_forever_catalog_priority_and_overrides(memory_db, tmp_path):
+    """Verify load_catalog loads forever_catalog_path with priority over era base while preserving overrides."""
+    # 1. Era base catalog
+    era_data = [
+        {
+            "item_id": 10001,
+            "name": "Era Iron Ore",
+            "name_ru": "Эра железная руда",
+            "vendor_sell_copper": 20,
+            "vendor_buy_copper": 80,
+            "quality": 1,
+        },
+        {
+            "item_id": 10002,
+            "name": "Era Mithril Bar",
+            "name_ru": "Эра мифриловый слиток",
+            "vendor_sell_copper": 100,
+            "vendor_buy_copper": 400,
+            "quality": 1,
+        },
+        {
+            "item_id": 10003,
+            "name": "Era Truesilver Bar",
+            "name_ru": "Эра слиток истинного серебра",
+            "vendor_sell_copper": 250,
+            "vendor_buy_copper": 1000,
+            "quality": 2,
+        },
+    ]
+    era_path = tmp_path / "items_era.json"
+    era_path.write_text(json.dumps(era_data), encoding="utf-8")
+
+    # 2. Forever catalog: updates 10002, modifies 10003, adds 10004
+    forever_data = [
+        {
+            "item_id": 10002,
+            "name": "Forever Mithril Bar",
+            "name_ru": "Мифриловый слиток Forever",
+            "vendor_sell_copper": 250,
+            "vendor_buy_copper": 600,
+            "quality": 2,
+        },
+        {
+            "item_id": 10003,
+            "name": "Forever Truesilver Bar",
+            "name_ru": "Слиток истинного серебра Forever",
+            "vendor_sell_copper": 300,
+            "vendor_buy_copper": 1200,
+            "quality": 2,
+        },
+        {
+            "item_id": 10004,
+            "name": "Forever Special Potion",
+            "name_ru": "Особое зелье Forever",
+            "vendor_sell_copper": 500,
+            "vendor_buy_copper": 2000,
+            "quality": 3,
+        },
+    ]
+    forever_path = tmp_path / "items_forever.json"
+    forever_path.write_text(json.dumps(forever_data), encoding="utf-8")
+
+    # 3. Server overrides: overrides 10003 with highest priority
+    overrides_data = [
+        {
+            "item_id": 10003,
+            "name": "Override Truesilver Bar",
+            "name_ru": "Переопределенный слиток",
+            "vendor_sell_copper": 450,
+            "vendor_buy_copper": 1800,
+            "quality": 4,
+            "reward_copper": 7500,
+            "category": "waylaid_crate",
+            "is_override": 1,
+        }
+    ]
+    overrides_path = tmp_path / "forever_overrides.json"
+    overrides_path.write_text(json.dumps(overrides_data), encoding="utf-8")
+
+    count = load_catalog(
+        memory_db,
+        era_catalog_path=str(era_path),
+        overrides_path=str(overrides_path),
+        forever_catalog_path=str(forever_path),
+    )
+    assert count == 4
+
+    # Item 10001: Loaded from Era catalog
+    item_10001 = get_item(memory_db, 10001)
+    assert item_10001 is not None
+    assert item_10001["name"] == "Era Iron Ore"
+    assert item_10001["name_ru"] == "Эра железная руда"
+    assert item_10001["vendor_sell_copper"] == 20
+    assert item_10001["vendor_buy_copper"] == 80
+    assert item_10001["is_override"] == 0
+
+    # Item 10002: Forever catalog takes priority over Era base
+    item_10002 = get_item(memory_db, 10002)
+    assert item_10002 is not None
+    assert item_10002["name"] == "Forever Mithril Bar"
+    assert item_10002["name_ru"] == "Мифриловый слиток Forever"
+    assert item_10002["vendor_sell_copper"] == 250
+    assert item_10002["vendor_buy_copper"] == 600
+    assert item_10002["quality"] == 2
+    assert item_10002["is_override"] == 0
+
+    # Item 10003: Overrides take precedence over both Forever and Era base
+    item_10003 = get_item(memory_db, 10003)
+    assert item_10003 is not None
+    assert item_10003["name"] == "Override Truesilver Bar"
+    assert item_10003["name_ru"] == "Переопределенный слиток"
+    assert item_10003["vendor_sell_copper"] == 450
+    assert item_10003["vendor_buy_copper"] == 1800
+    assert item_10003["quality"] == 4
+    assert item_10003["is_override"] == 1
+    assert item_10003["reward_copper"] == 7500
+    assert item_10003["category"] == "waylaid_crate"
+
+    # Item 10004: Exclusive new item in Forever catalog
+    item_10004 = get_item(memory_db, 10004)
+    assert item_10004 is not None
+    assert item_10004["name"] == "Forever Special Potion"
+    assert item_10004["name_ru"] == "Особое зелье Forever"
+    assert item_10004["vendor_sell_copper"] == 500
+    assert item_10004["vendor_buy_copper"] == 2000
+    assert item_10004["quality"] == 3
+    assert item_10004["is_override"] == 0
+
+
+def test_load_catalog_default_items_forever_path(memory_db):
+    """Verify load_catalog default forever_catalog_path ('data/items_forever.json') loads when present."""
+    default_forever_path = "data/items_forever.json"
+    existed_before = os.path.exists(default_forever_path)
+    test_item_id = 99997
+
+    try:
+        os.makedirs("data", exist_ok=True)
+        sample_forever = [
+            {
+                "item_id": test_item_id,
+                "name": "Default Path Forever Item",
+                "name_ru": "Предмет из data/items_forever.json",
+                "vendor_sell_copper": 345,
+                "vendor_buy_copper": 678,
+                "quality": 2,
+            }
+        ]
+        with open(default_forever_path, "w", encoding="utf-8") as f:
+            json.dump(sample_forever, f)
+
+        load_catalog(memory_db)
+        item = get_item(memory_db, test_item_id)
+        assert item is not None
+        assert item["name"] == "Default Path Forever Item"
+        assert item["name_ru"] == "Предмет из data/items_forever.json"
+        assert item["vendor_sell_copper"] == 345
+        assert item["vendor_buy_copper"] == 678
+    finally:
+        if not existed_before and os.path.exists(default_forever_path):
+            try:
+                os.remove(default_forever_path)
+            except OSError:
+                pass
+
 
 

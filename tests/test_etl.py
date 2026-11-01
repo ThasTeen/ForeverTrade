@@ -10,6 +10,10 @@ import sqlite3
 import threading
 import time
 from unittest.mock import MagicMock
+import json
+import urllib.error
+import urllib.request
+from src.wowhead import WowheadResolver, fetch_wowhead_item
 
 import pytest
 from watchdog.events import FileModifiedEvent
@@ -1186,3 +1190,269 @@ class TestInitialIngestAndCLI:
         assert parsed.watch_dir == custom_dir
         assert parsed.db == "custom.db"
         assert parsed.dashboard_out == "custom_portal.html"
+
+
+class TestWowheadFetcherAndResolver:
+    """Tests for Wowhead item fetcher, background resolver, and ETL integration."""
+
+    @staticmethod
+    def _create_mock_response(content: bytes, status: int = 200):
+        class MockResponse:
+            def __init__(self, data: bytes, code: int):
+                self.data = data
+                self.status = code
+
+            def read(self) -> bytes:
+                return self.data
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        return MockResponse(content, status)
+
+    def test_fetch_wowhead_item_xml_parsing(self):
+        """Verify fetch_wowhead_item fetches and parses English and Russian XML responses."""
+        en_xml = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<wowhead>\n'
+            '  <item id="3858">\n'
+            '    <name><![CDATA[Mithril Ore]]></name>\n'
+            '    <quality id="1">Common</quality>\n'
+            '    <class id="7">Trade Goods</class>\n'
+            '    <subclass id="7">Metal &amp; Stone</subclass>\n'
+            '    <icon>inv_ore_mithril_02</icon>\n'
+            '    <jsonEquip><![CDATA["sellprice":250,"buyprice":0]]></jsonEquip>\n'
+            '  </item>\n'
+            '</wowhead>'
+        ).encode("utf-8")
+
+        ru_xml = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<wowhead>\n'
+            '  <item id="3858">\n'
+            '    <name><![CDATA[Мифриловая руда]]></name>\n'
+            '  </item>\n'
+            '</wowhead>'
+        ).encode("utf-8")
+
+        def mock_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "ru.wowhead.com" in url:
+                return self._create_mock_response(ru_xml, 200)
+            elif "www.wowhead.com" in url:
+                return self._create_mock_response(en_xml, 200)
+            return self._create_mock_response(b"", 404)
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=mock_urlopen):
+            res = fetch_wowhead_item(3858)
+
+        assert res is not None
+        assert res["item_id"] == 3858
+        assert res["name"] == "Mithril Ore"
+        assert res["name_ru"] == "Мифриловая руда"
+        assert res["quality"] == 1
+        assert res["item_class"] == 7
+        assert res["item_subclass"] == 7
+        assert res["icon"] == "inv_ore_mithril_02"
+        assert res["vendor_sell_price"] == 250
+        assert res["vendor_sell_copper"] == 250
+        assert res["vendor_buy_price"] == 0
+        assert res["vendor_buy_copper"] == 0
+
+    def test_fetch_wowhead_item_nether_json_fallback(self):
+        """Verify fetch_wowhead_item falls back to Nether tooltip JSON when XML endpoint fails."""
+        nether_payload = {
+            "name": "Mithril Ore",
+            "quality": 1,
+            "icon": "inv_ore_mithril_02",
+            "tooltip": (
+                '<table><tr><td><b>Mithril Ore</b><div class="whtt-sellprice">'
+                'Sell Price: <span class="moneysilver">2</span> '
+                '<span class="moneycopper">50</span></div></td></tr></table>'
+            ),
+        }
+        nether_bytes = json.dumps(nether_payload).encode("utf-8")
+
+        def mock_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "nether.wowhead.com" in url:
+                return self._create_mock_response(nether_bytes, 200)
+            raise urllib.error.URLError("XML endpoint offline")
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=mock_urlopen):
+            res = fetch_wowhead_item(3858)
+
+        assert res is not None
+        assert res["item_id"] == 3858
+        assert res["name"] == "Mithril Ore"
+        assert res["quality"] == 1
+        assert res["icon"] == "inv_ore_mithril_02"
+        assert res["vendor_sell_price"] == 250
+        assert res["vendor_sell_copper"] == 250
+        assert res["name_ru"] == "Мифриловая руда"
+
+    def test_fetch_wowhead_item_invalid_and_missing(self):
+        """Verify fetch_wowhead_item returns None for invalid item IDs or error responses."""
+        assert fetch_wowhead_item(-1) is None
+        assert fetch_wowhead_item(0) is None
+        assert fetch_wowhead_item("invalid") is None
+
+        def mock_error(req, timeout=None):
+            return self._create_mock_response(b'<wowhead><error>Item not found</error></wowhead>', 200)
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=mock_error):
+            res = fetch_wowhead_item(9999999)
+            assert res is None
+
+    def test_wowhead_resolver_updates_sqlite_items(self, tmp_path):
+        """Verify WowheadResolver background worker updates SQLite items table upon enqueue."""
+        db_file = str(tmp_path / "resolver_test.db")
+        conn = init_db(db_file)
+        with conn:
+            conn.execute("INSERT INTO items (item_id, name) VALUES (3858, 'Item 3858')")
+        conn.close()
+
+        resolved_item = {
+            "item_id": 3858,
+            "name": "Mithril Ore",
+            "name_ru": "Мифриловая руда",
+            "quality": 1,
+            "item_class": 7,
+            "item_subclass": 7,
+            "vendor_sell_price": 250,
+            "vendor_sell_copper": 250,
+            "vendor_buy_price": 0,
+            "vendor_buy_copper": 0,
+            "icon": "inv_ore_mithril_02",
+        }
+
+        resolver = WowheadResolver(rate_limit_seconds=0.01)
+        try:
+            with unittest.mock.patch("src.wowhead.fetch_wowhead_item", return_value=resolved_item):
+                resolver.enqueue(3858, db_file)
+
+                deadline = time.time() + 5.0
+                updated = False
+                while time.time() < deadline:
+                    with sqlite3.connect(db_file) as check_conn:
+                        row = check_conn.execute(
+                            "SELECT name, name_ru, vendor_sell_copper, quality FROM items WHERE item_id = 3858"
+                        ).fetchone()
+                        if row and row[0] == "Mithril Ore":
+                            updated = True
+                            break
+                    time.sleep(0.05)
+
+                assert updated is True
+                assert row[0] == "Mithril Ore"
+                assert row[1] == "Мифриловая руда"
+                assert row[2] == 250
+                assert row[3] == 1
+        finally:
+            resolver.stop(timeout=2.0)
+
+    def test_wowhead_resolver_inserts_unseen_item(self, tmp_path):
+        """Verify WowheadResolver inserts a new row if item_id was not yet in items table."""
+        db_file = str(tmp_path / "resolver_insert_test.db")
+        conn = init_db(db_file)
+        conn.close()
+
+        resolved_item = {
+            "item_id": 3858,
+            "name": "Mithril Ore",
+            "name_ru": "Мифриловая руда",
+            "quality": 1,
+            "item_class": 7,
+            "item_subclass": 7,
+            "vendor_sell_price": 250,
+            "vendor_sell_copper": 250,
+            "vendor_buy_price": 0,
+            "vendor_buy_copper": 0,
+            "icon": "inv_ore_mithril_02",
+        }
+
+        resolver = WowheadResolver(rate_limit_seconds=0.01)
+        try:
+            with unittest.mock.patch("src.wowhead.fetch_wowhead_item", return_value=resolved_item):
+                resolver.enqueue(3858, db_file)
+
+                deadline = time.time() + 5.0
+                inserted = False
+                while time.time() < deadline:
+                    with sqlite3.connect(db_file) as check_conn:
+                        row = check_conn.execute(
+                            "SELECT name, name_ru, vendor_sell_copper FROM items WHERE item_id = 3858"
+                        ).fetchone()
+                        if row and row[0] == "Mithril Ore":
+                            inserted = True
+                            break
+                    time.sleep(0.05)
+
+                assert inserted is True
+                assert row[0] == "Mithril Ore"
+                assert row[1] == "Мифриловая руда"
+                assert row[2] == 250
+        finally:
+            resolver.stop(timeout=2.0)
+
+    def test_ingest_price_snapshot_triggers_resolver_for_unresolved_items(self, tmp_path):
+        """Verify ingest_price_snapshot automatically enqueues unresolved items into WowheadResolver."""
+        db_file = str(tmp_path / "market_resolver_trigger.db")
+        conn = init_db(db_file)
+
+        mock_resolver = MagicMock()
+        raw_data = {
+            "AUCTIONATOR_PRICE_DATABASE": {
+                "Everlook": {
+                    "3858": {"m": 1200}
+                }
+            }
+        }
+
+        with unittest.mock.patch("src.wowhead.WowheadResolver.get_instance", return_value=mock_resolver):
+            count = ingest_price_snapshot(conn, raw_data, "Everlook", db_path=db_file)
+
+        assert count == 1
+        mock_resolver.enqueue.assert_called_once_with(3858, db_file)
+
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM items WHERE item_id = 3858")
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "Item 3858"
+        conn.close()
+
+    def test_ingest_price_snapshot_graceful_without_db_path_or_resolver_failure(self, memory_db):
+        """Verify ingest_price_snapshot operates gracefully when resolver raises or db_path is omitted."""
+        raw_data = {
+            "AUCTIONATOR_PRICE_DATABASE": {
+                "Everlook": {
+                    "3858": {"m": 1800}
+                }
+            }
+        }
+
+        # 1. Graceful when db_path is None (e.g. in-memory)
+        count = ingest_price_snapshot(memory_db, raw_data, "Everlook", db_path=None)
+        assert count == 1
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT price FROM price_snapshots WHERE item_id = 3858")
+        assert cur.fetchone()[0] == 1800
+
+        # 2. Graceful when WowheadResolver raises an exception
+        with unittest.mock.patch("src.wowhead.WowheadResolver.get_instance", side_effect=RuntimeError("queue offline")):
+            count_fallback = ingest_price_snapshot(
+                memory_db,
+                {"AUCTIONATOR_PRICE_DATABASE": {"Everlook": {"3859": {"m": 2200}}}},
+                "Everlook",
+                db_path="/tmp/dummy.db",
+                source_mtime=int(time.time()) + 1000,
+            )
+            assert count_fallback == 1
+
+        cur.execute("SELECT price FROM price_snapshots WHERE item_id = 3859")
+        assert cur.fetchone()[0] == 2200

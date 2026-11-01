@@ -271,8 +271,23 @@ def ingest_price_snapshot(
     source_mtime: Optional[int] = None,
     current_time: Optional[int] = None,
     content_hash: Optional[str] = None,
+    db_path: Optional[str] = None,
 ) -> int:
     """Ingest price snapshot for the given realm with 10-minute deduplication and batch insertion."""
+    resolved_db_path = db_path
+    if not resolved_db_path:
+        try:
+            cur_meta = conn.cursor()
+            cur_meta.execute("PRAGMA database_list")
+            for r in cur_meta.fetchall():
+                if r[1] == "main" and r[2]:
+                    resolved_db_path = r[2]
+                    break
+        except Exception:
+            pass
+    if not resolved_db_path:
+        resolved_db_path = getattr(conn, "_db_path", None)
+
     if source_mtime is None and isinstance(raw_data, dict):
         source_mtime = raw_data.get("_source_mtime")
 
@@ -514,14 +529,40 @@ def ingest_price_snapshot(
 
     try:
         # Ensure foreign key constraints succeed if items table exists
+        items_to_resolve: List[int] = []
         try:
             cur.execute("SELECT 1 FROM items LIMIT 1")
+            unique_item_ids = list({item[0] for item in batch_to_insert})
+            for i in range(0, len(unique_item_ids), 400):
+                chunk = unique_item_ids[i : i + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                cur.execute(
+                    f"SELECT item_id, name FROM items WHERE item_id IN ({placeholders})",
+                    chunk,
+                )
+                existing = dict(cur.fetchall())
+                for i_id in chunk:
+                    nm = existing.get(i_id)
+                    if nm is None or not nm or nm.startswith("Item ") or nm.startswith("Item #"):
+                        items_to_resolve.append(i_id)
+
             cur.executemany(
                 "INSERT OR IGNORE INTO items (item_id, name) VALUES (?, ?)",
                 [(item[0], f"Item {item[0]}") for item in batch_to_insert],
             )
         except sqlite3.Error:
             pass
+
+        # Background Wowhead resolution for unresolved items if db_path is available
+        if items_to_resolve and resolved_db_path:
+            try:
+                from src.wowhead import WowheadResolver
+
+                resolver = WowheadResolver.get_instance()
+                for i_id in items_to_resolve:
+                    resolver.enqueue(i_id, resolved_db_path)
+            except Exception:
+                pass
 
         with conn:
             cur.executemany(
@@ -653,7 +694,13 @@ class AuctionatorEventHandler(FileSystemEventHandler):
                 src_mtime = raw_data.get("_source_mtime") if isinstance(raw_data, dict) else None
                 conn = init_db(self.db_path)
                 try:
-                    count = ingest_price_snapshot(conn, raw_data, self.realm, source_mtime=src_mtime)
+                    count = ingest_price_snapshot(
+                        conn,
+                        raw_data,
+                        self.realm,
+                        source_mtime=src_mtime,
+                        db_path=self.db_path,
+                    )
                     if isinstance(raw_data, dict) and "_discovered_realm" in raw_data:
                         self.realm = raw_data["_discovered_realm"]
                     logger.info(
