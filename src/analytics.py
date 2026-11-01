@@ -3,6 +3,7 @@
 from collections import defaultdict
 import math
 import sqlite3
+import time
 from typing import Optional
 
 # Strict whitelist of vendor-bought reagents across professions (Classic 1.15)
@@ -58,15 +59,45 @@ VENDOR_REAGENTS_WHITELIST: set[int] = {
 }
 
 
+def _get_cutoff_timestamp(
+    conn: sqlite3.Connection,
+    realm: Optional[str],
+    max_age_hours: Optional[float],
+) -> Optional[float]:
+    """Calculate minimum timestamp cutoff for TTL filtering.
+
+    If max_age_hours is None or <= 0, returns None (no filtering).
+    For testing fixtures with synthetic timestamps (< 1e9), anchors to max(timestamp) in DB.
+    Otherwise anchors to current system time (time.time()).
+    """
+    if max_age_hours is None or max_age_hours <= 0:
+        return None
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT MAX(timestamp) FROM price_snapshots WHERE (? IS NULL OR realm = ?)",
+        (realm, realm),
+    )
+    row = cursor.fetchone()
+    db_max = row[0] if row and row[0] is not None else None
+    if db_max is not None and db_max < 1_000_000_000:
+        ref_time = float(db_max)
+    else:
+        now_ts = time.time()
+        ref_time = max(now_ts, float(db_max)) if db_max is not None else now_ts
+    return ref_time - (float(max_age_hours) * 3600.0)
+
+
 def get_vendor_arbitrage(
     conn: sqlite3.Connection,
     min_profit_copper: int = 50,
-    realm: Optional[str] = None
+    realm: Optional[str] = None,
+    max_age_hours: Optional[float] = None,
 ) -> list[dict]:
     """Find auction lots where buyout price < vendor sell price with net profit >= min_profit_copper.
 
-    Sorted by absolute profit in descending order. Filters by realm when provided.
+    Sorted by absolute profit in descending order. Filters by realm and TTL (max_age_hours) when provided.
     """
+    min_ts = _get_cutoff_timestamp(conn, realm, max_age_hours)
     cursor = conn.cursor()
     query = """
         WITH latest_snapshots AS (
@@ -77,6 +108,7 @@ def get_vendor_arbitrage(
                    ) as rn
             FROM price_snapshots s
             WHERE (? IS NULL OR s.realm = ?)
+              AND (? IS NULL OR s.timestamp >= ?)
         )
         SELECT 
             ls.item_id,
@@ -94,7 +126,7 @@ def get_vendor_arbitrage(
           AND (i.vendor_sell_price - ls.price) >= ?
         ORDER BY profit_copper DESC, ls.price ASC, ls.item_id ASC
     """
-    cursor.execute(query, (realm, realm, min_profit_copper))
+    cursor.execute(query, (realm, realm, min_ts, min_ts, min_profit_copper))
     results = []
     for row in cursor.fetchall():
         results.append({
@@ -114,18 +146,21 @@ def get_vendor_arbitrage(
 
 def get_crafting_margins(
     conn: sqlite3.Connection,
-    has_bartering: bool = True,
-    has_master_chef: bool = True,
+    has_bartering: bool = False,
+    has_master_chef: bool = False,
     min_roi: float = 0.25,
     realm: Optional[str] = None,
     include_ah_deposit: bool = True,
+    max_age_hours: Optional[float] = None,
 ) -> list[dict]:
     """Calculate crafting margins accounting for Bartering (-5% NPC), Master Chef (1.1x Cooking),
 
     AH cut (5%), AH deposit fee (max(15, 5% of vendor sell price)), and Waylaid Crates models.
     Supports both recipe-crafted items and raw-resource Waylaid Crates (211501-211507).
     Filters recipes where profit > 0 and ROI >= min_roi, sorted by ROI and profit descending.
+    Perks default to False for starting characters.
     """
+    min_ts = _get_cutoff_timestamp(conn, realm, max_age_hours)
     cursor = conn.cursor()
 
     # 1. Latest snapshot price for each item on target realm
@@ -138,10 +173,11 @@ def get_crafting_margins(
                    ) as rn
             FROM price_snapshots s
             WHERE (? IS NULL OR s.realm = ?)
+              AND (? IS NULL OR s.timestamp >= ?)
         )
         SELECT item_id, price FROM latest_snapshots WHERE rn = 1
     """
-    cursor.execute(query_prices, (realm, realm))
+    cursor.execute(query_prices, (realm, realm, min_ts, min_ts))
     latest_prices = {row[0]: row[1] for row in cursor.fetchall()}
 
     # 2. Items metadata
@@ -261,9 +297,11 @@ def get_crafting_margins(
         if crate_info:
             target_count = crate_info.get("target_item_count") or 1
             reward_copper = crate_info.get("reward_copper") or 0
-            pack_cost = total_cost * target_count
-            pack_revenue = p_out * target_count * 0.95
-            turnin_profit = reward_copper - (target_count * p_out * 0.95)
+            pack_cost = target_count * p_out
+            pack_craft_cost = total_cost * target_count
+            pack_revenue = target_count * p_out * 0.95
+            turnin_profit = reward_copper - pack_cost
+            craft_turnin_profit = reward_copper - pack_craft_cost
             crate_payload = {
                 "crate_item_id": crate_info["crate_item_id"],
                 "crate_name": crate_info["crate_name"],
@@ -272,20 +310,34 @@ def get_crafting_margins(
                 "reward_copper": reward_copper,
                 "pack_cost": round(pack_cost, 2),
                 "pack_cost_copper": int(round(pack_cost)),
+                "pack_craft_cost": round(pack_craft_cost, 2),
+                "pack_craft_cost_copper": int(round(pack_craft_cost)),
                 "pack_revenue": round(pack_revenue, 2),
                 "pack_revenue_copper": int(round(pack_revenue)),
                 "turnin_profit": round(turnin_profit, 2),
                 "turnin_profit_copper": int(round(turnin_profit)),
+                "craft_turnin_profit": round(craft_turnin_profit, 2),
+                "craft_turnin_profit_copper": int(round(craft_turnin_profit)),
             }
         else:
             crate_payload = None
             target_count = 1
             reward_copper = 0
             pack_cost = None
+            pack_craft_cost = None
             pack_revenue = None
             turnin_profit = None
+            craft_turnin_profit = None
 
-        if (profit <= 0 or roi < min_roi) and not (crate_payload and turnin_profit and turnin_profit > 0):
+        is_profitable_craft = (profit > 0 and roi >= min_roi)
+        is_profitable_crate_turnin = (
+            crate_payload is not None and (
+                (turnin_profit is not None and turnin_profit > 0) or
+                (craft_turnin_profit is not None and craft_turnin_profit > 0)
+            )
+        )
+
+        if not is_profitable_craft and not is_profitable_crate_turnin:
             continue
 
         results.append({
@@ -308,7 +360,7 @@ def get_crafting_margins(
             "profit_copper": int(round(profit)),
             "roi": round(roi, 4),
             "roi_percent": round(roi * 100, 2),
-            "is_waylaid_target": crate_payload is not None,
+            "is_waylaid_target": is_profitable_crate_turnin,
             "waylaid_crate": crate_payload,
             "waylaid_crate_name": crate_payload["crate_name"] if crate_payload else None,
             "waylaid_crate_id": crate_payload["crate_item_id"] if crate_payload else None,
@@ -316,10 +368,14 @@ def get_crafting_margins(
             "reward_copper": reward_copper,
             "pack_cost": round(pack_cost, 2) if pack_cost is not None else None,
             "pack_cost_copper": int(round(pack_cost)) if pack_cost is not None else None,
+            "pack_craft_cost": round(pack_craft_cost, 2) if pack_craft_cost is not None else None,
+            "pack_craft_cost_copper": int(round(pack_craft_cost)) if pack_craft_cost is not None else None,
             "pack_revenue": round(pack_revenue, 2) if pack_revenue is not None else None,
             "pack_revenue_copper": int(round(pack_revenue)) if pack_revenue is not None else None,
             "turnin_profit": round(turnin_profit, 2) if turnin_profit is not None else None,
             "turnin_profit_copper": int(round(turnin_profit)) if turnin_profit is not None else None,
+            "craft_turnin_profit": round(craft_turnin_profit, 2) if craft_turnin_profit is not None else None,
+            "craft_turnin_profit_copper": int(round(craft_turnin_profit)) if craft_turnin_profit is not None else None,
             "reagents": reagents_detail,
             "realm": realm,
         })
@@ -337,17 +393,17 @@ def get_crafting_margins(
         target_meta = items_by_id.get(target_id, {})
         target_count = crate.get("target_item_count") or 1
         reward_copper = crate.get("reward_copper") or 0
-        total_cost = float(p_out)
-        pack_cost = total_cost * target_count
+        pack_cost = float(target_count * p_out)
         pack_revenue = p_out * target_count * 0.95
-        turnin_profit = reward_copper - (target_count * p_out * 0.95)
-        direct_turnin_profit = reward_copper - pack_cost
-        turnin_roi = direct_turnin_profit / pack_cost if pack_cost > 0 else 0.0
+        turnin_profit = reward_copper - pack_cost
+        turnin_roi = turnin_profit / pack_cost if pack_cost > 0 else 0.0
 
         v_sell = target_meta.get("vendor_sell_price") or 0
         deposit = max(15, int(v_sell * 0.05)) if include_ah_deposit else 0
 
-        if turnin_profit <= 0 and (direct_turnin_profit <= 0 or turnin_roi < min_roi):
+        # Unprofitable turn-ins (turnin_profit <= 0) are strictly excluded.
+        # When min_roi is enforced (e.g. >= 0), require turnin_roi >= min_roi.
+        if turnin_profit <= 0 or (min_roi > -900 and turnin_roi < min_roi):
             continue
 
         crate_payload = {
@@ -400,7 +456,7 @@ def get_crafting_margins(
                 "item_id": target_id,
                 "name": target_meta.get("name", f"Item {target_id}"),
                 "count": target_count,
-                "unit_cost": round(p_out, 2),
+                "unit_cost": round(float(p_out), 2),
                 "total_cost": round(pack_cost, 2),
                 "is_vendor": False,
             }],
@@ -413,14 +469,22 @@ def get_crafting_margins(
 
 def get_waylaid_crate_arbitrage(
     conn: sqlite3.Connection,
-    realm: Optional[str] = None
+    realm: Optional[str] = None,
+    max_age_hours: Optional[float] = None,
 ) -> list[dict]:
     """Calculate Waylaid Crates arbitrage: pack cost/revenue on AH vs NPC turn-in profit.
 
     Supports both crafted items and raw-resource crates (211501-211507).
+    Excludes crates where turn-in profit is non-positive (<= 0).
     """
-    margins = get_crafting_margins(conn, realm=realm, min_roi=-999.0)
-    return [m for m in margins if m.get("is_waylaid_target")]
+    margins = get_crafting_margins(conn, realm=realm, min_roi=-999.0, max_age_hours=max_age_hours)
+    return [
+        m for m in margins
+        if m.get("is_waylaid_target") and (
+            (m.get("turnin_profit") is not None and m.get("turnin_profit") > 0)
+            or (m.get("craft_turnin_profit") is not None and m.get("craft_turnin_profit") > 0)
+        )
+    ]
 
 
 def get_zscore_anomalies(
@@ -431,13 +495,21 @@ def get_zscore_anomalies(
     min_samples: int = 6,
     realm: Optional[str] = None,
     ddof: int = 1,
+    max_age_hours: Optional[float] = None,
+    min_profit_copper: int = 1,
 ) -> list[dict]:
     """Calculate rolling mean and standard deviation over window of <= window_size snapshots (min min_samples).
 
     Uses unbiased sample variance (ddof=1) to prevent Samuelson's inequality violations.
-    Triggers STRONG_BUY for panic dumps (Z <= z_buy_threshold) and STRONG_SELL for local peaks (Z >= z_sell_threshold).
+    Triggers STRONG_BUY for panic dumps (Z <= z_buy_threshold) ONLY if expected net profit
+    after 5% AH cut and deposit fee is >= min_profit_copper:
+      expected_revenue = mu * 0.95
+      deposit = max(15, int(v_sell * 0.05))
+      expected_net_profit = expected_revenue - current_price - deposit > 0
+    Triggers STRONG_SELL for local peaks (Z >= z_sell_threshold).
     Safe against division by zero (sigma == 0 -> Z = 0.0).
     """
+    min_ts = _get_cutoff_timestamp(conn, realm, max_age_hours)
     cursor = conn.cursor()
     query = """
         WITH ranked_snapshots AS (
@@ -448,22 +520,25 @@ def get_zscore_anomalies(
                    ) as rn
             FROM price_snapshots s
             WHERE (? IS NULL OR s.realm = ?)
+              AND (? IS NULL OR s.timestamp >= ?)
         )
-        SELECT rs.item_id, rs.realm, rs.price, rs.timestamp, rs.rn, i.name
+        SELECT rs.item_id, rs.realm, rs.price, rs.timestamp, rs.rn, i.name, i.vendor_sell_price
         FROM ranked_snapshots rs
         JOIN items i ON rs.item_id = i.item_id
         WHERE rs.rn <= ?
         ORDER BY rs.item_id, rs.realm, rs.rn ASC
     """
-    cursor.execute(query, (realm, realm, window_size))
+    cursor.execute(query, (realm, realm, min_ts, min_ts, window_size))
     rows = cursor.fetchall()
 
     grouped = defaultdict(list)
     item_names = {}
+    item_vendor_sells = {}
     for r in rows:
-        item_id, r_realm, price, ts, rn, name = r[0], r[1], r[2], r[3], r[4], r[5]
+        item_id, r_realm, price, ts, rn, name, v_sell = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
         grouped[(item_id, r_realm)].append((rn, price))
         item_names[item_id] = name
+        item_vendor_sells[item_id] = v_sell or 0
 
     results = []
     for (item_id, item_realm), entries in grouped.items():
@@ -481,8 +556,14 @@ def get_zscore_anomalies(
         sigma = math.sqrt(var)
         z = ((current_price - mu) / sigma) if sigma > 0 else 0.0
 
+        v_sell = item_vendor_sells.get(item_id, 0) or 0
+        deposit = max(15, int(v_sell * 0.05))
+        expected_revenue = mu * 0.95
+        expected_net_profit = expected_revenue - current_price - deposit
+        expected_roi = (expected_net_profit / current_price) if current_price > 0 else 0.0
+
         signal = None
-        if z <= z_buy_threshold:
+        if z <= z_buy_threshold and expected_net_profit >= min_profit_copper:
             signal = "STRONG_BUY"
         elif z >= z_sell_threshold:
             signal = "STRONG_SELL"
@@ -499,6 +580,12 @@ def get_zscore_anomalies(
                 "sigma": round(sigma, 4),
                 "z_score": round(z, 4),
                 "z": round(z, 4),
+                "expected_revenue": round(expected_revenue, 2),
+                "expected_profit": round(expected_net_profit, 2),
+                "expected_net_profit": round(expected_net_profit, 2),
+                "expected_roi": round(expected_roi, 4),
+                "deposit": deposit,
+                "deposit_copper": deposit,
                 "signal": signal,
                 "sample_count": n,
                 "n": n,

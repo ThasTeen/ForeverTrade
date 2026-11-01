@@ -980,13 +980,13 @@ def test_waylaid_crates_economy_and_raw_resources(memory_db):
     assert r_crafted["waylaid_crate_id"] == 7010
     assert r_crafted["target_item_count"] == 5
     assert r_crafted["reward_copper"] == 12000
-    # Pack cost: 5 * 400 = 2000
-    assert r_crafted["pack_cost"] == 2000.0
+    # Pack cost: 5 * 1000 = 5000 (100% of AH buyout price p_out)
+    assert r_crafted["pack_cost"] == 5000.0
     # Pack revenue on AH: 5 * 1000 * 0.95 = 4750
     assert r_crafted["pack_revenue"] == 4750.0
-    # Turn-in profit vs AH: 12000 - 4750 = 7250
-    assert r_crafted["turnin_profit"] == 7250.0
-    assert r_crafted["waylaid_crate"]["turnin_profit"] == 7250.0
+    # Turn-in profit vs AH: 12000 - 5000 = 7000
+    assert r_crafted["turnin_profit"] == 7000.0
+    assert r_crafted["waylaid_crate"]["turnin_profit"] == 7000.0
 
     # 2. Verify raw-resource crate (211501)
     r_raw = next((r for r in results if r.get("waylaid_crate_id") == 211501), None)
@@ -1000,8 +1000,8 @@ def test_waylaid_crates_economy_and_raw_resources(memory_db):
     assert r_raw["pack_cost"] == 300.0
     # Pack revenue on AH: 20 * 15 * 0.95 = 285
     assert r_raw["pack_revenue"] == 285.0
-    # Turn-in profit vs AH: 500 - 285 = 215
-    assert r_raw["turnin_profit"] == 215.0
+    # Turn-in profit vs AH: 500 - 300 = 200 (100% pack_cost deduction, not pack_revenue)
+    assert r_raw["turnin_profit"] == 200.0
     assert r_raw["is_waylaid_target"] is True
     # Reagent details
     assert len(r_raw["reagents"]) == 1
@@ -1014,3 +1014,296 @@ def test_waylaid_crates_economy_and_raw_resources(memory_db):
     crate_ids = {c["waylaid_crate_id"] for c in crate_arb}
     assert 7010 in crate_ids
     assert 211501 in crate_ids
+
+
+# ---------------------------------------------------------------------------
+# Task 15 (R46, R47, R49, R50) Specific Math, Crate & Z-Score Tests
+# ---------------------------------------------------------------------------
+
+def test_waylaid_crates_audit_case_loss_excluded_no_fake_profit(memory_db):
+    """Reproduce audit case: 20 items @ 21 copper = 420 copper pack cost, NPC reward = 400 copper.
+
+    Net loss = 400 - 420 = -20 copper.
+    Under buggy math (pack_revenue = 420 * 0.95 = 399), 400 - 399 produced +1 copper fake profit.
+    Verify crate is NOT returned as a profitable turn-in in get_crafting_margins or get_waylaid_crate_arbitrage (R46, R47).
+    """
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (
+                   item_id, name, quality, vendor_sell_price, vendor_buy_price,
+                   target_item_id, target_item_count, reward_copper, category
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                # Raw resource item and its loss crate (420 cost vs 400 reward -> -20 loss)
+                (8101, "Audit Test Herb", 1, 10, 0, None, 0, 0, None),
+                (8110, "Waylaid Supplies: Audit Loss Crate", 1, 100, 0, 8101, 20, 400, "waylaid_crate"),
+                # Control item and its profitable crate (420 cost vs 500 reward -> +80 profit)
+                (8102, "Audit Control Herb", 1, 10, 0, None, 0, 0, None),
+                (8120, "Waylaid Supplies: Audit Profitable Crate", 1, 100, 0, 8102, 20, 500, "waylaid_crate"),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                # Both items cost 21 copper per unit on AH (20 * 21 = 420 copper pack cost)
+                (8101, "Everlook", 21, now),
+                (8102, "Everlook", 21, now),
+            ]
+        )
+
+    # 1. get_crafting_margins: crate 8110 must NOT appear even with min_roi=-999
+    margins = get_crafting_margins(memory_db, min_roi=-999.0)
+    crate_ids_in_margins = {
+        m.get("waylaid_crate_id") for m in margins if m.get("is_waylaid_target")
+    }
+    assert 8110 not in crate_ids_in_margins, "Loss crate 8110 must not be returned with fake +1 profit"
+    assert 8120 in crate_ids_in_margins, "Profitable crate 8120 must be included"
+
+    # 2. get_waylaid_crate_arbitrage: crate 8110 must NOT appear
+    crate_arb = get_waylaid_crate_arbitrage(memory_db)
+    arb_crate_ids = {c["waylaid_crate_id"] for c in crate_arb}
+    assert 8110 not in arb_crate_ids
+    assert 8120 in arb_crate_ids
+
+    # 3. Verify exact math on profitable crate 8120
+    c8120 = next(c for c in crate_arb if c["waylaid_crate_id"] == 8120)
+    assert c8120["pack_cost"] == 420.0  # 100% cost: 20 * 21
+    assert c8120["pack_revenue"] == 399.0  # 20 * 21 * 0.95
+    assert c8120["turnin_profit"] == 80.0  # 500 - 420 = +80 copper
+
+
+def test_zscore_breakeven_strong_buy_audit_case(memory_db):
+    """Reproduce audit case: prices [100, 100, 100, 100, 100, 96].
+
+    Statistical Z = -2.04 <= -1.8, but net proceeds after 5% AH fee and deposit yield a net loss:
+      expected_revenue = 99.33 * 0.95 = 94.37 copper
+      deposit = max(15, int(v_sell * 0.05)) = 15 copper
+      net_profit = 94.37 - 96 - 15 = -16.63 copper (loss!)
+    Ensure STRONG_BUY signal is strictly suppressed (R49).
+    Also verify deep discount [100, 100, 100, 100, 100, 50] with net profit > 0 triggers STRONG_BUY.
+    """
+    base_time = 10000
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (8201, "Unprofitable Dip Item", 1, 10, 0),
+                (8202, "Profitable Dip Item", 1, 10, 0),
+            ]
+        )
+
+        snapshots = []
+        # Item 8201: [100, 100, 100, 100, 100, 96]
+        # 5 older snapshots at 100, newest at 96
+        for i in range(5):
+            snapshots.append((8201, "Everlook", 100, base_time + i))
+        snapshots.append((8201, "Everlook", 96, base_time + 10))
+
+        # Item 8202: [100, 100, 100, 100, 100, 50]
+        # 5 older snapshots at 100, newest at 50
+        for i in range(5):
+            snapshots.append((8202, "Everlook", 100, base_time + i))
+        snapshots.append((8202, "Everlook", 50, base_time + 10))
+
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            snapshots
+        )
+
+    results = get_zscore_anomalies(
+        memory_db, window_size=15, z_buy_threshold=-1.8, min_profit_copper=1
+    )
+
+    # Item 8201 must NOT have any STRONG_BUY signal despite Z <= -1.8
+    item_8201_signals = [r for r in results if r["item_id"] == 8201]
+    assert len(item_8201_signals) == 0, (
+        "Item 8201 has negative net profit (-16.63 copper); STRONG_BUY must NOT be emitted"
+    )
+
+    # Item 8202 must trigger STRONG_BUY
+    item_8202_signals = [r for r in results if r["item_id"] == 8202]
+    assert len(item_8202_signals) == 1
+    sig_8202 = item_8202_signals[0]
+    assert sig_8202["signal"] == "STRONG_BUY"
+    assert sig_8202["current_price"] == 50
+    assert sig_8202["mean_price"] == 91.67
+    assert sig_8202["z_score"] == -2.0412
+    assert sig_8202["expected_revenue"] == 87.08
+    assert sig_8202["deposit"] == 15
+    assert sig_8202["expected_net_profit"] == 22.08
+    assert sig_8202["expected_profit"] == 22.08
+    assert sig_8202["expected_roi"] == 0.4417
+
+
+def test_crafting_margins_perk_defaults_and_activation(memory_db):
+    """Verify R50: default perks are False (has_bartering=False, has_master_chef=False)
+
+    and explicit perk flags activate 5% vendor discount and 1.1x Cooking yield multiplier.
+    """
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (8301, "Special Roast", 1, 10, 0),        # Crafted item, vendor sell = 10 -> deposit = 15
+                (8302, "Fresh Meat", 1, 5, 0),            # AH reagent
+                (2678, "Hot Spices", 1, 2, 100),          # Whitelisted vendor reagent, v_buy = 100
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (8301, "Everlook", 240, now),
+                (8302, "Everlook", 100, now),
+            ]
+        )
+        memory_db.execute(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            (830, "Special Roast Recipe", "Cooking", 8301, 1.0)
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (830, 8302, 8302, 1, 1),
+                (830, 2678, 2678, 1, 1),
+            ]
+        )
+
+    # 1. Default invocation (no perk arguments):
+    # has_bartering defaults to False -> Hot Spices cost = 100.0, total cost = 100 + 100 = 200.0
+    # has_master_chef defaults to False -> yield = 1.0, revenue = 240 * 0.95 = 228.0
+    # deposit = 15, profit = 228 - 200 - 15 = 13.0, ROI = 13 / 200 = 0.065
+    res_default = get_crafting_margins(memory_db, min_roi=0.0)
+    assert len(res_default) == 1
+    rd = res_default[0]
+    assert rd["recipe_id"] == 830
+    assert rd["cost"] == 200.0
+    assert rd["yield"] == 1.0
+    assert rd["revenue"] == 228.0
+    assert rd["deposit"] == 15
+    assert rd["profit"] == 13.0
+    assert rd["roi"] == 0.065
+
+    # 2. Explicit activation: has_bartering=True, has_master_chef=True
+    # has_bartering=True -> Hot Spices cost = 100 * 0.95 = 95.0, total cost = 100 + 95 = 195.0
+    # has_master_chef=True -> yield = 1.1, revenue = 240 * 0.95 * 1.1 = 250.8
+    # deposit = 15, profit = 250.8 - 195 - 15 = 40.8, ROI = 40.8 / 195 = 0.2092
+    res_perks = get_crafting_margins(memory_db, has_bartering=True, has_master_chef=True, min_roi=0.0)
+    assert len(res_perks) == 1
+    rp = res_perks[0]
+    assert rp["recipe_id"] == 830
+    assert rp["cost"] == 195.0
+    assert rp["yield"] == 1.1
+    assert rp["revenue"] == 250.8
+    assert rp["deposit"] == 15
+    assert rp["profit"] == 40.8
+    assert rp["roi"] == 0.2092
+
+
+def test_analytics_max_age_hours_ttl_filtering(memory_db):
+    """Verify max_age_hours filters out stale snapshots across all analytics functions."""
+    now = int(time.time())
+    ts_fresh = now - 3600          # 1 hour ago
+    ts_stale = now - (30 * 3600)   # 30 hours ago
+
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (
+                   item_id, name, quality, vendor_sell_price, vendor_buy_price,
+                   target_item_id, target_item_count, reward_copper, category
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                # For vendor arbitrage
+                (8401, "Fresh Arb Item", 1, 200, 0, None, 0, 0, None),
+                (8402, "Stale Arb Item", 1, 200, 0, None, 0, 0, None),
+                # For crafting margins & crates
+                (8403, "Fresh Craft Product", 1, 10, 0, None, 0, 0, None),
+                (8404, "Fresh Reagent", 1, 5, 0, None, 0, 0, None),
+                (8405, "Stale Craft Product", 1, 10, 0, None, 0, 0, None),
+                (8406, "Stale Reagent", 1, 5, 0, None, 0, 0, None),
+                # Raw crates
+                (8410, "Waylaid Supplies: Fresh Product", 1, 100, 0, 8403, 10, 5000, "waylaid_crate"),
+                (8420, "Waylaid Supplies: Stale Product", 1, 100, 0, 8405, 10, 5000, "waylaid_crate"),
+                # For Z-score
+                (8407, "Stale Z-score Item", 1, 10, 0, None, 0, 0, None),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                # Arb snapshots
+                (8401, "Everlook", 100, ts_fresh),
+                (8402, "Everlook", 100, ts_stale),
+                # Crafting snapshots
+                (8403, "Everlook", 300, ts_fresh),
+                (8404, "Everlook", 50, ts_fresh),
+                (8405, "Everlook", 300, ts_stale),
+                (8406, "Everlook", 50, ts_stale),
+                # Z-score: 6 stale snapshots
+                (8407, "Everlook", 100, ts_stale - 50),
+                (8407, "Everlook", 100, ts_stale - 40),
+                (8407, "Everlook", 100, ts_stale - 30),
+                (8407, "Everlook", 100, ts_stale - 20),
+                (8407, "Everlook", 100, ts_stale - 10),
+                (8407, "Everlook", 10, ts_stale),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (841, "Fresh Recipe", "Alchemy", 8403, 1.0),
+                (842, "Stale Recipe", "Alchemy", 8405, 1.0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (841, 8404, 8404, 1, 1),
+                (842, 8406, 8406, 1, 1),
+            ]
+        )
+
+    # 1. get_vendor_arbitrage: max_age_hours=24 excludes stale 8402
+    arb_ttl = get_vendor_arbitrage(memory_db, min_profit_copper=50, max_age_hours=24)
+    arb_ttl_ids = {r["item_id"] for r in arb_ttl}
+    assert 8401 in arb_ttl_ids
+    assert 8402 not in arb_ttl_ids
+
+    # Without max_age_hours: both fresh and stale are returned
+    arb_all = get_vendor_arbitrage(memory_db, min_profit_copper=50, max_age_hours=None)
+    arb_all_ids = {r["item_id"] for r in arb_all}
+    assert 8401 in arb_all_ids
+    assert 8402 in arb_all_ids
+
+    # 2. get_crafting_margins: max_age_hours=24 excludes stale recipe 842
+    margins_ttl = get_crafting_margins(memory_db, min_roi=0.25, max_age_hours=24)
+    recipe_ids_ttl = {m["recipe_id"] for m in margins_ttl if m["recipe_id"] is not None}
+    assert 841 in recipe_ids_ttl
+    assert 842 not in recipe_ids_ttl
+
+    # 3. get_waylaid_crate_arbitrage: max_age_hours=24 excludes stale crate 8420
+    crates_ttl = get_waylaid_crate_arbitrage(memory_db, max_age_hours=24)
+    crate_ids_ttl = {c["waylaid_crate_id"] for c in crates_ttl}
+    assert 8410 in crate_ids_ttl
+    assert 8420 not in crate_ids_ttl
+
+    # 4. get_zscore_anomalies: max_age_hours=24 excludes stale 8407 (0 fresh samples < min_samples=6)
+    anoms_ttl = get_zscore_anomalies(memory_db, max_age_hours=24)
+    anom_ids_ttl = {a["item_id"] for a in anoms_ttl}
+    assert 8407 not in anom_ids_ttl
+
+    # Without TTL: 8407 has 6 snapshots with a deep price drop (10 vs 100) -> emitted
+    anoms_all = get_zscore_anomalies(memory_db, max_age_hours=None)
+    anom_ids_all = {a["item_id"] for a in anoms_all}
+    assert 8407 in anom_ids_all
