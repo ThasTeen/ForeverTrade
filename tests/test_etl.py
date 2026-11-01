@@ -1,4 +1,7 @@
-"""Tests for File Watcher and ETL Pipeline (Ticket 02, R05, R06, R07, R08, R48)."""
+"""Tests for File Watcher and ETL Pipeline (Ticket 02, R05, R06, R07, R08, R48, R51)."""
+import argparse
+import unittest.mock
+from run_watcher import initial_ingest, main as watcher_main
 
 import hashlib
 import logging
@@ -871,3 +874,172 @@ class TestWatcherEngine:
             observer.join(timeout=2.0)
         assert not observer.is_alive()
 
+
+class TestInitialIngestAndCLI:
+    """Tests for initial database ingestion, realm validation, and CLI configuration (R51)."""
+
+    def test_initial_ingest_from_existing_directory_populates_db(self, tmp_path, memory_db):
+        """Verify initial_ingest reads existing Auctionator.lua in watch_dir and inserts rows into price_snapshots."""
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["ForeverRealm_Alliance"] = {\n'
+            '    ["2589:0:0:0:0"] = { ["mr"] = 1500 },\n'
+            '    ["1205:0:0:0:0"] = { ["mr"] = 320 }\n'
+            '  }\n'
+            '}\n'
+        )
+        lua_file = tmp_path / "Auctionator.lua"
+        lua_file.write_text(lua_content, encoding="utf-8")
+
+        count = initial_ingest(memory_db, str(tmp_path), "ForeverRealm_Alliance")
+        assert count == 2
+
+        cur = memory_db.cursor()
+        cur.execute(
+            "SELECT item_id, price, realm FROM price_snapshots WHERE realm = 'ForeverRealm_Alliance' ORDER BY item_id"
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 2
+        assert tuple(rows[0]) == (1205, 320, "ForeverRealm_Alliance")
+        assert tuple(rows[1]) == (2589, 1500, "ForeverRealm_Alliance")
+
+    def test_initial_ingest_direct_file_path(self, tmp_path, memory_db):
+        """Verify initial_ingest accepts direct path to .lua file."""
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["ForeverRealm_Alliance"] = {\n'
+            '    ["774"] = { ["mr"] = 450 }\n'
+            '  }\n'
+            '}\n'
+        )
+        lua_file = tmp_path / "CustomAuctionator.lua"
+        lua_file.write_text(lua_content, encoding="utf-8")
+
+        count = initial_ingest(memory_db, str(lua_file), "ForeverRealm_Alliance")
+        assert count == 1
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT item_id, price FROM price_snapshots WHERE item_id = 774")
+        assert tuple(cur.fetchone()) == (774, 450)
+
+    def test_initial_ingest_missing_file_returns_zero(self, tmp_path, memory_db):
+        """Verify initial_ingest gracefully returns 0 when file does not exist."""
+        count = initial_ingest(memory_db, str(tmp_path), "ForeverRealm_Alliance")
+        assert count == 0
+
+    def test_initial_ingest_corrupted_file_returns_zero_without_crash(self, tmp_path, memory_db):
+        """Verify corrupted Lua file is handled safely without crashing initial_ingest."""
+        lua_file = tmp_path / "Auctionator.lua"
+        lua_file.write_text("invalid lua syntax {{{{", encoding="utf-8")
+
+        count = initial_ingest(memory_db, str(tmp_path), "ForeverRealm_Alliance")
+        assert count == 0
+
+    def test_initial_ingest_realm_mismatch_warns_and_returns_zero(self, tmp_path, memory_db, caplog):
+        """Verify realm mismatch logs a warning, does not crash, and returns 0 without inserting snapshots."""
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["Everlook"] = {\n'
+            '    ["2589"] = { ["mr"] = 1500 }\n'
+            '  }\n'
+            '}\n'
+        )
+        lua_file = tmp_path / "Auctionator.lua"
+        lua_file.write_text(lua_content, encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="watcher"):
+            count = initial_ingest(memory_db, str(tmp_path), "ForeverRealm_Alliance")
+
+        assert count == 0
+        assert any("ForeverRealm_Alliance" in record.message and "Everlook" in record.message for record in caplog.records)
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT COUNT(*) FROM price_snapshots")
+        assert cur.fetchone()[0] == 0
+
+    def test_initial_ingest_space_and_underscore_realm_normalization(self, tmp_path, memory_db):
+        """Verify initial_ingest matches realm names with spaces or underscores without false mismatch warning."""
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["ForeverRealm Alliance"] = {\n'
+            '    ["2589"] = { ["mr"] = 1500 }\n'
+            '  }\n'
+            '}\n'
+        )
+        lua_file = tmp_path / "Auctionator.lua"
+        lua_file.write_text(lua_content, encoding="utf-8")
+
+        count = initial_ingest(memory_db, str(tmp_path), "ForeverRealm_Alliance")
+        assert count == 1
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT item_id, price FROM price_snapshots WHERE item_id = 2589")
+        assert tuple(cur.fetchone()) == (2589, 1500)
+
+    def test_cli_argument_parsing_perks_and_ttl(self):
+        """Verify main correctly parses --bartering, --master-chef, and --max-age-hours CLI flags."""
+        captured_args = []
+        orig_parse_args = argparse.ArgumentParser.parse_args
+
+        def intercept_parse_args(parser_self, *args, **kwargs):
+            res = orig_parse_args(parser_self, *args, **kwargs)
+            captured_args.append(res)
+            raise StopIteration("cli_intercepted")
+
+        with unittest.mock.patch("argparse.ArgumentParser.parse_args", intercept_parse_args):
+            with pytest.raises(StopIteration, match="cli_intercepted"):
+                watcher_main(["--bartering", "--master-chef", "--max-age-hours", "18.5"])
+
+        assert len(captured_args) == 1
+        parsed = captured_args[0]
+        assert parsed.bartering is True
+        assert parsed.master_chef is True
+        assert parsed.max_age_hours == 18.5
+
+    def test_cli_argument_defaults(self):
+        """Verify main defaults: bartering=False, master_chef=False, max_age_hours=48.0."""
+        captured_args = []
+        orig_parse_args = argparse.ArgumentParser.parse_args
+
+        def intercept_parse_args(parser_self, *args, **kwargs):
+            res = orig_parse_args(parser_self, *args, **kwargs)
+            captured_args.append(res)
+            raise StopIteration("cli_intercepted")
+
+        with unittest.mock.patch("argparse.ArgumentParser.parse_args", intercept_parse_args):
+            with pytest.raises(StopIteration, match="cli_intercepted"):
+                watcher_main([])
+
+        assert len(captured_args) == 1
+        parsed = captured_args[0]
+        assert parsed.bartering is False
+        assert parsed.master_chef is False
+        assert parsed.max_age_hours == 48.0
+        assert parsed.realm == "ForeverRealm_Alliance"
+
+    def test_cli_argument_custom_realm_and_paths(self, tmp_path):
+        """Verify main correctly parses --realm, --watch-dir, --db, and --dashboard-out."""
+        captured_args = []
+        orig_parse_args = argparse.ArgumentParser.parse_args
+
+        def intercept_parse_args(parser_self, *args, **kwargs):
+            res = orig_parse_args(parser_self, *args, **kwargs)
+            captured_args.append(res)
+            raise StopIteration("cli_intercepted")
+
+        custom_dir = str(tmp_path / "custom_wtf")
+        with unittest.mock.patch("argparse.ArgumentParser.parse_args", intercept_parse_args):
+            with pytest.raises(StopIteration, match="cli_intercepted"):
+                watcher_main([
+                    "--realm", "Everlook",
+                    "--watch-dir", custom_dir,
+                    "--db", "custom.db",
+                    "--dashboard-out", "custom_portal.html",
+                ])
+
+        assert len(captured_args) == 1
+        parsed = captured_args[0]
+        assert parsed.realm == "Everlook"
+        assert parsed.watch_dir == custom_dir
+        assert parsed.db == "custom.db"
+        assert parsed.dashboard_out == "custom_portal.html"
