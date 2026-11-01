@@ -62,14 +62,25 @@ def _build_dashboard(
             realm=realm,
             has_bartering=has_bartering,
             has_master_chef=has_master_chef,
+            max_age_hours=max_age_hours,
         )
     except TypeError:
-        return build_standalone_dashboard(
-            conn,
-            output_path=output_path,
-            ai_advice=ai_advice,
-            realm=realm,
-        )
+        try:
+            return build_standalone_dashboard(
+                conn,
+                output_path=output_path,
+                ai_advice=ai_advice,
+                realm=realm,
+                has_bartering=has_bartering,
+                has_master_chef=has_master_chef,
+            )
+        except TypeError:
+            return build_standalone_dashboard(
+                conn,
+                output_path=output_path,
+                ai_advice=ai_advice,
+                realm=realm,
+            )
 
 
 def initial_ingest(conn: sqlite3.Connection, watch_dir: str, realm: str) -> int:
