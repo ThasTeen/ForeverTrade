@@ -1,0 +1,7 @@
+## Interface: 16001, 11508, 11509, 11400
+## Title: ForeverTrade_Sniper
+## Notes: Lightweight standalone AH sniper with hardware-protected buying
+## Version: 2.1
+## SavedVariables: FT_SNIPER_SAVED
+config.lua
+ForeverTrade_Sniper.lua

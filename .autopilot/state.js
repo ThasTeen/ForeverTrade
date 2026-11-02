@@ -13,7 +13,7 @@ window.STATE =
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
   "baseCommit": null,
   "startedAt": "2026-11-03T00:12:46+03:00",
-  "updatedAt": "2026-11-03T00:17:30+03:00",
+  "updatedAt": "2026-11-03T00:33:17+03:00",
   "finishedAt": null,
   "stages": [
     {
@@ -63,8 +63,8 @@ window.STATE =
   ],
   "requirements": {
     "total": 27,
-    "done": 0,
-    "inTicket": 27,
+    "done": 3,
+    "inTicket": 24,
     "inSpec": 0,
     "placeholder": 0,
     "deferred": 0,
@@ -90,10 +90,16 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "in-progress",
+      "status": "done",
       "retries": 0,
       "repairs": 0,
-      "startedAt": "2026-11-03T00:17:30+03:00"
+      "startedAt": "2026-11-03T00:17:30+03:00",
+      "finishedAt": "2026-11-03T00:33:13+03:00",
+      "tests": {
+        "passed": 184,
+        "failed": 0
+      },
+      "commit": "8393e2a"
     },
     {
       "id": "02",
@@ -129,9 +135,10 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "pending",
+      "status": "in-progress",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-11-03T00:33:17+03:00"
     },
     {
       "id": "03",
@@ -210,7 +217,10 @@ window.STATE =
       "repairs": 0
     }
   ],
-  "tests": null,
+  "tests": {
+    "passed": 184,
+    "failed": 0
+  },
   "debt": {
     "placeholders": [],
     "assumptions": [],
@@ -234,9 +244,11 @@ window.STATE =
     "2026-11-03T00:17:16+03:00",
     "2026-11-03T00:17:19+03:00",
     "2026-11-03T00:17:23+03:00",
-    "2026-11-03T00:17:30+03:00"
+    "2026-11-03T00:17:30+03:00",
+    "2026-11-03T00:33:13+03:00",
+    "2026-11-03T00:33:17+03:00"
   ],
-  "rev": 15,
+  "rev": 17,
   "waiting": null,
   "waits": [],
   "log": [
@@ -326,6 +338,26 @@ window.STATE =
         "01"
       ],
       "act": "start"
+    },
+    {
+      "t": "2026-11-03T00:33:13+03:00",
+      "k": "ticket",
+      "ids": [
+        "01"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 184,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-03T00:33:17+03:00",
+      "k": "ticket",
+      "ids": [
+        "02"
+      ],
+      "act": "start"
     }
   ],
   "reqList": [
@@ -402,7 +434,7 @@ window.STATE =
     {
       "id": "R15",
       "text": "«Из TradeSkillMaster/Data/Disenchanting.lua извлекаются матрицы матожидания E[mats] и сохраняются в data/disenchant_tables_era.json»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R16",
@@ -432,12 +464,12 @@ window.STATE =
     {
       "id": "R21",
       "text": "«Liquidity Score (L) — расчет коэффициента L in [0.01, 1.0], предметы с L < 0.20 помечаются как ILLIQUID_TRAP»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R22",
       "text": "«Учет ожидаемых потерь залога при повторных выставлениях ((1-L)/L) и заморозки капитала при оценке чистой прибыли Z-score»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R23",

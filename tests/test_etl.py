@@ -1468,6 +1468,72 @@ class TestInitialIngestAndCLI:
             ])
             mock_watcher.assert_not_called()
 
+    def test_watcher_wow_addon_path_argument(self, tmp_path):
+        """Verify --wow-addon-path CLI argument parsing, default None, and auto-export to WoW AddOns directory."""
+        import luadata
+
+        # 1. Verify default value is None
+        captured_args = []
+        orig_parse_args = argparse.ArgumentParser.parse_args
+
+        def intercept_parse_args(parser_self, *args, **kwargs):
+            res = orig_parse_args(parser_self, *args, **kwargs)
+            captured_args.append(res)
+            raise StopIteration("cli_intercepted")
+
+        with unittest.mock.patch("argparse.ArgumentParser.parse_args", intercept_parse_args):
+            with pytest.raises(StopIteration, match="cli_intercepted"):
+                watcher_main([])
+
+        assert len(captured_args) == 1
+        assert captured_args[0].wow_addon_path is None
+
+        # 2. Verify CLI argument parsing with explicit path
+        custom_addon_dir = str(tmp_path / "Interface" / "AddOns")
+        captured_args.clear()
+        with unittest.mock.patch("argparse.ArgumentParser.parse_args", intercept_parse_args):
+            with pytest.raises(StopIteration, match="cli_intercepted"):
+                watcher_main(["--wow-addon-path", custom_addon_dir])
+
+        assert len(captured_args) == 1
+        assert captured_args[0].wow_addon_path == custom_addon_dir
+
+        # 3. Verify --help documentation displays --wow-addon-path
+        res_help = subprocess.run(
+            [sys.executable, "run_watcher.py", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert res_help.returncode == 0
+        assert "--wow-addon-path" in res_help.stdout
+
+        # 4. Verify end-to-end execution of watcher_main with --run-once and --wow-addon-path exports config.lua
+        os.makedirs(custom_addon_dir, exist_ok=True)
+        watch_dir = str(tmp_path / "SavedVariables")
+        os.makedirs(watch_dir, exist_ok=True)
+        db_file = str(tmp_path / "test_watcher.db")
+        portal_file = str(tmp_path / "portal.html")
+
+        with unittest.mock.patch("run_watcher.generate_market_advice", return_value={"opportunities": []}), \
+             unittest.mock.patch("run_watcher.start_watcher"):
+            watcher_main([
+                "--run-once",
+                "--realm", "Everlook",
+                "--watch-dir", watch_dir,
+                "--db", db_file,
+                "--dashboard-out", portal_file,
+                "--wow-addon-path", custom_addon_dir,
+            ])
+
+        expected_addon_config = os.path.join(custom_addon_dir, "ForeverTrade_Sniper", "config.lua")
+        assert os.path.isfile(expected_addon_config)
+
+        parsed_config = luadata.read(expected_addon_config)
+        assert isinstance(parsed_config, dict)
+        assert parsed_config.get("version") == 2
+        assert "targets" in parsed_config
+
 
 class TestWowheadFetcherAndResolver:
     """Tests for Wowhead item fetcher, background resolver, and ETL integration."""

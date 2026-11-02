@@ -13,6 +13,7 @@ import os
 import sqlite3
 import time
 import pytest
+import luadata
 
 from src.database import init_db, load_catalog, load_recipes
 from src.analytics import (
@@ -27,6 +28,9 @@ from src.analytics import (
     compute_liquidity_score,
     get_strong_buys,
     VENDOR_REAGENTS_WHITELIST,
+    calculate_disenchant_value,
+    export_sniper_addon_config,
+    _CATALOG_CACHE,
 )
 
 
@@ -2349,6 +2353,245 @@ def test_get_strong_buys_liquidity_penalty_and_trap(memory_db):
     assert db_9602["signal"] == "STRONG_BUY"
     assert db_9602["liquidity"] >= 0.70
     assert db_9602["is_illiquid_trap"] is False
+
+
+# ---------------------------------------------------------------------------
+# Ticket 02: Disenchant Matrix, Sniper Export & Addon Structure Tests
+# ---------------------------------------------------------------------------
+
+def test_calculate_disenchant_value(memory_db):
+    """Verify expected disenchant value calculation for equipment across all quality tiers and data matrices."""
+    # 1. Uncommon Green Armor (level 10, quality 2, item_class 4)
+    # Tier: 5-15, dust_id 10940, essence_id 10938
+    # dust_chance: 80%, avg_dust: 1.5. essence_chance: 20%, avg_essence: 1.5.
+    # Prices: dust=100, essence=300
+    # Expected: (0.80 * 1.5 * 100) + (0.20 * 1.5 * 300) = 120 + 90 = 210.0
+    val_armor = calculate_disenchant_value(
+        item_id=7001,
+        item_meta={"quality": 2, "item_class": 4, "item_level": 10},
+        latest_prices={10940: 100, 10938: 300},
+    )
+    assert val_armor == 210.0
+
+    # 2. Uncommon Green Weapon (level 10, quality 2, item_class 2)
+    # dust_chance: 20%, essence_chance: 80%
+    # Expected: (0.20 * 1.5 * 100) + (0.80 * 1.5 * 300) = 30 + 360 = 390.0
+    val_weapon = calculate_disenchant_value(
+        item_id=7002,
+        item_meta={"quality": 2, "item_class": 2, "item_level": 10},
+        latest_prices={10940: 100, 10938: 300},
+    )
+    assert val_weapon == 390.0
+
+    # 3. Uncommon Green with shard chance and forever_weapon_essence_id (level 22, weapon)
+    # Tier 21-25: dust_id 10940 (avg 5.0), forever_weapon_essence_id 10939 (avg 1.5), shard_id 10978 (avg 1.0)
+    # weapon_dust_chance: 15%, weapon_essence_chance: 75%, shard_chance: 100 - (15+75) = 10%
+    # Prices: dust=50, essence=400, shard=1000
+    # Expected: (0.15 * 5.0 * 50) + (0.75 * 1.5 * 400) + (0.10 * 1.0 * 1000) = 37.5 + 450 + 100 = 587.5
+    val_shard_uncommon = calculate_disenchant_value(
+        item_id=7003,
+        item_meta={"quality": 2, "item_class": 2, "item_level": 22},
+        latest_prices={10940: 50, 10939: 400, 10978: 1000},
+    )
+    assert val_shard_uncommon == 587.5
+
+    # 4. Rare Blue Gear (level 33, quality 3, item_class 4)
+    # Tier 31-35: shard_id 11138, chance: 100%
+    # Price: shard=2500
+    # Expected: 1.0 * 1.0 * 2500 = 2500.0
+    val_rare = calculate_disenchant_value(
+        item_id=7004,
+        item_meta={"quality": 3, "item_class": 4, "item_level": 33},
+        latest_prices={11138: 2500},
+    )
+    assert val_rare == 2500.0
+
+    # 5. Rare High-Level Gear with Nexus Crystal chance (level 58, quality 3, item_class 2)
+    # Tier 56-80: shard_id 14344 (99.5%), nexus_id 20725 (0.5%)
+    # Prices: shard=10000, nexus=50000
+    # Expected: 0.995 * 10000 + 0.005 * 50000 = 9950 + 250 = 10200.0
+    val_nexus = calculate_disenchant_value(
+        item_id=7005,
+        item_meta={"quality": 3, "item_class": 2, "item_level": 58},
+        latest_prices={14344: 10000, 20725: 50000},
+    )
+    assert val_nexus == 10200.0
+
+    # 6. Epic Purple Gear (level 42, quality 4, item_class 4)
+    # Tier 40-45: shard_id 11177, chance: 100%, min_qty: 2, max_qty: 4 -> avg_qty: 3.0
+    # Price: shard=4000
+    # Expected: 1.0 * 3.0 * 4000 = 12000.0
+    val_epic = calculate_disenchant_value(
+        item_id=7006,
+        item_meta={"quality": 4, "item_class": 4, "item_level": 42},
+        latest_prices={11177: 4000},
+    )
+    assert val_epic == 12000.0
+
+    # 7. Non-equipment or white/grey items return 0.0
+    assert calculate_disenchant_value(7007, item_meta={"quality": 1, "item_class": 4, "item_level": 20}) == 0.0
+    assert calculate_disenchant_value(7008, item_meta={"quality": 2, "item_class": 7, "item_level": 20}) == 0.0
+    assert calculate_disenchant_value(7009, item_meta={"quality": 2, "item_class": 4, "item_level": 0}) == 0.0
+    assert calculate_disenchant_value(7010, item_meta={"quality": 2, "item_class": 4, "item_level": None}) == 0.0
+
+    # 8. Real database integration with SQLite connection and latest_prices extraction
+    with memory_db:
+        memory_db.executemany(
+            "INSERT INTO items (item_id, name, quality, item_class, category) VALUES (?, ?, ?, ?, ?)",
+            [
+                (7020, "Test DB Staff", 2, 2, "weapon"),
+                (10940, "Strange Dust", 1, 7, "Trade Goods"),
+                (10938, "Lesser Magic Essence", 1, 7, "Trade Goods"),
+            ]
+        )
+        memory_db.executemany(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, 'Everlook', ?, 1000)",
+            [
+                (10940, 100),
+                (10938, 300),
+            ]
+        )
+
+    val_db = calculate_disenchant_value(
+        item_id=7020,
+        conn=memory_db,
+        realm="Everlook",
+        item_meta={"quality": 2, "item_class": 2, "item_level": 10},
+    )
+    assert val_db == 390.0
+
+
+def test_export_sniper_addon_config_content_and_branches(tmp_path, memory_db):
+    """Verify export_sniper_addon_config generates config.lua with version 2 and validates all 3 pricing branches."""
+    # Ensure catalog cache holds item_level for equipment item 8003
+    _CATALOG_CACHE[8003] = {
+        "item_id": 8003,
+        "name": "Green Chestpiece",
+        "quality": 2,
+        "item_class": 4,
+        "item_level": 10,
+        "category": "Armor",
+    }
+
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [
+                # 1. Direct flip liquid item (Trade Goods, class 7 -> intrinsic liquidity 0.95 >= 0.50)
+                (8001, "Silk Cloth", 1, 7, "Trade Goods", 100),
+                # 2. Illiquid item shielded from market branch (Recipe, class 9 -> liquidity 0.20 < 0.50)
+                (8002, "Rare Recipe", 1, 9, "Recipe", 0),
+                # 3. Disenchant equipment item (Green armor, quality 2, class 4, level 10)
+                (8003, "Green Chestpiece", 2, 4, "Armor", 50),
+                # 4. Vendor stream item with high vendor sell price
+                (8004, "Vendor Trophy", 0, 15, "Junk", 5000),
+                # 5. Low-value vendor trash (vendor_sell 10 - delta_vendor 75 < 0)
+                (8005, "Low Trash", 0, 15, "Junk", 10),
+                # Reagents for item 8003 disenchant calculation
+                (10940, "Strange Dust", 1, 7, "Trade Goods", 10),
+                (10938, "Lesser Magic Essence", 1, 7, "Trade Goods", 20),
+            ]
+        )
+        memory_db.executemany(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, 'Everlook', ?, 5000)",
+            [
+                (8001, 10000),  # dbmarket = 10000
+                (8002, 10000),  # dbmarket = 10000, but L = 0.20 -> term_market = 0
+                (10940, 100),   # dust price = 100
+                (10938, 300),   # essence price = 300
+            ]
+        )
+
+    out_file = str(tmp_path / "custom_addon_dir" / "config.lua")
+    result = export_sniper_addon_config(
+        db_conn=memory_db,
+        realm="Everlook",
+        output_path=out_file,
+        min_profit_copper=1250,
+    )
+
+    # 1. Verify output file exists
+    assert os.path.exists(out_file)
+    assert result["output_path"] == out_file
+    assert result["min_profit_copper"] == 1250
+
+    # 2. Parse file content using luadata
+    config = luadata.read(out_file)
+    assert isinstance(config, dict)
+    assert config["version"] == 2
+    assert config["min_profit_copper"] == 1250
+    assert "targets" in config
+    targets = config["targets"]
+    assert isinstance(targets, dict)
+
+    # 3. Direct flip branch: floor(0.65 * 10000) = 6500
+    assert targets[8001] == 6500
+
+    # 4. Illiquid shield: item 8002 has L < 0.50, so market stream is 0, MaxBuyout <= 0 -> omitted
+    assert 8002 not in targets
+
+    # 5. Disenchant branch: Green armor level 10 -> DE Value = 210.0 -> floor(0.80 * 210) = 168
+    assert targets[8003] == 168
+
+    # 6. Vendor branch: vendor_sell 5000, max_stack 20 -> delta_vendor = max(50, 75) = 75 -> 5000 - 75 = 4925
+    assert targets[8004] == 4925
+
+    # 7. MaxBuyout <= 0 cutoff: item 8005 has 10 - 75 = -65 <= 0 -> omitted
+    assert 8005 not in targets
+
+
+def test_sniper_addon_lua_and_toc_structure():
+    """Verify addon folder files, TOC interface/version metadata, and valid Lua syntax parsing of config.lua."""
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    addon_dir = os.path.join(base_dir, "addons", "ForeverTrade_Sniper")
+
+    toc_file = os.path.join(addon_dir, "ForeverTrade_Sniper.toc")
+    lua_file = os.path.join(addon_dir, "ForeverTrade_Sniper.lua")
+    cfg_file = os.path.join(addon_dir, "config.lua")
+
+    # 1. Verify files exist
+    assert os.path.isdir(addon_dir)
+    assert os.path.isfile(toc_file)
+    assert os.path.isfile(lua_file)
+    assert os.path.isfile(cfg_file)
+
+    # 2. Verify TOC metadata
+    with open(toc_file, "r", encoding="utf-8") as f:
+        toc_content = f.read()
+    assert "## Title: ForeverTrade_Sniper" in toc_content
+    assert "## Version: 2.1" in toc_content
+    assert "## SavedVariables: FT_SNIPER_SAVED" in toc_content
+    assert "config.lua" in toc_content
+    assert "ForeverTrade_Sniper.lua" in toc_content
+
+    # 3. Verify Lua addon logic exists
+    with open(lua_file, "r", encoding="utf-8") as f:
+        lua_content = f.read()
+    assert len(lua_content) > 1000
+    assert "ForeverTrade_Sniper" in lua_content
+    assert "FT_SNIPER_CONFIG" in lua_content
+    assert "AUCTION_ITEM_LIST_UPDATE" in lua_content
+    assert "SetOverrideBindingClick" in lua_content
+    assert "PlaceAuctionBid" in lua_content
+    assert "QueryAuctionItems" in lua_content
+    assert "FT_ExecuteVerifiedBuy" in lua_content
+
+    # 4. Parse config.lua via luadata
+    config = luadata.read(cfg_file)
+    assert isinstance(config, dict)
+    assert config.get("version") == 2
+    assert "min_profit_copper" in config
+    assert "targets" in config
+    targets = config["targets"]
+    assert isinstance(targets, dict)
+    assert len(targets) > 0
+
+    # Ensure all targets are integer keys with positive integer buyouts
+    for item_id, max_buyout in targets.items():
+        assert isinstance(item_id, int)
+        assert isinstance(max_buyout, int)
+        assert max_buyout > 0
 
 
 

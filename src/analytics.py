@@ -1153,3 +1153,352 @@ def get_strong_buys(
     return results
 
 
+def calculate_disenchant_value(
+    item_id: int,
+    conn: Optional[sqlite3.Connection] = None,
+    realm: Optional[str] = None,
+    item_meta: Optional[dict] = None,
+    latest_prices: Optional[dict] = None,
+    disenchant_tables: Optional[dict] = None,
+) -> float:
+    """Calculate expected disenchant value E[DE Value] in copper for equipment (Era 1.15).
+
+    Matches Classic Era TSM Disenchanting data matrices across uncommon, rare, and epic gear.
+    """
+    if disenchant_tables is None:
+        disenchant_tables = load_disenchant_tables()
+
+    cat_meta = _get_catalog_item(item_id) if item_id else {}
+    meta = dict(cat_meta)
+    if item_meta:
+        meta.update(item_meta)
+
+    quality = meta.get("quality")
+    if quality not in (2, 3, 4):
+        return 0.0
+
+    item_class = meta.get("item_class") or meta.get("class")
+    raw_class = str(item_class).strip().lower() if item_class is not None else ""
+    is_weapon = (
+        raw_class in ("2", "weapon", "оружи")
+        or item_class == 2
+        or meta.get("category") in ("weapon", "weapons")
+    )
+    is_armor = (
+        raw_class in ("4", "armor", "брон", "доспех", "shield", "щит")
+        or item_class == 4
+        or meta.get("category") in ("armor", "armors")
+    )
+    if not (is_weapon or is_armor):
+        return 0.0
+
+    level = meta.get("item_level") or meta.get("level") or meta.get("req_level")
+    if level is None:
+        return 0.0
+    try:
+        level = int(level)
+    except (ValueError, TypeError):
+        return 0.0
+    if level <= 0:
+        return 0.0
+
+    if latest_prices is None and conn is not None:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                WITH latest_snapshots AS (
+                    SELECT s.item_id, s.realm, s.price,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY s.item_id, s.realm
+                               ORDER BY s.timestamp DESC, s.id DESC
+                           ) as rn
+                    FROM price_snapshots s
+                    WHERE (? IS NULL OR s.realm = ?)
+                      AND s.price > 0
+                )
+                SELECT item_id, price FROM latest_snapshots WHERE rn = 1
+            """, (realm, realm))
+            latest_prices = {r[0]: r[1] for r in cur.fetchall() if r[1] is not None and r[1] > 0}
+        except Exception:
+            latest_prices = {}
+    elif latest_prices is None:
+        latest_prices = {}
+
+    tier_key = {2: "uncommon", 3: "rare", 4: "epic"}.get(quality)
+    if not tier_key:
+        return 0.0
+
+    tiers = disenchant_tables.get(tier_key, [])
+    matching_tier = None
+    for t in tiers:
+        if t.get("min_level", 0) <= level <= t.get("max_level", 999):
+            matching_tier = t
+            break
+
+    if not matching_tier:
+        return 0.0
+
+    if tier_key == "uncommon":
+        dust_chance = float(matching_tier.get("weapon_dust_chance" if is_weapon else "armor_dust_chance", 0)) / 100.0
+        essence_chance = float(matching_tier.get("weapon_essence_chance" if is_weapon else "armor_essence_chance", 0)) / 100.0
+        avg_dust = (float(matching_tier.get("dust_min", 1)) + float(matching_tier.get("dust_max", 1))) / 2.0
+        avg_essence = (float(matching_tier.get("essence_min", 1)) + float(matching_tier.get("essence_max", 1))) / 2.0
+
+        dust_id = matching_tier.get("dust_id")
+        dust_price = float(latest_prices.get(dust_id, 0) or 0)
+
+        if is_weapon and "forever_weapon_essence_id" in matching_tier:
+            essence_id = matching_tier["forever_weapon_essence_id"]
+        else:
+            essence_id = matching_tier.get("essence_id")
+        essence_price = float(latest_prices.get(essence_id, 0) or 0)
+
+        expected_val = (dust_chance * avg_dust * dust_price) + (essence_chance * avg_essence * essence_price)
+
+        shard_id = matching_tier.get("shard_id")
+        if shard_id:
+            shard_chance_pct = matching_tier.get("shard_chance")
+            if shard_chance_pct is None:
+                used_pct = float(matching_tier.get("weapon_dust_chance" if is_weapon else "armor_dust_chance", 0)) + \
+                           float(matching_tier.get("weapon_essence_chance" if is_weapon else "armor_essence_chance", 0))
+                shard_chance_pct = max(0.0, 100.0 - used_pct)
+            if shard_chance_pct > 0:
+                shard_price = float(latest_prices.get(shard_id, 0) or 0)
+                expected_val += (float(shard_chance_pct) / 100.0) * 1.0 * shard_price
+
+        return round(expected_val, 2)
+
+    elif tier_key == "rare":
+        shard_id = matching_tier.get("shard_id")
+        shard_chance = float(matching_tier.get("shard_chance", matching_tier.get("chance", 100))) / 100.0
+        shard_price = float(latest_prices.get(shard_id, 0) or 0)
+        expected_val = shard_chance * 1.0 * shard_price
+
+        nexus_id = matching_tier.get("nexus_id")
+        if nexus_id:
+            nexus_chance = float(matching_tier.get("nexus_chance", 0)) / 100.0
+            nexus_price = float(latest_prices.get(nexus_id, 0) or 0)
+            expected_val += nexus_chance * 1.0 * nexus_price
+
+        return round(expected_val, 2)
+
+    elif tier_key == "epic":
+        shard_id = matching_tier.get("shard_id")
+        chance = float(matching_tier.get("chance", 100)) / 100.0
+        min_qty = float(matching_tier.get("min_qty", 1))
+        max_qty = float(matching_tier.get("max_qty", 1))
+        avg_qty = (min_qty + max_qty) / 2.0
+        shard_price = float(latest_prices.get(shard_id, 0) or 0)
+        expected_val = chance * avg_qty * shard_price
+
+        return round(expected_val, 2)
+
+    return 0.0
+
+
+def export_sniper_addon_config(
+    db_conn: Optional[sqlite3.Connection] = None,
+    realm: Optional[str] = None,
+    output_path: Optional[str] = None,
+    min_profit_copper: int = 1000,
+) -> dict:
+    """Export unit-price buyout targets for ForeverTrade_Sniper WoW addon.
+
+    Computes single ceiling per 1 unit across 3 arbitrage streams:
+      MaxBuyout(i) = max(
+          I(L_i >= 0.50) * floor(0.65 * dbmarket(i)),
+          floor(0.80 * E[DE Value](i)),
+          P_vendor_sell(i) - Delta_vendor(i)
+      )
+    where Delta_vendor(i) = max(50, floor(1500 / max_stack(i))).
+    Excludes items with MaxBuyout <= 0.
+    Writes config.lua to output_path and returns target summary.
+    """
+    if db_conn is not None:
+        check_and_reload_overrides(db_conn)
+
+    cursor = db_conn.cursor() if db_conn is not None else None
+
+    # 1. Fetch latest prices on target realm
+    latest_prices = {}
+    if cursor is not None:
+        try:
+            cursor.execute("""
+                WITH latest_snapshots AS (
+                    SELECT s.item_id, s.realm, s.price,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY s.item_id, s.realm
+                               ORDER BY s.timestamp DESC, s.id DESC
+                           ) as rn
+                    FROM price_snapshots s
+                    WHERE (? IS NULL OR s.realm = ?)
+                      AND s.price > 0
+                )
+                SELECT item_id, price FROM latest_snapshots WHERE rn = 1
+            """, (realm, realm))
+            latest_prices = {r[0]: r[1] for r in cursor.fetchall() if r[1] is not None and r[1] > 0}
+        except Exception:
+            latest_prices = {}
+
+        # Forward compatibility with Stage 4 item_market_metrics
+        try:
+            cursor.execute("SELECT item_id, dbmarket FROM item_market_metrics WHERE (? IS NULL OR realm = ?)", (realm, realm))
+            for r in cursor.fetchall():
+                if r[1] is not None and r[1] > 0:
+                    latest_prices[r[0]] = int(r[1])
+        except Exception:
+            pass
+
+    # 2. Fetch items from DB
+    items_dict = {}
+    if cursor is not None:
+        try:
+            cursor.execute("""
+                SELECT item_id, name, quality, item_class, category,
+                       COALESCE(NULLIF(vendor_sell_copper, 0), vendor_sell_price, 0) AS vendor_sell,
+                       COALESCE(NULLIF(vendor_buy_copper, 0), vendor_buy_price, 0) AS vendor_buy
+                FROM items
+            """)
+            for r in cursor.fetchall():
+                items_dict[r[0]] = {
+                    "item_id": r[0],
+                    "name": r[1],
+                    "quality": r[2],
+                    "item_class": r[3],
+                    "category": r[4],
+                    "vendor_sell": r[5] or 0,
+                    "vendor_buy": r[6] or 0,
+                }
+        except sqlite3.OperationalError:
+            try:
+                cursor.execute("""
+                    SELECT item_id, name, quality, item_class, category, vendor_sell_price, vendor_buy_price
+                    FROM items
+                """)
+                for r in cursor.fetchall():
+                    items_dict[r[0]] = {
+                        "item_id": r[0],
+                        "name": r[1],
+                        "quality": r[2],
+                        "item_class": r[3],
+                        "category": r[4],
+                        "vendor_sell": r[5] or 0,
+                        "vendor_buy": r[6] or 0,
+                    }
+            except Exception:
+                pass
+
+    # Include any items from latest_prices or catalog if not present in items_dict
+    for item_id in latest_prices:
+        if item_id not in items_dict:
+            cat_it = _get_catalog_item(item_id)
+            items_dict[item_id] = {
+                "item_id": item_id,
+                "name": cat_it.get("name", f"Item {item_id}"),
+                "quality": cat_it.get("quality", 1),
+                "item_class": cat_it.get("item_class", 0),
+                "category": cat_it.get("category"),
+                "vendor_sell": cat_it.get("vendor_sell_copper", cat_it.get("vendor_sell_price", 0)) or 0,
+                "vendor_buy": cat_it.get("vendor_buy_copper", cat_it.get("vendor_buy_price", 0)) or 0,
+            }
+
+    # If DB items are still empty, fall back to _CATALOG_CACHE
+    if not items_dict:
+        _get_catalog_item(1)  # ensure catalog cache loaded
+        for item_id, cat_it in _CATALOG_CACHE.items():
+            items_dict[item_id] = {
+                "item_id": item_id,
+                "name": cat_it.get("name", f"Item {item_id}"),
+                "quality": cat_it.get("quality", 1),
+                "item_class": cat_it.get("item_class", 0),
+                "category": cat_it.get("category"),
+                "vendor_sell": cat_it.get("vendor_sell_copper", cat_it.get("vendor_sell_price", 0)) or 0,
+                "vendor_buy": cat_it.get("vendor_buy_copper", cat_it.get("vendor_buy_price", 0)) or 0,
+            }
+
+    de_tables = load_disenchant_tables()
+    targets = {}
+
+    for item_id, item_data in items_dict.items():
+        cat_it = _get_catalog_item(item_id)
+        item_class = item_data.get("item_class") or cat_it.get("item_class")
+        raw_class = str(item_class).strip().lower() if item_class is not None else ""
+        is_equipment = (
+            raw_class in ("2", "4", "armor", "weapon", "доспех", "оружи", "брон")
+            or item_class in (2, 4)
+            or item_data.get("category") in ("armor", "armors", "weapon", "weapons", "equipment")
+            or cat_it.get("category") in ("armor", "armors", "weapon", "weapons", "equipment")
+        )
+
+        # 1. Delta vendor & Vendor stream
+        max_stack = item_data.get("max_stack") or cat_it.get("max_stack")
+        if not max_stack or int(max_stack) <= 0:
+            max_stack = 1 if is_equipment else 20
+        else:
+            max_stack = int(max_stack)
+
+        delta_vendor = max(50, math.floor(1500 / max_stack))
+        vendor_sell = int(item_data.get("vendor_sell") or cat_it.get("vendor_sell_copper") or cat_it.get("vendor_sell_price") or 0)
+        term_vendor = vendor_sell - delta_vendor
+
+        # 2. Market stream (DBMarket * 0.65 with Liquidity Shield L >= 0.50)
+        dbmarket = latest_prices.get(item_id, 0)
+        term_market = 0
+        if dbmarket and dbmarket > 0:
+            liquidity = compute_liquidity_score(item_id, item_class=item_class)
+            if liquidity >= 0.50:
+                term_market = math.floor(0.65 * dbmarket)
+
+        # 3. Disenchant stream (E[DE Value] * 0.80)
+        de_val = calculate_disenchant_value(
+            item_id,
+            conn=db_conn,
+            realm=realm,
+            item_meta=item_data,
+            latest_prices=latest_prices,
+            disenchant_tables=de_tables,
+        )
+        term_de = math.floor(0.80 * de_val) if de_val > 0 else 0
+
+        # Unified ceiling
+        max_buyout = max(term_market, term_de, term_vendor)
+        if max_buyout > 0:
+            targets[int(item_id)] = int(max_buyout)
+
+    # Output file handling
+    if output_path is None:
+        output_path = os.path.join("addons", "ForeverTrade_Sniper", "config.lua")
+    output_path = str(output_path)
+
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    gen_ts = int(time.time())
+    lines = [
+        "-- Generated by Forever Trade Engine. DO NOT EDIT MANUALLY.",
+        "FT_SNIPER_CONFIG = {",
+        "    version = 2,",
+        f"    generated_at = {gen_ts},",
+        f"    min_profit_copper = {int(min_profit_copper)},",
+        "    targets = {",
+    ]
+    for tid in sorted(targets.keys()):
+        lines.append(f"        [{tid}] = {targets[tid]},")
+    lines.append("    }")
+    lines.append("}")
+    lines.append("")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    return {
+        "total_targets": len(targets),
+        "output_path": output_path,
+        "generated_at": gen_ts,
+        "min_profit_copper": min_profit_copper,
+        "targets": targets,
+    }
+
+
+

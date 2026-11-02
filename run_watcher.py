@@ -19,7 +19,12 @@ from src.etl import (
     start_watcher,
 )
 from src.dashboard import build_standalone_dashboard, notify_high_value_arbitrage
-from src.analytics import get_crafting_margins, get_vendor_arbitrage, get_zscore_anomalies
+from src.analytics import (
+    get_crafting_margins,
+    get_vendor_arbitrage,
+    get_zscore_anomalies,
+    export_sniper_addon_config,
+)
 from src.ai_advisor import build_compact_context, generate_market_advice, AntigravityManagerClient
 
 logger = logging.getLogger("watcher")
@@ -152,6 +157,8 @@ def main(argv=None):
                         help="Enable Master Chef perk (1.1x yield on cooking recipes)")
     parser.add_argument("--max-age-hours", type=float, default=48.0,
                         help="Filter market prices older than max age in hours")
+    parser.add_argument("--wow-addon-path", type=str, default=None,
+                        help="Path to WoW AddOns directory to write ForeverTrade_Sniper config")
     parser.add_argument("--run-once", action="store_true", default=False,
                         help="Run initial ETL and generate portal once, then exit")
     args = parser.parse_args(argv)
@@ -198,6 +205,20 @@ def main(argv=None):
         )
 
         notify_high_value_arbitrage(arb)
+
+        # Export sniper addon config locally and to WoW AddOns directory if provided
+        try:
+            export_sniper_addon_config(conn, realm=args.realm)
+            if args.wow_addon_path and os.path.isdir(args.wow_addon_path):
+                wow_addon_dir = os.path.join(args.wow_addon_path, "ForeverTrade_Sniper")
+                os.makedirs(wow_addon_dir, exist_ok=True)
+                export_sniper_addon_config(
+                    conn,
+                    realm=args.realm,
+                    output_path=os.path.join(wow_addon_dir, "config.lua"),
+                )
+        except Exception as e:
+            logger.warning("Failed to export sniper addon config: %s", e)
     finally:
         conn.close()
 
@@ -249,6 +270,21 @@ def main(argv=None):
                         max_age_hours=args.max_age_hours,
                     )
                     notify_high_value_arbitrage(arb_items)
+
+                    # Export sniper addon config on each new data ingestion
+                    try:
+                        export_sniper_addon_config(cb_conn, realm=args.realm)
+                        if args.wow_addon_path and os.path.isdir(args.wow_addon_path):
+                            wow_addon_dir = os.path.join(args.wow_addon_path, "ForeverTrade_Sniper")
+                            os.makedirs(wow_addon_dir, exist_ok=True)
+                            export_sniper_addon_config(
+                                cb_conn,
+                                realm=args.realm,
+                                output_path=os.path.join(wow_addon_dir, "config.lua"),
+                            )
+                    except Exception as ex:
+                        logger.warning("Failed to auto-export sniper addon config: %s", ex)
+
                     print(f"[*] Standalone portal updated: {args.dashboard_out}")
                 finally:
                     cb_conn.close()
