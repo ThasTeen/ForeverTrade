@@ -517,8 +517,14 @@ def is_ours(cmd):
     Узко намеренно: широкая проверка уже убивала чужие серверы."""
     c = cmd.replace("\\", "/")
     c = c.lower() if WIN else c
-    return ((bool(re.search(r"-m\s+http\.server\b", c)) and bool(_OURS.search(c)))
-            or ("serve_permanent.py" in c and _norm(A).lower() in c.lower()))
+    if bool(re.search(r"-m\s+http\.server\b", c)) and bool(_OURS.search(c)):
+        return True
+    if "serve_permanent.py" in c:
+        if _norm(A).lower() in c:
+            return True
+        if re.search(r"(?:^|[\s\"'])(?:\./)?\.autopilot/serve_permanent\.py", c):
+            return True
+    return False
 
 
 def kill(pid):
