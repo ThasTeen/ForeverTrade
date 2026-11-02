@@ -47,7 +47,9 @@ def _parse_tooltip_sellprice(tooltip_html: str) -> int:
     return gold * 10000 + silver * 100 + copper
 
 
-def _fetch_via_nether(item_id: int, domain: str = "forever", timeout: float = 3.0) -> Optional[dict]:
+def _fetch_via_nether(
+    item_id: int, domain: str = "forever", timeout: float = 3.0, max_retries: int = 2, backoff: float = 1.0
+) -> Optional[dict]:
     """Fallback fetcher using Wowhead Nether tooltip JSON API."""
     url = (
         f"https://nether.wowhead.com/{domain}/tooltip/item/{item_id}"
@@ -58,13 +60,27 @@ def _fetch_via_nether(item_id: int, domain: str = "forever", timeout: float = 3.
         url,
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ForeverTrade/1.0"},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                return None
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
+    data = None
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 429 and attempt < max_retries - 1:
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                if resp.status != 200:
+                    return None
+                data = json.loads(resp.read().decode("utf-8"))
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < max_retries - 1:
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            return None
+        except Exception:
+            if attempt < max_retries - 1:
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            return None
 
     if not isinstance(data, dict):
         return None
@@ -99,7 +115,11 @@ def _fetch_via_nether(item_id: int, domain: str = "forever", timeout: float = 3.
 
 
 def fetch_wowhead_item(
-    item_id: int, domain: str = "forever", timeout: float = 3.0
+    item_id: int,
+    domain: str = "forever",
+    timeout: float = 3.0,
+    max_retries: int = 3,
+    backoff: float = 1.0,
 ) -> Optional[dict]:
     """Fetch item info from Wowhead Forever XML API or Nether tooltip API."""
     if not isinstance(item_id, int) or item_id <= 0:
@@ -121,12 +141,35 @@ def fetch_wowhead_item(
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ForeverTrade/1.0"},
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                return _fetch_via_nether(item_id, domain=domain, timeout=timeout)
-            xml_data = resp.read()
-    except Exception:
+    xml_data = None
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait_time = float(retry_after) if retry_after else (backoff * (2 ** attempt))
+                    time.sleep(wait_time)
+                    continue
+                if resp.status != 200:
+                    return _fetch_via_nether(item_id, domain=domain, timeout=timeout)
+                xml_data = resp.read()
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < max_retries - 1:
+                retry_after = e.headers.get("Retry-After")
+                wait_time = float(retry_after) if retry_after else (backoff * (2 ** attempt))
+                time.sleep(wait_time)
+                continue
+            return _fetch_via_nether(item_id, domain=domain, timeout=timeout)
+        except urllib.error.URLError:
+            if attempt < max_retries - 1:
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            return _fetch_via_nether(item_id, domain=domain, timeout=timeout)
+        except Exception:
+            return _fetch_via_nether(item_id, domain=domain, timeout=timeout)
+
+    if xml_data is None:
         return _fetch_via_nether(item_id, domain=domain, timeout=timeout)
 
     try:
@@ -167,15 +210,25 @@ def fetch_wowhead_item(
         ru_url,
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ForeverTrade/1.0"},
     )
-    try:
-        with urllib.request.urlopen(ru_req, timeout=timeout) as ru_resp:
-            if ru_resp.status == 200:
-                ru_root = ET.fromstring(ru_resp.read())
-                ru_item = ru_root.find("item")
-                if ru_item is not None:
-                    name_ru = ru_item.findtext("name")
-    except Exception:
-        pass
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(ru_req, timeout=timeout) as ru_resp:
+                if ru_resp.status == 429 and attempt < max_retries - 1:
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                if ru_resp.status == 200:
+                    ru_root = ET.fromstring(ru_resp.read())
+                    ru_item = ru_root.find("item")
+                    if ru_item is not None:
+                        name_ru = ru_item.findtext("name")
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < max_retries - 1:
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            break
+        except Exception:
+            break
 
     # Prioritize local canonical localization and settled vendor prices
     try:
