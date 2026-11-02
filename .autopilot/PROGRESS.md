@@ -1,7 +1,7 @@
 <!-- autopilot:progress -->
 # Forever Trade — что осталось
 
-Последняя сборка: `.autopilot/2026-10-31-wow-forever-trade/` — Реализован полный цикл Ticket 18–20 по адверсариальному аудиту forevertrade.md: debounce 500мс и проверка '}' в watcher, автоопределение реалма, составные ключи g/p, vendor floor/ceiling, vendor shuffle, Day-1 hardening, одноэкранный Goblin Terminal UI (100vh, 2 панели), тултипы Wowhead Forever, 1-click копирование и экспорт в Shopping List Auctionator.
+Последняя сборка: `.autopilot/2026-10-31-wow-forever-trade/` — Реализован полный цикл Ticket 21–23 по адверсариальному аудиту 2026-11-02: Waylaid 100% AH turn-in, строгий белый список вендорных реагентов, отсечение price <= 0, изоляция realm=None, multi-yield крафт и депозиты, атомарная перезагрузка overrides, проверка '}' и отсечение старых .bak, сохранение настроенного реалма watcher, максимальный timestamp в истории h/l, CLI --run-once, защита от SQLite OverflowError, атомарная дедупликация через BEGIN IMMEDIATE, проброс списков сигналов в AI Advisor, безопасный tmp_path в test_database.py, точный expected_net_profit в Топ Снайп, исключение STRONG_SELL из вкладки Strong Buy, экспорт Shopping List по подтвержденным server strong_buys, turn-in экономика на вкладке ящиков, защита чужих процессов в kill_orphans. Все 181 тест пройдены.
 
 ## Договорились — не пересматривать
 
