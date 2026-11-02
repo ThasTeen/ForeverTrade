@@ -74,3 +74,24 @@
 | R68i | «(подразумевается) Поддержка перечитывания forever_overrides.json по mtime без перезапуска процесса» | done | audit/forevertrade.md §1 Агент 5 | spec §Истории 68 → T19 → c4e1913 |
 | R69i | «(подразумевается) Разделение ролей: Код и тесты должны писать разные агенты» | done | бриф пользователя | spec §Истории 69 → T18, T19, T20 → 6f36343 |
 | R70i | «(подразумевается) Автономный прогон без остановки до полного закрытия плана» | done | бриф пользователя | spec §Истории 70 → T18, T19, T20 → 6f36343 |
+| R71 | «Waylaid: расчет сдачи ящика NPC строго по 100% AH цене сырья target_count * p_out без min(AH, vendor_buy)» | open | audit/adversarial_review_2026-11-02.md §1 | spec §Истории 71 → T21 |
+| R72 | «Строгий белый список вендорных реагентов: подставлять NPC-цену только для ID из VENDOR_REAGENTS_WHITELIST» | open | audit/adversarial_review_2026-11-02.md §2 | spec §Истории 72 → T21 |
+| R73 | «Игнорировать price <= 0 до выборки последнего лота и расчетных окон в арбитраже и Z-score» | open | audit/adversarial_review_2026-11-02.md §3 | spec §Истории 73 → T21 |
+| R74 | «Исключить смешивание цен разных реалмов при realm=None в аналитике» | open | audit/adversarial_review_2026-11-02.md §6 | spec §Истории 74 → T21 |
+| R75 | «Корректный расчет рецептов с выходом expected_yield > 1: деление pack_craft_cost на yield и согласованный депозит» | open | audit/adversarial_review_2026-11-02.md §11 | spec §Истории 75 → T21 |
+| R76 | «Обновление _OVERRIDES_MTIME только после успешного коммита overrides в БД» | open | audit/adversarial_review_2026-11-02.md §19 | spec §Истории 76 → T21 |
+| R77 | «_wait_for_file_ready возвращает False при незавершенной записи; отсечение .bak старше последнего импортированного снапшота» | open | audit/adversarial_review_2026-11-02.md §4 | spec §Истории 77 → T22 |
+| R78 | «Автоопределение реалма не должно перезаписывать постоянный настроенный реалм watcher» | open | audit/adversarial_review_2026-11-02.md §5 | spec §Истории 78 → T22 |
+| R79 | «Выбор исторической цены в ETL по максимальному числовому timestamp» | open | audit/adversarial_review_2026-11-02.md §7 | spec §Истории 79 → T22 |
+| R80 | «Реализация аргумента командной строки --run-once в run_watcher.py» | open | audit/adversarial_review_2026-11-02.md §16 | spec §Истории 80 → T22 |
+| R81 | «Ограничение SQLite INTEGER диапазона для Lua int для предотвращения OverflowError» | open | audit/adversarial_review_2026-11-02.md §17 | spec §Истории 81 → T22 |
+| R82 | «Атомарная дедупликация ETL в транзакции с BEGIN IMMEDIATE» | open | audit/adversarial_review_2026-11-02.md §18 | spec §Истории 82 → T22 |
+| R83 | «AI Advisor: использование переданных рассчитанных списков сигналов и явный проброс TTL и перков» | open | audit/adversarial_review_2026-11-02.md §8 | spec §Истории 83 → T23 |
+| R84 | «Устранение перезаписи рабочего каталога в test_database.py (изоляция через tmp_path)» | open | audit/adversarial_review_2026-11-02.md §10 | spec §Истории 84 → T23 |
+| R85 | «Карточка Топ Снайп отображает expected_net_profit из аналитики» | open | audit/adversarial_review_2026-11-02.md §12 | spec §Истории 85 → T23 |
+| R86 | «Вкладка Strong Buy отображает только сигналы STRONG_BUY без STRONG_SELL» | open | audit/adversarial_review_2026-11-02.md §13 | spec §Истории 86 → T23 |
+| R87 | «Shopping List формируется по проверенному списку strong_buys без перерасчета Z-score на клиенте» | open | audit/adversarial_review_2026-11-02.md §14 | spec §Истории 87 → T23 |
+| R88 | «Разделение экономической модели сдачи ящиков и крафта на вкладке Waylaid» | open | audit/adversarial_review_2026-11-02.md §15 | spec §Истории 88 → T23 |
+| R89 | «Autopilot: kill_orphans проверяет абсолютный путь скрипта и собственный PID» | open | audit/adversarial_review_2026-11-02.md §20 | spec §Истории 89 → T23 |
+| R90i | «(подразумевается) Разделение ролей: Код и тесты должны писать разные агенты» | open | бриф пользователя | spec §Истории 90 → T21, T22, T23 |
+| R91i | «(подразумевается) Автономный прогон без остановки до полного закрытия плана» | open | бриф пользователя | spec §Истории 91 → T21, T22, T23 |

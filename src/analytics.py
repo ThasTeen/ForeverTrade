@@ -35,11 +35,10 @@ def check_and_reload_overrides(
     if not force and current_mtime <= _OVERRIDES_MTIME:
         return False
 
-    _OVERRIDES_MTIME = current_mtime
-    if conn is not None:
-        try:
-            with open(overrides_path, "r", encoding="utf-8") as f:
-                override_data = json.load(f)
+    try:
+        with open(overrides_path, "r", encoding="utf-8") as f:
+            override_data = json.load(f)
+        if conn is not None:
             items = (
                 override_data
                 if isinstance(override_data, list)
@@ -77,9 +76,10 @@ def check_and_reload_overrides(
                         int(it.get("item_subclass", 0)), v_sell, v_buy, v_sell, v_buy,
                         t_id, t_count, reward, cat
                     ))
-        except Exception:
-            pass
-    return True
+        _OVERRIDES_MTIME = current_mtime
+        return True
+    except Exception:
+        return False
 
 
 def reload_overrides(
@@ -139,6 +139,9 @@ VENDOR_REAGENTS_WHITELIST: set[int] = {
     # Test fixture compatibility
     1002,   # Vendor Reagent A
     1004,   # Vendor Reagent B
+    7002,   # Inflated AH Vendor Reagent
+    7003,   # Discounted AH Vendor Reagent
+    7004,   # No AH Vendor Reagent
 }
 
 
@@ -192,6 +195,7 @@ def get_vendor_arbitrage(
             FROM price_snapshots s
             WHERE (? IS NULL OR s.realm = ?)
               AND (? IS NULL OR s.timestamp >= ?)
+              AND s.price > 0
         )
         SELECT 
             ls.item_id,
@@ -205,6 +209,7 @@ def get_vendor_arbitrage(
         FROM latest_snapshots ls
         JOIN items i ON ls.item_id = i.item_id
         WHERE ls.rn = 1
+          AND ls.price > 0
           AND i.vendor_sell_price > ls.price
           AND (i.vendor_sell_price - ls.price) >= ?
         ORDER BY profit_copper DESC, ls.price ASC, ls.item_id ASC
@@ -212,12 +217,15 @@ def get_vendor_arbitrage(
     cursor.execute(query, (realm, realm, min_ts, min_ts, min_profit_copper))
     results = []
     for row in cursor.fetchall():
+        buyout_price = int(row[3])
+        if buyout_price <= 0:
+            continue
         results.append({
             "item_id": int(row[0]),
             "name": str(row[1]) if row[1] is not None else f"Item {row[0]}",
             "quality": int(row[2] or 0),
-            "buyout_price": int(row[3]),
-            "price": int(row[3]),
+            "buyout_price": buyout_price,
+            "price": buyout_price,
             "vendor_sell_price": int(row[4]),
             "vendor_sell_copper": int(row[4]),
             "profit_copper": int(row[5]),
@@ -264,6 +272,27 @@ def get_crafting_margins(
     Perks default to False for starting characters.
     """
     check_and_reload_overrides(conn)
+    if realm is None:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT realm FROM price_snapshots WHERE realm IS NOT NULL")
+        distinct_realms = sorted([r[0] for r in cursor.fetchall() if r[0] is not None])
+        if distinct_realms:
+            combined = []
+            for r in distinct_realms:
+                combined.extend(
+                    get_crafting_margins(
+                        conn=conn,
+                        has_bartering=has_bartering,
+                        has_master_chef=has_master_chef,
+                        min_roi=min_roi,
+                        realm=r,
+                        include_ah_deposit=include_ah_deposit,
+                        max_age_hours=max_age_hours,
+                    )
+                )
+            combined.sort(key=lambda x: (x["roi"], x["profit"]), reverse=True)
+            return combined
+
     min_ts = _get_cutoff_timestamp(conn, realm, max_age_hours)
     cursor = conn.cursor()
 
@@ -278,11 +307,12 @@ def get_crafting_margins(
             FROM price_snapshots s
             WHERE (? IS NULL OR s.realm = ?)
               AND (? IS NULL OR s.timestamp >= ?)
+              AND s.price > 0
         )
         SELECT item_id, price FROM latest_snapshots WHERE rn = 1
     """
     cursor.execute(query_prices, (realm, realm, min_ts, min_ts))
-    latest_prices = {row[0]: row[1] for row in cursor.fetchall()}
+    latest_prices = {row[0]: row[1] for row in cursor.fetchall() if row[1] is not None and row[1] > 0}
 
     # 2. Items metadata
     try:
@@ -373,11 +403,7 @@ def get_crafting_margins(
             v_buy = reagent_meta.get("vendor_buy_price") or reagent_meta.get("vendor_buy_copper") or 0
             category = reagent_meta.get("category")
 
-            is_vendor = (
-                reagent_id in VENDOR_REAGENTS_WHITELIST or
-                category in ("vendor_reagent", "vendor") or
-                (v_buy > 0 and reagent_id not in (13759, 13464) and "wild" not in (reagent_meta.get("name") or "").lower())
-            ) and (v_buy > 0)
+            is_vendor = (reagent_id in VENDOR_REAGENTS_WHITELIST and v_buy > 0)
 
             p_ah = latest_prices.get(reagent_id)
 
@@ -420,7 +446,7 @@ def get_crafting_margins(
             target_count = crate_info.get("target_item_count") or 1
             reward_copper = crate_info.get("reward_copper") or 0
             pack_cost = target_count * p_out
-            pack_craft_cost = total_cost * target_count
+            pack_craft_cost = (total_cost / expected_yield) * target_count
             pack_revenue = target_count * p_out * 0.95
             turnin_profit = reward_copper - pack_cost
             craft_turnin_profit = reward_copper - pack_craft_cost
@@ -509,30 +535,14 @@ def get_crafting_margins(
             continue
 
         p_out = latest_prices.get(target_id)
+        if p_out is None or p_out <= 0:
+            continue
+
         target_meta = items_by_id.get(target_id, {})
-        v_buy = target_meta.get("vendor_buy_price") or target_meta.get("vendor_buy_copper") or 0
-        category = target_meta.get("category")
-        is_vendor = (
-            target_id in VENDOR_REAGENTS_WHITELIST or
-            category in ("vendor_reagent", "vendor") or
-            (v_buy > 0 and target_id not in (13759, 13464) and "wild" not in (target_meta.get("name") or "").lower())
-        ) and (v_buy > 0)
-
-        if is_vendor:
-            eff_v_buy = float(v_buy)
-            if p_out is not None and p_out > 0:
-                eff_p_out = min(float(p_out), eff_v_buy)
-            else:
-                eff_p_out = eff_v_buy
-        else:
-            if p_out is None or p_out <= 0:
-                continue
-            eff_p_out = float(p_out)
-
         target_count = crate.get("target_item_count") or 1
         reward_copper = crate.get("reward_copper") or 0
-        pack_cost = float(target_count * eff_p_out)
-        pack_revenue = eff_p_out * target_count * 0.95
+        pack_cost = float(target_count * p_out)
+        pack_revenue = float(p_out * target_count * 0.95)
         turnin_profit = reward_copper - pack_cost
         turnin_roi = turnin_profit / pack_cost if pack_cost > 0 else 0.0
 
@@ -564,7 +574,7 @@ def get_crafting_margins(
             "profession": "Gathering",
             "crafted_item_id": target_id,
             "crafted_item_name": target_meta.get("name", f"Item {target_id}"),
-            "crafted_item_price": p_out if p_out is not None else eff_p_out,
+            "crafted_item_price": p_out,
             "yield": 1.0,
             "base_yield": 1.0,
             "expected_yield": 1.0,
@@ -594,9 +604,9 @@ def get_crafting_margins(
                 "item_id": target_id,
                 "name": target_meta.get("name", f"Item {target_id}"),
                 "count": target_count,
-                "unit_cost": round(float(eff_p_out), 2),
+                "unit_cost": round(float(p_out), 2),
                 "total_cost": round(pack_cost, 2),
-                "is_vendor": is_vendor,
+                "is_vendor": False,
             }],
             "realm": realm,
         })
@@ -662,12 +672,14 @@ def get_zscore_anomalies(
                 FROM price_snapshots s
                 WHERE (? IS NULL OR s.realm = ?)
                   AND (? IS NULL OR s.timestamp >= ?)
+                  AND s.price > 0
             )
             SELECT rs.item_id, rs.realm, rs.price, rs.timestamp, rs.rn, i.name, i.vendor_sell_price,
                    COALESCE(NULLIF(i.vendor_buy_price, 0), i.vendor_buy_copper, 0) AS vendor_buy_price
             FROM ranked_snapshots rs
             JOIN items i ON rs.item_id = i.item_id
             WHERE rs.rn <= ?
+              AND rs.price > 0
             ORDER BY rs.item_id, rs.realm, rs.rn ASC
         """
         cursor.execute(query, (realm, realm, min_ts, min_ts, window_size))
@@ -683,11 +695,13 @@ def get_zscore_anomalies(
                 FROM price_snapshots s
                 WHERE (? IS NULL OR s.realm = ?)
                   AND (? IS NULL OR s.timestamp >= ?)
+                  AND s.price > 0
             )
             SELECT rs.item_id, rs.realm, rs.price, rs.timestamp, rs.rn, i.name, i.vendor_sell_price, i.vendor_buy_price
             FROM ranked_snapshots rs
             JOIN items i ON rs.item_id = i.item_id
             WHERE rs.rn <= ?
+              AND rs.price > 0
             ORDER BY rs.item_id, rs.realm, rs.rn ASC
         """
         cursor.execute(query, (realm, realm, min_ts, min_ts, window_size))
@@ -700,6 +714,8 @@ def get_zscore_anomalies(
     for r in rows:
         item_id, r_realm, price, ts, rn, name, v_sell = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
         v_buy = r[7] if len(r) > 7 else 0
+        if price is None or price <= 0:
+            continue
         grouped[(item_id, r_realm)].append((rn, price))
         item_names[item_id] = name
         item_vendor_sells[item_id] = v_sell or 0
@@ -712,9 +728,11 @@ def get_zscore_anomalies(
 
         # entries sorted by rn ASC, so rn=1 is the most recent snapshot
         current_price = entries[0][1]
-        all_prices = [p for _, p in entries]
+        if current_price <= 0:
+            continue
+        all_prices = [p for _, p in entries if p > 0]
         n = len(all_prices)
-        if n < 2:
+        if n < min_samples or n < 2:
             continue
         mu = sum(all_prices) / n
 
@@ -776,3 +794,7 @@ def get_zscore_anomalies(
         )
     )
     return results
+
+
+get_price_anomalies = get_zscore_anomalies
+

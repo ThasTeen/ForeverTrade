@@ -1746,3 +1746,373 @@ def test_dynamic_reload_of_overrides_on_mtime_change(memory_db, tmp_path):
     forced = reload_overrides(memory_db, overrides_path=str(overrides_file))
     assert forced is True
 
+
+# ---------------------------------------------------------------------------
+# Ticket 21: Analytics & Math Hardening Tests (R71, R72, R73, R74, R75, R76, R90i, R91i)
+# ---------------------------------------------------------------------------
+
+def test_waylaid_raw_turnin_strict_100_percent_ah_price(memory_db):
+    """R71: Verify raw Waylaid crate turn-in calculates pack_cost strictly at 100% AH price,
+    never substituting vendor_buy_price, and excludes negative profit crates."""
+    now = int(time.time())
+    with memory_db:
+        # Target item 7001 (e.g. Raw Peacebloom): vendor_buy = 10, vendor_sell = 2
+        # AH price = 100
+        memory_db.execute(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price, category)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (7001, "Raw Peacebloom", 1, 2, 10, "trade_goods")
+        )
+        # Raw crate 211501: target 7001, count 20, reward 1000
+        memory_db.execute(
+            """INSERT INTO items (item_id, name, quality, target_item_id, target_item_count, reward_copper, category)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (211501, "Waylaid Supplies: Peacebloom", 1, 7001, 20, 1000, "waylaid_crate")
+        )
+        # AH snapshot: price = 100
+        memory_db.execute(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            (7001, "Everlook", 100, now)
+        )
+
+    # 1. Unprofitable turn-in:
+    # If vendor_buy was erroneously used: pack_cost = 20 * 10 = 200, profit = 800 (profitable!)
+    # But strictly using AH price: pack_cost = 20 * 100 = 2000, profit = 1000 - 2000 = -1000
+    # Must be excluded from profitable margins and from get_waylaid_crate_arbitrage
+    margins_default = get_crafting_margins(memory_db, realm="Everlook")
+    assert not any(m.get("waylaid_crate_id") == 211501 for m in margins_default)
+
+    crates_arbitrage = get_waylaid_crate_arbitrage(memory_db, realm="Everlook")
+    assert not any(c.get("waylaid_crate_id") == 211501 for c in crates_arbitrage)
+
+    # 2. Profitable turn-in when AH price drops to 30:
+    # pack_cost = 20 * 30 = 600, profit = 1000 - 600 = 400
+    memory_db.execute(
+        """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+           VALUES (?, ?, ?, ?)""",
+        (7001, "Everlook", 30, now + 10)
+    )
+
+    margins_profitable = get_crafting_margins(memory_db, realm="Everlook", min_roi=0.25)
+    crate_matches = [m for m in margins_profitable if m.get("waylaid_crate_id") == 211501]
+    assert len(crate_matches) == 1
+    crate_res = crate_matches[0]
+    assert crate_res["pack_cost"] == 600.0
+    assert crate_res["profit"] == 400.0
+    assert crate_res["turnin_profit"] == 400.0
+    assert crate_res["cost"] == 600.0
+    assert crate_res["reagents"][0]["unit_cost"] == 30.0
+    assert crate_res["reagents"][0]["is_vendor"] is False
+
+
+def test_strict_vendor_whitelist_enforcement(memory_db):
+    """R72: Verify reagent cost uses AH price unless item_id is in VENDOR_REAGENTS_WHITELIST."""
+    now = int(time.time())
+    with memory_db:
+        # Reagent 13759 (Raw Sunscale Salmon) - NOT in whitelist, has vendor_buy_price=50
+        # Reagent 2320 (Coarse Thread) - IN whitelist, vendor_buy_price=50
+        # Target crafted items: 8001, 8002
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (13759, "Raw Sunscale Salmon", 1, 10, 50),
+                (2320, "Coarse Thread", 1, 2, 50),
+                (8001, "Cooked Salmon", 1, 100, 0),
+                (8002, "Linen Bandage", 1, 50, 0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (101, "Cooked Salmon Recipe", "Cooking", 8001, 1.0),
+                (102, "Bandage Recipe", "Tailoring", 8002, 1.0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (101, 13759, 13759, 1, 1),
+                (102, 2320, 2320, 1, 1),
+            ]
+        )
+        # Snapshots:
+        # Crafted items priced high (1000)
+        # Reagent 13759 AH price = 500 (vendor_buy is 50)
+        # Reagent 2320 AH price = 500 (vendor_buy is 50)
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (8001, "Everlook", 1000, now),
+                (8002, "Everlook", 1000, now),
+                (13759, "Everlook", 500, now),
+                (2320, "Everlook", 500, now),
+            ]
+        )
+
+    assert 13759 not in VENDOR_REAGENTS_WHITELIST
+    assert 2320 in VENDOR_REAGENTS_WHITELIST
+
+    results = get_crafting_margins(memory_db, realm="Everlook", min_roi=0.0)
+    by_id = {r["recipe_id"]: r for r in results}
+
+    # Recipe 101 (uses 13759): not in whitelist -> must use AH price (500), NOT vendor_buy (50)
+    res_101 = by_id[101]
+    assert res_101["cost"] == 500.0
+    reag_13759 = res_101["reagents"][0]
+    assert reag_13759["is_vendor"] is False
+    assert reag_13759["unit_cost"] == 500.0
+
+    # Recipe 102 (uses 2320): in whitelist -> must use min(AH 500, vendor_buy 50) = 50.0
+    res_102 = by_id[102]
+    assert res_102["cost"] == 50.0
+    reag_2320 = res_102["reagents"][0]
+    assert reag_2320["is_vendor"] is True
+    assert reag_2320["unit_cost"] == 50.0
+
+    # Bartering perk check: applies to 2320 (50 * 0.95 = 47.5), but NOT to 13759 (remains 500.0)
+    results_barter = get_crafting_margins(memory_db, realm="Everlook", min_roi=0.0, has_bartering=True)
+    by_id_barter = {r["recipe_id"]: r for r in results_barter}
+    assert by_id_barter[101]["cost"] == 500.0
+    assert by_id_barter[102]["cost"] == 47.5
+
+    # When AH price for 2320 is cheaper than vendor price (e.g. 30 < 50): uses min(30, 50) = 30.0
+    memory_db.execute(
+        """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+           VALUES (?, ?, ?, ?)""",
+        (2320, "Everlook", 30, now + 10)
+    )
+    results_cheap = get_crafting_margins(memory_db, realm="Everlook", min_roi=0.0)
+    by_id_cheap = {r["recipe_id"]: r for r in results_cheap}
+    assert by_id_cheap[102]["cost"] == 30.0
+    assert by_id_cheap[102]["reagents"][0]["unit_cost"] == 30.0
+
+
+def test_zero_and_negative_price_filtering(memory_db):
+    """R73: Verify snapshots with price <= 0 are completely ignored in both arbitrage and Z-score."""
+    now = int(time.time())
+    with memory_db:
+        # Item 301: vendor_sell = 100
+        # Corrupted snapshots: 0 and -10
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (301, "Bugged Zero Price Item", 1, 100, 0),
+                (302, "Zscore Target Item", 1, 10, 0),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (301, "Everlook", 0, now - 10),
+                (301, "Everlook", -10, now),
+            ]
+        )
+        # Snapshots for item 302: valid history, but latest are 0 and -10
+        for i, p in enumerate([100, 105, 98, 102, 99, 101, 100]):
+            memory_db.execute(
+                """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+                   VALUES (?, ?, ?, ?)""",
+                (302, "Everlook", p, now - 100 + i * 5)
+            )
+        memory_db.execute(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            (302, "Everlook", 0, now + 10)
+        )
+        memory_db.execute(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            (302, "Everlook", -10, now + 20)
+        )
+
+    # 1. Vendor arbitrage: item 301 must NOT produce VENDOR_SHUFFLE with buyout_price <= 0
+    arb = get_vendor_arbitrage(memory_db, realm="Everlook", min_profit_copper=1)
+    for r in arb:
+        assert r["buyout_price"] > 0
+        assert r["price"] > 0
+    assert not any(r["item_id"] == 301 for r in arb)
+
+    # 2. Z-score: non-positive prices must be ignored and not produce signals with current_price <= 0
+    anomalies = get_zscore_anomalies(memory_db, realm="Everlook", min_samples=5)
+    for a in anomalies:
+        assert a["current_price"] > 0
+        assert a["price"] > 0
+
+
+def test_realm_isolation_when_realm_none(memory_db):
+    """R74: Verify get_crafting_margins(realm=None) isolates realms and never mixes prices across realms."""
+    now = int(time.time())
+    with memory_db:
+        # Item 401 (Crafted): vendor_sell = 20 (deposit = 15)
+        # Item 402 (Reagent)
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (401, "Cross-Realm Crafted Item", 1, 20, 0),
+                (402, "Cross-Realm Reagent", 1, 5, 0),
+            ]
+        )
+        memory_db.execute(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            (4001, "Cross Realm Recipe", "Engineering", 401, 1.0)
+        )
+        memory_db.execute(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            (4001, 402, 402, 1, 1)
+        )
+        # Everlook: Crafted 200, Reagent 190 -> cost 190, rev 190, profit = 190 - 190 - 15 = -15
+        # Warsong: Crafted 10, Reagent 10 -> cost 10, rev 9.5, profit = 9.5 - 10 - 15 = -15.5
+        # If mixed (Everlook crafted 200 + Warsong reagent 10): cost 10, rev 190 -> profit 165
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (401, "Everlook", 200, now),
+                (402, "Everlook", 190, now),
+                (401, "Warsong", 10, now),
+                (402, "Warsong", 10, now),
+            ]
+        )
+
+    # Calling with min_roi=0.1: should return empty list because neither realm has positive profit
+    profitable = get_crafting_margins(memory_db, realm=None, min_roi=0.1)
+    assert len(profitable) == 0
+
+    # Calling with min_roi=-999.0: should return separate records for each realm, neither mixed!
+    all_margins = get_crafting_margins(memory_db, realm=None, min_roi=-999.0)
+    for m in all_margins:
+        if m["realm"] == "Everlook":
+            assert m["crafted_item_price"] == 200
+            assert m["cost"] == 190.0
+        elif m["realm"] == "Warsong":
+            assert m["crafted_item_price"] == 10
+            assert m["cost"] == 10.0
+
+
+def test_multi_yield_crafting_math(memory_db):
+    """R75 / R90i: Verify recipes with yield > 1 properly scale expected revenue and deposit,
+    and Waylaid crate pack_craft_cost scales as (total_cost / yield) * target_count."""
+    now = int(time.time())
+    with memory_db:
+        # Item 501: Crafted, vendor_sell = 2000 (deposit = max(15, 2000 * 0.05) = 100)
+        # Item 502: Reagent
+        # Crate 211510: target 501, count 4, reward 500
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, vendor_sell_price, vendor_buy_price, category,
+                                  target_item_id, target_item_count, reward_copper)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (501, "Multi-Yield Potion", 1, 2000, 0, "consumable", None, 0, 0),
+                (502, "Herb Reagent", 1, 10, 0, "trade_goods", None, 0, 0),
+                (211510, "Waylaid Supplies: Potions", 1, 0, 0, "waylaid_crate", 501, 4, 500),
+            ]
+        )
+        memory_db.execute(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (?, ?, ?, ?, ?)""",
+            (5001, "Batch Potion Recipe", "Alchemy", 501, 2.0)
+        )
+        memory_db.execute(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            (5001, 502, 502, 1, 1)
+        )
+        # Snapshots: Reagent 502 = 50, Crafted 501 = 100
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (501, "Everlook", 100, now),
+                (502, "Everlook", 50, now),
+            ]
+        )
+
+    results = get_crafting_margins(memory_db, realm="Everlook", min_roi=-999.0)
+    assert len(results) == 1
+    res = results[0]
+
+    # Verify multi-yield recipe math:
+    # yield = 2.0, cost = 50.0
+    # revenue = 100 * 0.95 * 2.0 = 190.0
+    # deposit = 100 (5% of 2000)
+    # profit = 190.0 - 50.0 - 100 = 40.0
+    assert res["expected_yield"] == 2.0
+    assert res["cost"] == 50.0
+    assert res["revenue"] == 190.0
+    assert res["deposit"] == 100
+    assert res["profit"] == 40.0
+
+    # Verify Waylaid Crate pack_craft_cost:
+    # Formula: (total_cost / expected_yield) * target_count
+    # pack_craft_cost = (50.0 / 2.0) * 4 = 100.0
+    # craft_turnin_profit = reward_copper (500) - pack_craft_cost (100.0) = 400.0
+    assert res["is_waylaid_target"] is True
+    assert res["pack_craft_cost"] == 100.0
+    assert res["craft_turnin_profit"] == 400.0
+
+    # pack_cost (raw AH turn-in) = target_count * crafted_price = 4 * 100 = 400.0
+    assert res["pack_cost"] == 400.0
+    assert res["turnin_profit"] == 100.0  # 500 - 400 = 100
+
+
+def test_overrides_reload_retry_on_corrupted_json(memory_db, tmp_path):
+    """R76 / R91i: Verify check_and_reload_overrides fails on corrupt JSON without advancing mtime,
+    and succeeds once the file is fixed."""
+    import src.analytics
+    # Reset internal mtime cache to ensure clean test environment
+    src.analytics._OVERRIDES_MTIME = 0.0
+
+    overrides_file = tmp_path / "corrupt_overrides.json"
+
+    # 1. Write corrupted JSON
+    overrides_file.write_text("{ this is invalid json content: 123", encoding="utf-8")
+    future_mtime = time.time() + 50.0
+    os.utime(str(overrides_file), (future_mtime, future_mtime))
+
+    # Initial check fails and returns False
+    res = check_and_reload_overrides(memory_db, overrides_path=str(overrides_file))
+    assert res is False
+
+    # Check that mtime was NOT updated to future_mtime and item was NOT loaded
+    assert src.analytics._OVERRIDES_MTIME == 0.0
+    row = memory_db.execute("SELECT * FROM items WHERE item_id = 9991").fetchone()
+    assert row is None
+
+    # 2. Fix the file with valid JSON (even with same future_mtime)
+    valid_data = [
+        {
+            "item_id": 9991,
+            "name": "Waylaid Supplies: Heavy Iron",
+            "category": "waylaid_crate",
+            "target_item_id": 3577,
+            "target_item_count": 15,
+            "reward_copper": 6000,
+            "is_override": 1,
+        }
+    ]
+    overrides_file.write_text(json.dumps(valid_data), encoding="utf-8")
+    os.utime(str(overrides_file), (future_mtime, future_mtime))
+
+    # Second check succeeds, returns True, advances mtime, and loads item into DB
+    res_fixed = check_and_reload_overrides(memory_db, overrides_path=str(overrides_file))
+    assert res_fixed is True
+    assert src.analytics._OVERRIDES_MTIME == future_mtime
+
+    row_fixed = memory_db.execute(
+        "SELECT name, reward_copper FROM items WHERE item_id = 9991"
+    ).fetchone()
+    assert row_fixed is not None
+    assert row_fixed["name"] == "Waylaid Supplies: Heavy Iron"
+    assert row_fixed["reward_copper"] == 6000
+
+

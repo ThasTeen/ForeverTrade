@@ -24,6 +24,7 @@
 - Vendor floor/ceiling в крафте: себестоимость реагента вендора ограничена $\min(P_{\text{AH}}, P_{\text{vendor\_buy}})$
 - Блокировка STRONG_BUY для предметов, продаваемых NPC по фиксированной цене, при $P_{\text{AH}} \ge P_{\text{vendor\_buy}}$
 - Goblin Terminal UI: одноэкранный интерфейс (100vh) с тултипами Wowhead Forever, экспортом Shopping List Auctionator и сохранением состояния в `localStorage`
+- API-ключ Gemini локальный, кража исключена (риск перенаправления из аудита §9 снят) — требование пользователя
 
 ## Не доделано
 
