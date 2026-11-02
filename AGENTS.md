@@ -10,7 +10,7 @@
 | `pip install -r requirements.txt` | Установить зависимости проекта |
 | `python run_watcher.py` | Запустить фоновый мониторинг файлов, ETL и генератор дашборда |
 | `python run_watcher.py --run-once --realm "Everlook"` | Разовый запуск ETL и генерация дашборда для указанного реалма |
-| `python -m pytest` | Запустить полный тестовый набор (149 тестов) |
+| `python -m pytest` | Запустить полный тестовый набор (196 тестов) |
 | `python -m pytest tests/test_database.py` | Запустить тесты схемы БД, каталога и ротации |
 | `python -m pytest tests/test_etl.py` | Запустить тесты ETL, парсинга luadata и дедупликации |
 | `python -m pytest tests/test_analytics.py` | Запустить тесты арбитража, Z-score снайпинга и ящиков |
@@ -34,6 +34,7 @@
 - [`docs/adr/0010-disable-character-perks-by-default.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0010-disable-character-perks-by-default.md) — Выключение персональных перков Bartering и Master Chef по умолчанию.
 - [`docs/adr/0011-unified-portal-crafting-display.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0011-unified-portal-crafting-display.md) — Dual-crafting: отображение стандартного крафта наряду с Waylaid Crates на портале.
 - [`docs/adr/0012-goblin-terminal-ui-and-vendor-ceiling.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0012-goblin-terminal-ui-and-vendor-ceiling.md) — Goblin Terminal UI (100vh), Wowhead Forever tooltips, Vendor Floor/Ceiling, Vendor Shuffle, автоопределение реалма и Shopping List экспорт.
+- [`docs/adr/0013-forevertrade-sniper-standalone-stack.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0013-forevertrade-sniper-standalone-stack.md) — Автономный стек микро-аддона ForeverTrade_Sniper, Disenchant Shuffle, Hampel filter и рекурсивный DAG Make-vs-Buy.
 
 ## Где что
 
@@ -45,8 +46,10 @@
 - `src/ai_advisor.py` — Тактический AI-ассистент: отбор топ-3 возможностей рынка, клиент `AntigravityManagerClient` (`gemini-3.8-flash-high`) и надежный детерминированный эвристический fallback при отсутствии API-ключа или сети.
 - `data/items_era_1_15.json` — Базовый каталог предметов Classic Era 1.15 с выверенными идентификаторами и полями `vendor_sell_copper` / `vendor_buy_copper`.
 - `forever_overrides.json` — Специфичные данные сервера Forever (контейнеры Waylaid Crates, целевые предметы, награды и кастомные цены).
-- `docs/adr/` — Каталог архитектурных решений проекта (ADR 0001–0012).
-- `tests/` — Полный набор из 149 модульных тестов pytest (`test_database.py`, `test_etl.py`, `test_analytics.py`, `test_dashboard.py`, `test_ai_advisor.py`).
+- `addons/ForeverTrade_Sniper/` — Легковесный микро-аддон (<50 КБ, без Ace3): TOC, Lua-сканер последней страницы с защитой от сдвига, аппаратный выкуп лота по колесу мыши с верификацией слота, сгенерированный `config.lua`.
+- `data/disenchant_tables_era.json` — Матрицы матожидания распыления экипировки Classic Era 1.15 и сервера Forever.
+- `docs/adr/` — Каталог архитектурных решений проекта (ADR 0001–0013).
+- `tests/` — Полный набор из 196 модульных тестов pytest (`test_database.py`, `test_etl.py`, `test_analytics.py`, `test_dashboard.py`, `test_ai_advisor.py`).
 
 ## Подводные камни
 
@@ -57,6 +60,9 @@
 5. **Валидация выхода Z-score снайпинга:** Попадание в зону перепроданности ($Z \le -1.8$) недостаточно для статуса `STRONG_BUY`. Алгоритм обязательно проверяет безубыточный выход по историческому среднему: чистая выручка от перепродажи с учетом комиссии аукциона 5% и стоимости депозита должна строго превышать цену покупки ($\mu \times 0.95 - \text{deposit} > \text{buy\_price}$). Это исключает ложные сигналы на товарах с высокой дисперсией $\sigma$.
 6. **Дефолт перков выключен (False):** Перки персонажа (`perk_bartering` — скидка 5% у вендоров, `perk_master_chef` — 1.1x выход при готовке) по умолчанию установлены в `False` как в сигнатурах функций аналитики, так и в CLI аргументах `run_watcher.py`. Это гарантирует консервативную и точную оценку для базовых персонажей.
 7. **Дедупликация через _etl_metadata:** Для исключения повторной обработки идентичных снимков `src/etl.py` сохраняет mtime и SHA-256 хэш файла в служебную таблицу `_etl_metadata` базы SQLite. Резервный словарь `_IN_MEMORY_ETL_META` используется лишь в качестве fallback-кэша.
+8. **Аппаратные события выкупа лотов (Hardware Events):** Вызов `PlaceAuctionBid` в клиенте WoW защищен и требует прямого действия игрока. Аддон перехватывает колесо мыши (`MOUSEWHEELUP`/`MOUSEWHEELDOWN`) через `SecureActionButtonTemplate` и верифицирует совпадение `actualItemId` и `buyoutPrice` перед покупкой. При закрытии аукциона (`AUCTION_HOUSE_CLOSED`) бинды гарантированно сбрасываются.
+9. **Робастная фильтрация выбросов (Hampel Filter):** При расчете рыночной метрики DBMarket тролль-лоты отсекаются по порогу $3 \times \max(\sigma_{\text{MAD}}, 0.10 \times \tilde{P})$, что защищает среднее от поломки при нулевом $\text{MAD}$ на однородных стаках.
+10. **Рекурсивный DAG Make-vs-Buy:** Себестоимость полуфабрикатов крафта оптимизируется по минимальной ветке $\min(P_{\text{vendor\_buy}}, P_{\text{AH}}, C_{\text{craft}})$. Рекурсия защищена от циклов через множество посещенных рецептов.
 
 ## Окружение
 

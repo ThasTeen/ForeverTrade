@@ -13,7 +13,7 @@ window.STATE =
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
   "baseCommit": null,
   "startedAt": "2026-11-03T00:12:46+03:00",
-  "updatedAt": "2026-11-03T01:35:21+03:00",
+  "updatedAt": "2026-11-03T02:02:48+03:00",
   "finishedAt": null,
   "stages": [
     {
@@ -49,22 +49,26 @@ window.STATE =
     },
     {
       "id": "build",
-      "status": "active",
-      "startedAt": "2026-11-03T00:17:23+03:00"
+      "status": "done",
+      "startedAt": "2026-11-03T00:17:23+03:00",
+      "finishedAt": "2026-11-03T01:58:16+03:00"
     },
     {
       "id": "review",
-      "status": "pending"
+      "status": "done",
+      "startedAt": "2026-11-03T01:58:16+03:00",
+      "finishedAt": "2026-11-03T02:02:48+03:00"
     },
     {
       "id": "final",
-      "status": "pending"
+      "status": "active",
+      "startedAt": "2026-11-03T02:02:48+03:00"
     }
   ],
   "requirements": {
     "total": 27,
-    "done": 23,
-    "inTicket": 4,
+    "done": 27,
+    "inTicket": 0,
     "inSpec": 0,
     "placeholder": 0,
     "deferred": 0,
@@ -232,14 +236,20 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "in-progress",
+      "status": "done",
       "retries": 0,
       "repairs": 0,
-      "startedAt": "2026-11-03T01:35:21+03:00"
+      "startedAt": "2026-11-03T01:35:21+03:00",
+      "finishedAt": "2026-11-03T01:58:10+03:00",
+      "tests": {
+        "passed": 196,
+        "failed": 0
+      },
+      "commit": "e47daa0"
     }
   ],
   "tests": {
-    "passed": 193,
+    "passed": 196,
     "failed": 0
   },
   "debt": {
@@ -273,9 +283,13 @@ window.STATE =
     "2026-11-03T01:23:18+03:00",
     "2026-11-03T01:23:22+03:00",
     "2026-11-03T01:35:16+03:00",
-    "2026-11-03T01:35:21+03:00"
+    "2026-11-03T01:35:21+03:00",
+    "2026-11-03T01:58:10+03:00",
+    "2026-11-03T01:58:16+03:00",
+    "2026-11-03T02:02:45+03:00",
+    "2026-11-03T02:02:48+03:00"
   ],
-  "rev": 23,
+  "rev": 27,
   "waiting": null,
   "waits": [],
   "log": [
@@ -445,6 +459,36 @@ window.STATE =
         "05"
       ],
       "act": "start"
+    },
+    {
+      "t": "2026-11-03T01:58:10+03:00",
+      "k": "ticket",
+      "ids": [
+        "05"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 196,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-03T01:58:16+03:00",
+      "k": "stage",
+      "id": "review",
+      "act": "start"
+    },
+    {
+      "t": "2026-11-03T02:02:45+03:00",
+      "k": "add",
+      "key": "report",
+      "n": 1
+    },
+    {
+      "t": "2026-11-03T02:02:48+03:00",
+      "k": "stage",
+      "id": "final",
+      "act": "start"
     }
   ],
   "reqList": [
@@ -561,12 +605,12 @@ window.STATE =
     {
       "id": "R23",
       "text": "«Рекурсивный DAG-крафт (Make-vs-Buy): MatPrice(r) = min(P_vendor_buy, P_ah, C_craft) и расчет полуфабрикатов из базового сырья»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R24",
       "text": "«Дерево промежуточных крафтов в инспекторе Goblin Terminal»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R25",
@@ -576,12 +620,12 @@ window.STATE =
     {
       "id": "R26",
       "text": "«Код и тесты должны писать разные агенты»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R27",
       "text": "«Активируй скилл Ponytail по-настоящему: прочитай .agents/skills/ponytail/SKILL.md и строго следуй правилам из .agents/rules/ponytail.md»",
-      "status": "in-ticket"
+      "status": "done"
     }
   ],
   "gates": {
@@ -597,5 +641,8 @@ window.STATE =
       "problems": 0
     }
   },
-  "result": null
+  "result": null,
+  "report": [
+    "Ветка ca8346e..HEAD одобрена: 196 тестов зеленые, математика Hampel/EWMA, Disenchant, Liquidity Shield и DAG Make-vs-Buy выверена"
+  ]
 }
