@@ -6,7 +6,7 @@ import math
 import os
 import sqlite3
 import time
-from typing import Optional
+from typing import Optional, Any, Union
 
 _OVERRIDES_PATH: str = "forever_overrides.json"
 try:
@@ -797,4 +797,359 @@ def get_zscore_anomalies(
 
 
 get_price_anomalies = get_zscore_anomalies
+
+
+# ---------------------------------------------------------------------------
+# Classic Era Disenchanting & Liquidity Shield
+# ---------------------------------------------------------------------------
+
+_DISENCHANT_TABLES_CACHE: dict = {}
+
+
+def load_disenchant_tables(path: str = "data/disenchant_tables_era.json") -> dict:
+    """Load disenchant tables JSON for Classic Era 1.15 with mtime caching."""
+    global _DISENCHANT_TABLES_CACHE
+    target_path = path
+    if not os.path.exists(target_path):
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        alt_path = os.path.join(base_dir, path)
+        if os.path.exists(alt_path):
+            target_path = alt_path
+        else:
+            return {"uncommon": [], "rare": [], "epic": []}
+    try:
+        mtime = os.path.getmtime(target_path)
+    except OSError:
+        mtime = 0.0
+
+    cached = _DISENCHANT_TABLES_CACHE.get(target_path)
+    if cached and cached.get("mtime") == mtime:
+        return cached.get("data", {})
+
+    try:
+        with open(target_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _DISENCHANT_TABLES_CACHE[target_path] = {"mtime": mtime, "data": data}
+        return data
+    except Exception:
+        if cached:
+            return cached.get("data", {})
+        return {"uncommon": [], "rare": [], "epic": []}
+
+
+_CATALOG_CACHE: dict[int, dict] = {}
+
+
+def _get_catalog_item(item_id: int) -> dict:
+    """Retrieve item metadata from data/items_era_1_15.json and forever_overrides.json."""
+    global _CATALOG_CACHE
+    if not _CATALOG_CACHE:
+        items_path = os.path.join("data", "items_era_1_15.json")
+        if not os.path.exists(items_path):
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            items_path = os.path.join(base_dir, "data", "items_era_1_15.json")
+        if os.path.exists(items_path):
+            try:
+                with open(items_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    for it in data:
+                        _CATALOG_CACHE[int(it["item_id"])] = it
+            except Exception:
+                pass
+
+        ov_path = _OVERRIDES_PATH
+        if not os.path.exists(ov_path):
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            ov_path = os.path.join(base_dir, _OVERRIDES_PATH)
+        if os.path.exists(ov_path):
+            try:
+                with open(ov_path, "r", encoding="utf-8") as f:
+                    ov = json.load(f)
+                    items = ov if isinstance(ov, list) else ov.get("items", ov.get("overrides", []))
+                    for it in items:
+                        _CATALOG_CACHE[int(it["item_id"])] = it
+            except Exception:
+                pass
+    return _CATALOG_CACHE.get(item_id, {})
+
+
+def _parse_intrinsic_liquidity(
+    item_id: int,
+    item_class: Optional[Any] = None,
+    name: Optional[str] = None,
+    quality: Optional[int] = None,
+) -> float:
+    """Calculate intrinsic liquidity L_intrinsic based on item type, quality, and category."""
+    raw_str = str(item_class).strip().lower() if item_class is not None else ""
+
+    cat_item = _get_catalog_item(item_id) if item_id else {}
+    cat_name = (name or cat_item.get("name") or "").lower()
+    cat_quality = quality if quality is not None else cat_item.get("quality")
+    cat_category = str(cat_item.get("category") or "").lower()
+    cat_class_int = cat_item.get("item_class")
+
+    # 1. Waylaid containers / crates (0.95)
+    if (
+        "waylaid" in raw_str or "crate" in raw_str
+        or "waylaid" in cat_category or "crate" in cat_name
+        or "waylaid" in cat_name or (211501 <= item_id <= 211507)
+    ):
+        return 0.95
+
+    # 2. Junk / Trash / Other / Grey (0.10)
+    if any(k in raw_str for k in ("junk", "trash", "мусор", "grey", "gray", "poor", "other", "прочее")) or raw_str == "15":
+        return 0.10
+    if cat_quality == 0 or cat_class_int == 15 or cat_category in ("junk", "trash"):
+        return 0.10
+
+    # 3. Recipes / Patterns / Books (0.20)
+    if any(k in raw_str for k in ("recipe", "pattern", "book", "plans", "schematic", "рецепт", "выкройк", "книг")) or raw_str == "9":
+        return 0.20
+    if cat_class_int == 9 or cat_category in ("recipe", "pattern", "book") or any(k in cat_name for k in ("recipe:", "pattern:", "plans:", "schematic:", "manual:", "book of", "книга")):
+        return 0.20
+
+    # 4. Weapons & Armor:
+    # Green / Uncommon: 0.50
+    # Blue / Purple / Rare / Epic: 0.35
+    is_weapon_or_armor = (
+        any(k in raw_str for k in ("weapon", "armor", "оружи", "брон", "доспех", "shield", "щит"))
+        or raw_str in ("2", "4")
+        or (cat_class_int in (2, 4))
+        or cat_category in ("weapon", "weapons", "armor")
+    )
+    is_blue_purple = (
+        any(k in raw_str for k in ("blue", "purple", "rare", "epic", "синяя", "фиолетовая", "редк", "эпик"))
+        or (cat_quality is not None and cat_quality in (3, 4))
+    )
+    is_green = (
+        any(k in raw_str for k in ("green", "uncommon", "зелен", "необычн"))
+        or (cat_quality is not None and cat_quality == 2)
+    )
+
+    if is_weapon_or_armor:
+        if is_blue_purple:
+            return 0.35
+        if is_green:
+            return 0.50
+        if cat_quality is not None:
+            return 0.35 if cat_quality in (3, 4) else 0.50
+        return 0.50
+
+    if any(k in raw_str for k in ("rare", "epic", "blue", "purple", "синяя", "фиолетовая")):
+        return 0.35
+    if any(k in raw_str for k in ("uncommon", "green", "зеленая")):
+        return 0.50
+
+    # 5. Metals, Cloth, Leather, Herbs, Potions (0.90)
+    is_tier2_material = any(
+        k in raw_str or k in cat_category or k in cat_name
+        for k in (
+            "metal", "ore", "bar", "cloth", "leather", "hide", "herb", "potion", "elixir",
+            "металл", "руда", "слиток", "ткань", "кож", "шкур", "трав", "зель", "эликсир",
+        )
+    )
+    if is_tier2_material:
+        return 0.90
+
+    # 6. Consumables, Trade Goods, Reagents (0.95)
+    is_tier1_consumable_or_tradegoods = any(
+        k in raw_str or k in cat_category
+        for k in (
+            "consumable", "trade goods", "trade_goods", "reagent", "reagents", "raw",
+            "расходник", "сырье", "материал", "реагент"
+        )
+    ) or raw_str in ("0", "7") or cat_class_int in (0, 7)
+    if is_tier1_consumable_or_tradegoods:
+        return 0.95
+
+    if raw_str:
+        return 0.10
+
+    if cat_item:
+        if cat_class_int in (0, 7):
+            return 0.95
+        if cat_class_int in (2, 4):
+            return 0.35 if (cat_quality and cat_quality >= 3) else 0.50
+        if cat_class_int == 9:
+            return 0.20
+        return 0.10
+
+    return 0.10
+
+
+def compute_liquidity_score(
+    item_id: int,
+    history: Optional[list[dict]] = None,
+    item_class: Optional[Any] = None,
+    **kwargs,
+) -> float:
+    """Calculate liquidity score L in [0.01, 1.0] from intrinsic class and observed history."""
+    if item_class is None:
+        item_class = kwargs.get("item_type") or kwargs.get("class")
+
+    l_intrinsic = _parse_intrinsic_liquidity(item_id=item_id, item_class=item_class)
+
+    if not history:
+        return round(float(l_intrinsic), 2)
+
+    n = len(history)
+    if n == 0:
+        return round(float(l_intrinsic), 2)
+
+    freq_score = min(1.0, n / 10.0)
+    has_lots = any(
+        isinstance(e, dict) and any(k in e for k in ("count", "quantity", "lots", "lot_count"))
+        for e in history
+    )
+    if has_lots:
+        lots = [
+            float(e.get("count") or e.get("quantity") or e.get("lots") or e.get("lot_count") or 1)
+            for e in history if isinstance(e, dict)
+        ]
+        avg_lots = (sum(lots) / len(lots)) if lots else 1.0
+        lot_score = max(0.2, min(1.0, avg_lots / 5.0))
+        l_obs = 0.6 * freq_score + 0.4 * lot_score
+    else:
+        l_obs = freq_score
+
+    l_score = round(0.5 * l_obs + 0.5 * l_intrinsic, 2)
+    return max(0.01, min(1.0, l_score))
+
+
+def get_strong_buys(
+    conn: Optional[sqlite3.Connection] = None,
+    window_size: int = 15,
+    z_buy_threshold: float = -1.8,
+    min_samples: int = 6,
+    realm: Optional[str] = None,
+    max_age_hours: Optional[float] = None,
+    min_profit_copper: int = 1,
+    include_traps: bool = True,
+    **kwargs,
+) -> list[dict]:
+    """Retrieve verified STRONG_BUY sniping opportunities protected by Liquidity Shield.
+
+    Applies liquidity penalty:
+      liquidity_penalty = int(deposit * ((1.0 - liquidity) / max(0.01, liquidity)) + (1.0 - liquidity) * 0.10 * buy_price)
+      net_profit = expected_net_revenue - buy_price - liquidity_penalty
+    Signals with liquidity < 0.20 are flagged as ILLIQUID_TRAP (is_illiquid_trap = True).
+    If net_profit <= 0 and liquidity < 0.50, signal is pruned from STRONG_BUY.
+    """
+    history_dict = kwargs.get("history_dict") or {}
+    items_dict = kwargs.get("items_dict") or {}
+
+    if isinstance(conn, list):
+        candidates = conn
+    elif conn is not None:
+        candidates = get_zscore_anomalies(
+            conn=conn,
+            window_size=window_size,
+            z_buy_threshold=z_buy_threshold,
+            min_samples=min_samples,
+            realm=realm,
+            max_age_hours=max_age_hours,
+            min_profit_copper=min_profit_copper,
+        )
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT item_id, name, quality, item_class, category, vendor_sell_price FROM items")
+            for r in cursor.fetchall():
+                items_dict[r[0]] = {
+                    "item_id": r[0],
+                    "name": r[1],
+                    "quality": r[2],
+                    "class": r[3],
+                    "item_class": r[3],
+                    "category": r[4],
+                    "vendor_sell_price": r[5] or 0,
+                }
+        except Exception:
+            pass
+
+        candidate_ids = [c["item_id"] for c in candidates if "item_id" in c]
+        if candidate_ids:
+            placeholders = ",".join("?" for _ in candidate_ids)
+            query_snaps = f"""
+                SELECT item_id, price, timestamp
+                FROM price_snapshots
+                WHERE item_id IN ({placeholders})
+                  AND (? IS NULL OR realm = ?)
+                  AND price > 0
+                ORDER BY timestamp DESC
+            """
+            try:
+                cursor.execute(query_snaps, candidate_ids + [realm, realm])
+                for r in cursor.fetchall():
+                    i_id, pr, ts = r[0], r[1], r[2]
+                    if i_id not in history_dict:
+                        history_dict[i_id] = []
+                    if len(history_dict[i_id]) < window_size:
+                        history_dict[i_id].append({"price": pr, "timestamp": ts})
+            except Exception:
+                pass
+    elif "candidates" in kwargs:
+        candidates = kwargs["candidates"]
+    else:
+        return []
+
+    results = []
+    for cand in candidates:
+        item = dict(cand)
+        item_id = int(item.get("item_id", 0))
+        item_meta = items_dict.get(item_id, {})
+
+        item_class = item.get("class") or item.get("item_class") or item_meta.get("category") or item_meta.get("class") or item_meta.get("item_class")
+        history = history_dict.get(item_id, item.get("history"))
+
+        liquidity = compute_liquidity_score(item_id, history=history, item_class=item_class)
+        item["liquidity"] = liquidity
+        item["liquidity_score"] = liquidity
+
+        is_trap = (liquidity < 0.20)
+        item["is_illiquid_trap"] = is_trap
+        if is_trap:
+            item["signal"] = "ILLIQUID_TRAP"
+        elif item.get("signal") not in ("STRONG_BUY", "STRONG_SELL"):
+            item["signal"] = "STRONG_BUY"
+
+        buy_price = item.get("current_price", item.get("buyout_price", item.get("price", 0)))
+        deposit = int(item.get("deposit") or item.get("deposit_copper") or 0)
+        if deposit <= 0:
+            v_sell = item_meta.get("vendor_sell_price") or item.get("vendor_sell_price") or 0
+            deposit = max(15, int(v_sell * 0.05))
+
+        expected_net_revenue = item.get("expected_revenue", item.get("mean_price", buy_price) * 0.95)
+
+        eff_liq = max(0.01, liquidity)
+        liquidity_penalty = int(deposit * ((1.0 - liquidity) / eff_liq) + (1.0 - liquidity) * 0.10 * buy_price)
+        net_profit = expected_net_revenue - buy_price - liquidity_penalty
+
+        item["deposit"] = deposit
+        item["deposit_copper"] = deposit
+        item["liquidity_penalty"] = liquidity_penalty
+        item["expected_net_profit"] = round(net_profit, 2)
+        item["net_profit"] = round(net_profit, 2)
+        item["profit_copper"] = int(round(net_profit))
+        item["profit"] = round(net_profit, 2)
+
+        if item["signal"] == "STRONG_BUY":
+            if net_profit <= 0 and liquidity < 0.50:
+                continue
+            if net_profit < min_profit_copper:
+                continue
+            results.append(item)
+        elif item["signal"] == "ILLIQUID_TRAP":
+            if include_traps:
+                results.append(item)
+        else:
+            results.append(item)
+
+    results.sort(
+        key=lambda a: (
+            0 if a.get("signal") == "STRONG_BUY" else (1 if a.get("signal") == "ILLIQUID_TRAP" else 2),
+            -a.get("net_profit", 0)
+        )
+    )
+    return results
+
 

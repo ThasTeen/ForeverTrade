@@ -1,0 +1,32 @@
+{
+  "uncommon": [
+    {"min_level": 5, "max_level": 15, "dust_id": 10940, "essence_id": 10938, "shard_id": null, "armor_dust_chance": 80, "armor_essence_chance": 20, "weapon_dust_chance": 20, "weapon_essence_chance": 80, "dust_min": 1, "dust_max": 2, "essence_min": 1, "essence_max": 2},
+    {"min_level": 16, "max_level": 20, "dust_id": 10940, "essence_id": 10939, "shard_id": 10978, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 20, "weapon_essence_chance": 75, "dust_min": 2, "dust_max": 3, "essence_min": 1, "essence_max": 2},
+    {"min_level": 21, "max_level": 25, "dust_id": 10940, "essence_id": 10998, "shard_id": 10978, "armor_dust_chance": 75, "armor_essence_chance": 15, "weapon_dust_chance": 15, "weapon_essence_chance": 75, "dust_min": 4, "dust_max": 6, "essence_min": 1, "essence_max": 2, "forever_weapon_essence_id": 10939},
+    {"min_level": 26, "max_level": 30, "dust_id": 11083, "essence_id": 11082, "shard_id": 11084, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 20, "weapon_essence_chance": 75, "dust_min": 1, "dust_max": 2, "essence_min": 1, "essence_max": 2, "forever_weapon_essence_id": 10939},
+    {"min_level": 31, "max_level": 35, "dust_id": 11083, "essence_id": 11134, "shard_id": 11138, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 20, "weapon_essence_chance": 75, "dust_min": 2, "dust_max": 5, "essence_min": 1, "essence_max": 2},
+    {"min_level": 36, "max_level": 40, "dust_id": 11137, "essence_id": 11135, "shard_id": 11139, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 20, "weapon_essence_chance": 75, "dust_min": 1, "dust_max": 2, "essence_min": 1, "essence_max": 2},
+    {"min_level": 41, "max_level": 45, "dust_id": 11137, "essence_id": 11174, "shard_id": 11177, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 20, "weapon_essence_chance": 75, "dust_min": 2, "dust_max": 5, "essence_min": 1, "essence_max": 2},
+    {"min_level": 46, "max_level": 50, "dust_id": 11176, "essence_id": 11175, "shard_id": 11178, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 20, "weapon_essence_chance": 75, "dust_min": 1, "dust_max": 2, "essence_min": 1, "essence_max": 2},
+    {"min_level": 51, "max_level": 55, "dust_id": 11176, "essence_id": 16202, "shard_id": 14343, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 22, "weapon_essence_chance": 75, "dust_min": 2, "dust_max": 5, "essence_min": 1, "essence_max": 2},
+    {"min_level": 56, "max_level": 60, "dust_id": 16204, "essence_id": 16203, "shard_id": 14344, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 22, "weapon_essence_chance": 75, "dust_min": 1, "dust_max": 2, "essence_min": 1, "essence_max": 2},
+    {"min_level": 61, "max_level": 65, "dust_id": 16204, "essence_id": 16203, "shard_id": 14344, "armor_dust_chance": 75, "armor_essence_chance": 20, "weapon_dust_chance": 22, "weapon_essence_chance": 75, "dust_min": 2, "dust_max": 5, "essence_min": 2, "essence_max": 3}
+  ],
+  "rare": [
+    {"min_level": 1, "max_level": 25, "shard_id": 10978, "chance": 100},
+    {"min_level": 26, "max_level": 30, "shard_id": 11084, "chance": 100},
+    {"min_level": 31, "max_level": 35, "shard_id": 11138, "chance": 100},
+    {"min_level": 36, "max_level": 40, "shard_id": 11139, "chance": 100},
+    {"min_level": 41, "max_level": 45, "shard_id": 11177, "chance": 100},
+    {"min_level": 46, "max_level": 50, "shard_id": 11178, "chance": 100},
+    {"min_level": 51, "max_level": 55, "shard_id": 14343, "chance": 100},
+    {"min_level": 56, "max_level": 80, "shard_id": 14344, "nexus_id": 20725, "shard_chance": 99.5, "nexus_chance": 0.5}
+  ],
+  "epic": [
+    {"min_level": 40, "max_level": 45, "shard_id": 11177, "chance": 100, "min_qty": 2, "max_qty": 4},
+    {"min_level": 46, "max_level": 50, "shard_id": 11178, "chance": 100, "min_qty": 2, "max_qty": 4},
+    {"min_level": 51, "max_level": 55, "shard_id": 14343, "chance": 100, "min_qty": 2, "max_qty": 4},
+    {"min_level": 56, "max_level": 60, "shard_id": 20725, "chance": 100, "min_qty": 1, "max_qty": 1},
+    {"min_level": 61, "max_level": 88, "shard_id": 20725, "chance": 100, "min_qty": 1, "max_qty": 2}
+  ]
+}

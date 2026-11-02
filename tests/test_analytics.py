@@ -23,6 +23,9 @@ from src.analytics import (
     get_waylaid_crate_arbitrage,
     check_and_reload_overrides,
     reload_overrides,
+    load_disenchant_tables,
+    compute_liquidity_score,
+    get_strong_buys,
     VENDOR_REAGENTS_WHITELIST,
 )
 
@@ -2114,5 +2117,238 @@ def test_overrides_reload_retry_on_corrupted_json(memory_db, tmp_path):
     assert row_fixed is not None
     assert row_fixed["name"] == "Waylaid Supplies: Heavy Iron"
     assert row_fixed["reward_copper"] == 6000
+
+
+# ---------------------------------------------------------------------------
+# Ticket 01: Disenchant Tables and Liquidity Shield
+# ---------------------------------------------------------------------------
+
+
+def test_load_disenchant_tables():
+    """Verify load_disenchant_tables returns correct structure and Forever weapon rule (10939)."""
+    data = load_disenchant_tables()
+    assert isinstance(data, dict)
+    assert set(data.keys()) >= {"uncommon", "rare", "epic"}
+
+    # Must contain records in all quality tiers
+    assert len(data["uncommon"]) > 0
+    assert len(data["rare"]) > 0
+    assert len(data["epic"]) > 0
+
+    # Rule forever for weapons: Greater Magic Essence (item_id 10939)
+    # Check that uncommon tables contain the forever weapon essence override
+    forever_weapon_rows = [
+        row for row in data["uncommon"]
+        if row.get("forever_weapon_essence_id") == 10939
+    ]
+    assert len(forever_weapon_rows) >= 2, (
+        f"Expected at least 2 uncommon brackets with forever_weapon_essence_id == 10939, got {len(forever_weapon_rows)}"
+    )
+    for row in forever_weapon_rows:
+        assert 16 <= row["min_level"] <= 30
+        assert 16 <= row["max_level"] <= 30
+        assert row["forever_weapon_essence_id"] == 10939
+
+    # Level 16-20 tier naturally yields 10939 as essence
+    tier_16_20 = [r for r in data["uncommon"] if r.get("min_level") == 16 and r.get("max_level") == 20]
+    assert len(tier_16_20) == 1
+    assert tier_16_20[0]["essence_id"] == 10939
+    assert tier_16_20[0]["weapon_essence_chance"] == 75
+
+    # Caching verification and missing file fallback
+    cached = load_disenchant_tables()
+    assert cached is data
+
+    fallback = load_disenchant_tables("non_existent_tables_path.json")
+    assert fallback == {"uncommon": [], "rare": [], "epic": []}
+
+
+def test_compute_liquidity_score():
+    """Verify liquidity score computation: consumables >= 0.90, recipes <= 0.25, range [0.01, 1.0]."""
+    # 1. Consumables and Trade Goods give score >= 0.90
+    score_consumable = compute_liquidity_score(item_id=101, item_class="Consumable")
+    assert score_consumable >= 0.90, f"Expected Consumable liquidity >= 0.90, got {score_consumable}"
+
+    score_trade_goods = compute_liquidity_score(item_id=102, item_class="Trade Goods")
+    assert score_trade_goods >= 0.90, f"Expected Trade Goods liquidity >= 0.90, got {score_trade_goods}"
+
+    # Also check other consumable/reagent aliases
+    assert compute_liquidity_score(item_id=103, item_class="trade_goods") >= 0.90
+    assert compute_liquidity_score(item_id=104, item_class="reagent") >= 0.90
+
+    # 2. Recipes give score <= 0.25
+    score_recipe = compute_liquidity_score(item_id=201, item_class="Recipe")
+    assert score_recipe <= 0.25, f"Expected Recipe liquidity <= 0.25, got {score_recipe}"
+
+    assert compute_liquidity_score(item_id=202, item_class="Pattern") <= 0.25
+    assert compute_liquidity_score(item_id=203, item_class="Plans") <= 0.25
+    assert compute_liquidity_score(item_id=204, item_class="Schematic") <= 0.25
+
+    # 3. Behavior with history and without history
+    # Without history: returns intrinsic score
+    recipe_no_hist = compute_liquidity_score(item_id=201, history=None, item_class="Recipe")
+    assert recipe_no_hist == 0.20
+
+    # With empty history: also returns intrinsic score
+    recipe_empty_hist = compute_liquidity_score(item_id=201, history=[], item_class="Recipe")
+    assert recipe_empty_hist == 0.20
+
+    # With active history: blended observed liquidity increases the score
+    history_active = [{"price": 100, "count": 5} for _ in range(10)]
+    recipe_with_hist = compute_liquidity_score(item_id=201, history=history_active, item_class="Recipe")
+    assert recipe_with_hist > recipe_no_hist
+    assert recipe_with_hist == 0.60
+
+    # 4. Range guarantee [0.01, 1.0] across all item types and histories
+    test_cases = [
+        (301, "Junk", None),
+        (302, "Junk", [{"price": 10}]),
+        (303, "Recipe", [{"price": 50, "count": 1}]),
+        (304, "Armor", history_active),
+        (305, "Consumable", history_active),
+        (306, "UnknownClass123", None),
+    ]
+    for i_id, cls_name, hist in test_cases:
+        score = compute_liquidity_score(item_id=i_id, history=hist, item_class=cls_name)
+        assert 0.01 <= score <= 1.0, f"Score {score} out of bounds [0.01, 1.0] for item {i_id} ({cls_name})"
+
+
+def test_get_strong_buys_liquidity_penalty_and_trap(memory_db):
+    """Verify get_strong_buys applies liquidity penalty, flags illiquid traps (<0.20), and prunes <=0 profit when L<0.50."""
+    # 1. Candidate with L < 0.20 (Junk / Trash item)
+    # Intrinsic liquidity for Junk is 0.10 (< 0.20).
+    trap_candidate = {
+        "item_id": 9501,
+        "name": "Ruined Leather Scrap",
+        "item_class": "Junk",
+        "current_price": 500,
+        "mean_price": 1200,
+        "expected_revenue": 1140,  # 1200 * 0.95
+        "deposit": 50,
+        "signal": "STRONG_BUY",
+    }
+
+    # Liquid candidate with L >= 0.50 (Consumable, L = 0.95)
+    liquid_candidate = {
+        "item_id": 9502,
+        "name": "Major Healing Potion",
+        "item_class": "Consumable",
+        "current_price": 500,
+        "mean_price": 1200,
+        "expected_revenue": 1140,
+        "deposit": 50,
+        "signal": "STRONG_BUY",
+    }
+
+    # Marginal Recipe candidate with L = 0.20 (< 0.50):
+    # Nominal profit before penalty is 1050 - 1000 = 50 > 0.
+    # Liquidity penalty is deposit * (0.8/0.2) + 0.8 * 0.1 * 1000 = 100 * 4 + 80 = 480.
+    # Net profit after penalty = 1050 - 1000 - 480 = -430 <= 0.
+    # Must be PRUNED!
+    pruned_recipe_candidate = {
+        "item_id": 9503,
+        "name": "Recipe: Minor Agility",
+        "item_class": "Recipe",
+        "current_price": 1000,
+        "mean_price": 1105,
+        "expected_revenue": 1050,
+        "deposit": 100,
+        "signal": "STRONG_BUY",
+    }
+
+    # Highly profitable Recipe with L = 0.20 (< 0.50):
+    # Nominal profit before penalty is 2850 - 1000 = 1850.
+    # Penalty is 480. Net profit = 1850 - 480 = 1370 > 0.
+    # Must NOT be pruned.
+    profitable_recipe_candidate = {
+        "item_id": 9504,
+        "name": "Recipe: Lionheart Helm",
+        "item_class": "Recipe",
+        "current_price": 1000,
+        "mean_price": 3000,
+        "expected_revenue": 2850,
+        "deposit": 100,
+        "signal": "STRONG_BUY",
+    }
+
+    candidates = [
+        trap_candidate,
+        liquid_candidate,
+        pruned_recipe_candidate,
+        profitable_recipe_candidate,
+    ]
+
+    # Run get_strong_buys with include_traps=True
+    results_with_traps = get_strong_buys(candidates=candidates, include_traps=True)
+
+    # 1. Check trap flagging: item 9501 has L = 0.10 < 0.20 -> is_illiquid_trap = True, signal = ILLIQUID_TRAP
+    trap_res = next((r for r in results_with_traps if r["item_id"] == 9501), None)
+    assert trap_res is not None
+    assert trap_res["liquidity"] < 0.20
+    assert trap_res["is_illiquid_trap"] is True
+    assert trap_res["signal"] == "ILLIQUID_TRAP"
+
+    # 2. Check liquidity penalty reduces expected_net_profit
+    # For liquid item 9502 (L = 0.95):
+    liquid_res = next((r for r in results_with_traps if r["item_id"] == 9502), None)
+    assert liquid_res is not None
+    assert liquid_res["liquidity"] >= 0.90
+    assert liquid_res["is_illiquid_trap"] is False
+    assert liquid_res["signal"] == "STRONG_BUY"
+    # Nominal profit before penalty: 1140 - 500 = 640
+    # Penalty: int(50 * (0.05 / 0.95) + 0.05 * 0.10 * 500) = int(2.63 + 2.5) = 5
+    # expected_net_profit: 640 - 5 = 635
+    assert liquid_res["liquidity_penalty"] == 5
+    assert liquid_res["expected_net_profit"] == 635.0
+    assert liquid_res["expected_net_profit"] < (1140 - 500)
+
+    # 3. Check pruned item: 9503 had nominal profit > 0, but after penalty net profit <= 0 and L < 0.50
+    pruned_res = [r for r in results_with_traps if r["item_id"] == 9503]
+    assert len(pruned_res) == 0, "Item 9503 should be pruned because net_profit <= 0 and liquidity < 0.50"
+
+    # 4. Check profitable recipe 9504: L < 0.50 but net_profit > 0 -> retained
+    prof_recipe_res = next((r for r in results_with_traps if r["item_id"] == 9504), None)
+    assert prof_recipe_res is not None
+    assert prof_recipe_res["liquidity"] == 0.20
+    assert prof_recipe_res["is_illiquid_trap"] is False
+    assert prof_recipe_res["signal"] == "STRONG_BUY"
+    assert prof_recipe_res["liquidity_penalty"] == 480
+    assert prof_recipe_res["expected_net_profit"] == 1370.0
+
+    # 5. When include_traps=False, trap item 9501 is completely omitted
+    results_no_traps = get_strong_buys(candidates=candidates, include_traps=False)
+    assert not any(r["item_id"] == 9501 for r in results_no_traps)
+    assert any(r["item_id"] == 9502 for r in results_no_traps)
+    assert any(r["item_id"] == 9504 for r in results_no_traps)
+
+    # 6. Database integration test with real SQLite memory_db
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [
+                (9601, "Illiquid Grey Item", 0, "Junk", "Junk", 100),
+                (9602, "Liquid Consumable Item", 1, "Consumable", "Consumable", 100),
+            ]
+        )
+        base_t = 20000
+        snaps = []
+        for i in range(5):
+            snaps.append((9601, "Everlook", 1000, base_t + i))
+            snaps.append((9602, "Everlook", 1000, base_t + i))
+        snaps.append((9601, "Everlook", 100, base_t + 10))
+        snaps.append((9602, "Everlook", 100, base_t + 10))
+        memory_db.executemany(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            snaps
+        )
+
+    db_results = get_strong_buys(conn=memory_db, realm="Everlook", min_samples=6)
+    db_9602 = next((r for r in db_results if r["item_id"] == 9602), None)
+    assert db_9602 is not None
+    assert db_9602["signal"] == "STRONG_BUY"
+    assert db_9602["liquidity"] >= 0.70
+    assert db_9602["is_illiquid_trap"] is False
+
 
 
