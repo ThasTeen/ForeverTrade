@@ -478,6 +478,121 @@ def test_crafting_margins_missing_reagents_and_waylaid_crates(memory_db):
     assert r41["waylaid_crate"]["reward_copper"] == 50000
 
 
+def test_crafting_margins_real_graph_smelting_and_gear(memory_db):
+    """Verify crafting margins calculations on the real Classic Era 1.15 recipe graph and sub-50 gear."""
+    load_catalog(memory_db)
+    load_recipes(memory_db)
+
+    now = int(time.time())
+
+    # Snapshot prices for:
+    # 1. Smelt Bronze (recipe 2659, yield 2.0):
+    #    Copper Bar (2840): 50 copper
+    #    Tin Bar (3576): 70 copper
+    #    Bronze Bar (2841): 150 copper
+    # 2. Rough Bronze Cuirass (recipe 2670, yield 1.0):
+    #    Bronze Bar (2841): 150 copper (7 bars needed)
+    #    Rough Bronze Cuirass (2866): 2500 copper
+    # 3. Nightscape Shoulders (recipe 10516, yield 1.0):
+    #    Thick Leather (4304): 200 copper (8 needed)
+    #    Mageweave Cloth (4338): 150 copper (6 needed)
+    #    Silken Thread (4291): vendor reagent, vendor_buy_price = 500 copper (3 needed)
+    #    Nightscape Shoulders (8192): 5500 copper
+    snapshots = [
+        (2840, "Everlook", 50, now),
+        (3576, "Everlook", 70, now),
+        (2841, "Everlook", 150, now),
+        (2866, "Everlook", 2500, now),
+        (4304, "Everlook", 200, now),
+        (4338, "Everlook", 150, now),
+        (8192, "Everlook", 5500, now),
+    ]
+    memory_db.executemany(
+        "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+        snapshots,
+    )
+
+    # 1. Baseline without character perks (default)
+    results = get_crafting_margins(
+        memory_db,
+        realm="Everlook",
+        min_roi=0.1,
+        has_bartering=False,
+        has_master_chef=False,
+    )
+    by_recipe = {r["recipe_id"]: r for r in results}
+
+    # Verify Smelt Bronze
+    assert 2659 in by_recipe
+    smelt = by_recipe[2659]
+    assert smelt["name"] == "Smelt Bronze"
+    assert smelt["profession"] == "Smelting"
+    assert smelt["crafted_item_id"] == 2841
+    assert smelt["yield"] == 2.0
+    assert smelt["expected_yield"] == 2.0
+    # Cost: 1x Copper Bar (50) + 1x Tin Bar (70) = 120.0
+    assert smelt["cost"] == 120.0
+    # Revenue: 150 * 0.95 * 2.0 = 285.0
+    assert smelt["revenue"] == 285.0
+    # Deposit: Bronze Bar v_sell is 100, 5% is 5 < 15 -> deposit = 15
+    assert smelt["deposit"] == 15
+    # Profit: 285.0 - 120.0 - 15 = 150.0
+    assert smelt["profit"] == 150.0
+    assert smelt["roi"] == 1.25
+    assert smelt["roi_percent"] == 125.0
+
+    # Verify Rough Bronze Cuirass
+    assert 2670 in by_recipe
+    cuirass = by_recipe[2670]
+    assert cuirass["name"] == "Rough Bronze Cuirass"
+    assert cuirass["profession"] == "Blacksmithing"
+    assert cuirass["crafted_item_id"] == 2866
+    assert cuirass["yield"] == 1.0
+    # Cost: 7x Bronze Bar (150) = 1050.0
+    assert cuirass["cost"] == 1050.0
+    # Revenue: 2500 * 0.95 * 1.0 = 2375.0
+    assert cuirass["revenue"] == 2375.0
+    # Deposit: Cuirass v_sell is 603, 5% is 30.15 -> deposit = 30
+    assert cuirass["deposit"] == 30
+    # Profit: 2375.0 - 1050.0 - 30 = 1295.0
+    assert cuirass["profit"] == 1295.0
+    assert cuirass["roi"] == 1.2333
+    assert cuirass["roi_percent"] == 123.33
+
+    # Verify Nightscape Shoulders
+    assert 10516 in by_recipe
+    shoulders = by_recipe[10516]
+    assert shoulders["name"] == "Nightscape Shoulders"
+    assert shoulders["profession"] == "Leatherworking"
+    assert shoulders["crafted_item_id"] == 8192
+    assert shoulders["yield"] == 1.0
+    # Cost: 8x Thick Leather (200) + 6x Mageweave (150) + 3x Silken Thread (500 vendor price) = 1600 + 900 + 1500 = 4000.0
+    assert shoulders["cost"] == 4000.0
+    # Revenue: 5500 * 0.95 * 1.0 = 5225.0
+    assert shoulders["revenue"] == 5225.0
+    # Deposit: v_sell is 4782, 5% is 239.1 -> deposit = 239
+    assert shoulders["deposit"] == 239
+    # Profit: 5225.0 - 4000.0 - 239 = 986.0
+    assert shoulders["profit"] == 986.0
+    assert shoulders["roi"] == 0.2465
+    assert shoulders["roi_percent"] == 24.65
+
+    # 2. With Bartering perk (5% discount on Silken Thread from NPC: 500 * 0.95 = 475)
+    results_barter = get_crafting_margins(
+        memory_db,
+        realm="Everlook",
+        min_roi=0.1,
+        has_bartering=True,
+    )
+    by_recipe_barter = {r["recipe_id"]: r for r in results_barter}
+    shoulders_barter = by_recipe_barter[10516]
+    # Cost with Bartering: 1600 + 900 + 3 * 475 = 3925.0
+    assert shoulders_barter["cost"] == 3925.0
+    # Profit with Bartering: 5225.0 - 3925.0 - 239 = 1061.0
+    assert shoulders_barter["profit"] == 1061.0
+    assert shoulders_barter["roi"] == 0.2703
+
+
 # ---------------------------------------------------------------------------
 # R11: Statistical Sniping (Z-score) Tests
 # ---------------------------------------------------------------------------

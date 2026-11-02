@@ -253,6 +253,151 @@ def test_load_recipes_five_professions(memory_db):
         assert reg["quantity"] > 0
 
 
+def test_load_recipes_era_full_graph_and_gear(memory_db):
+    """Verify loading full Classic Era 1.15 recipe graph across all 7 professions and sub-50 gear."""
+    load_catalog(memory_db)
+    total_loaded = load_recipes(memory_db, recipes_path="data/recipes_era_1_15.json")
+    assert total_loaded >= 980
+
+    cursor = memory_db.cursor()
+
+    # 1. Verify all 7 professions are present
+    cursor.execute("SELECT profession, count(*) FROM recipes GROUP BY profession;")
+    prof_counts = dict(cursor.fetchall())
+    expected_professions = {
+        "Blacksmithing",
+        "Leatherworking",
+        "Tailoring",
+        "Engineering",
+        "Alchemy",
+        "Cooking",
+        "Smelting",
+    }
+    assert set(prof_counts.keys()) == expected_professions
+
+    # 2. Recipe counts per profession: >= 10 in every profession, smelting has 12, major gear professions > 150
+    for prof in expected_professions:
+        assert prof_counts[prof] >= 10, f"{prof} count too low: {prof_counts[prof]}"
+
+    assert prof_counts["Smelting"] == 12
+    assert prof_counts["Blacksmithing"] > 150
+    assert prof_counts["Leatherworking"] > 150
+    assert prof_counts["Tailoring"] > 150
+    assert prof_counts["Engineering"] >= 100
+    assert prof_counts["Alchemy"] >= 100
+    assert prof_counts["Cooking"] >= 50
+
+    # 3. Verify key sub-50 gear and smelting recipes exist
+    # Blacksmithing: Bronze Cuirass (crafted 2866), Green Iron Hauberk (recipe 3508 / crafted 3844)
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE crafted_item_id = 2866;")
+    bronze_cuirass = cursor.fetchone()
+    assert bronze_cuirass is not None
+    assert bronze_cuirass["profession"] == "Blacksmithing"
+    assert "Bronze Cuirass" in bronze_cuirass["name"]
+
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE name = 'Green Iron Hauberk';")
+    green_iron = cursor.fetchone()
+    assert green_iron is not None
+    assert green_iron["profession"] == "Blacksmithing"
+    assert green_iron["crafted_item_id"] == 3844
+
+    # Leatherworking: Nightscape Shoulders (crafted 8192), Turtle Scale Breastplate (recipe 10511, crafted 8189), Turtle Scale Leggings (crafted 8185)
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE crafted_item_id = 8192;")
+    nightscape = cursor.fetchone()
+    assert nightscape is not None
+    assert nightscape["profession"] == "Leatherworking"
+    assert nightscape["name"] == "Nightscape Shoulders"
+
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE name = 'Turtle Scale Breastplate';")
+    turtle_chest = cursor.fetchone()
+    assert turtle_chest is not None
+    assert turtle_chest["profession"] == "Leatherworking"
+
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE crafted_item_id = 8185;")
+    turtle_legs = cursor.fetchone()
+    assert turtle_legs is not None
+    assert turtle_legs["profession"] == "Leatherworking"
+
+    # Tailoring: Shadoweave Robe (crafted 10004), Red Mageweave Pants (recipe 12060, crafted 10009), Mooncloth (crafted 14342)
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE crafted_item_id = 10004;")
+    shadoweave = cursor.fetchone()
+    assert shadoweave is not None
+    assert shadoweave["profession"] == "Tailoring"
+    assert shadoweave["name"] == "Shadoweave Robe"
+
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE name = 'Red Mageweave Pants';")
+    red_mageweave = cursor.fetchone()
+    assert red_mageweave is not None
+    assert red_mageweave["profession"] == "Tailoring"
+
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE crafted_item_id = 14342;")
+    mooncloth = cursor.fetchone()
+    assert mooncloth is not None
+    assert mooncloth["profession"] == "Tailoring"
+    assert mooncloth["name"] == "Mooncloth"
+
+    # Engineering: Green Tinted Goggles (recipe 3956, crafted 4385) and Craftsman's Monocle (crafted 4393)
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE name = 'Green Tinted Goggles';")
+    goggles = cursor.fetchone()
+    assert goggles is not None
+    assert goggles["profession"] == "Engineering"
+
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE crafted_item_id = 4393;")
+    monocle = cursor.fetchone()
+    assert monocle is not None
+    assert monocle["profession"] == "Engineering"
+
+    # Smelting: Smelt Bronze (crafted 2841, yield 2.0), Smelt Iron (crafted 3575), Smelt Mithril (crafted 3860)
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, yield, profession FROM recipes WHERE recipe_id = 2659;")
+    smelt_bronze = cursor.fetchone()
+    assert smelt_bronze is not None
+    assert smelt_bronze["name"] == "Smelt Bronze"
+    assert smelt_bronze["profession"] == "Smelting"
+    assert smelt_bronze["crafted_item_id"] == 2841
+    assert smelt_bronze["yield"] == 2.0
+
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE crafted_item_id = 3575 AND profession = 'Smelting';")
+    smelt_iron = cursor.fetchone()
+    assert smelt_iron is not None
+    assert smelt_iron["name"] == "Smelt Iron"
+
+    cursor.execute("SELECT recipe_id, name, crafted_item_id, profession FROM recipes WHERE crafted_item_id = 3860 AND profession = 'Smelting';")
+    smelt_mithril = cursor.fetchone()
+    assert smelt_mithril is not None
+    assert smelt_mithril["name"] == "Smelt Mithril"
+
+    # 4. Reagents linkage and Foreign Key integrity
+    cursor.execute("""
+        SELECT r.recipe_id, count(rr.reagent_item_id) as rc
+        FROM recipes r
+        LEFT JOIN recipe_reagents rr ON r.recipe_id = rr.recipe_id
+        GROUP BY r.recipe_id
+        HAVING rc == 0;
+    """)
+    recipes_without_reagents = cursor.fetchall()
+    assert len(recipes_without_reagents) == 0
+
+    # Key gear recipes specific reagent verification
+    # Rough Bronze Cuirass (2670) requires Bronze Bar (2841) count=7
+    cursor.execute("SELECT reagent_item_id, count FROM recipe_reagents WHERE recipe_id = 2670;")
+    cuirass_reagents = dict(cursor.fetchall())
+    assert cuirass_reagents == {2841: 7}
+
+    # Nightscape Shoulders (10516) requires Thick Leather (4304) x8, Mageweave Cloth (4338) x6, Silken Thread (4291) x3
+    cursor.execute("SELECT reagent_item_id, count FROM recipe_reagents WHERE recipe_id = 10516;")
+    shoulders_reagents = dict(cursor.fetchall())
+    assert shoulders_reagents == {4304: 8, 4338: 6, 4291: 3}
+
+    # Smelt Bronze (2659) requires Copper Bar (2840) x1, Tin Bar (3576) x1
+    cursor.execute("SELECT reagent_item_id, count FROM recipe_reagents WHERE recipe_id = 2659;")
+    bronze_reagents = dict(cursor.fetchall())
+    assert bronze_reagents == {2840: 1, 3576: 1}
+
+    # SQLite PRAGMA foreign_key_check must return 0 violations across the entire database
+    fk_violations = memory_db.execute("PRAGMA foreign_key_check;").fetchall()
+    assert len(fk_violations) == 0
+
+
 def test_prune_snapshots(memory_db):
     """Verify removal of price snapshots older than max_days while keeping recent snapshots."""
     # Insert dummy items to satisfy foreign key constraints

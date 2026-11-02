@@ -13,4 +13,5 @@ market.db
 *.db
 *.db-wal
 *.db-shm
+data/cache/
 portal.html

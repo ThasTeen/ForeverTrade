@@ -341,10 +341,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
             pass
 
 
-def init_db(db_path: str = "market.db") -> sqlite3.Connection:
+def init_db(db_path: str = "market.db", load_data: bool = False) -> sqlite3.Connection:
     """Initialize SQLite database with required tables and indexes."""
     conn = get_connection(db_path)
     init_schema(conn)
+    if load_data:
+        load_catalog(conn)
+        load_recipes(conn)
     return conn
 
 
@@ -548,9 +551,52 @@ def load_catalog(
     return cursor.fetchone()[0]
 
 
-def load_recipes(conn: sqlite3.Connection) -> int:
-    """Load recipe graph for 5 professions (Engineering, Tailoring, Leatherworking, Alchemy, Cooking)."""
-    recipes_data = [
+R45_RECIPE_COMPAT_ALIASES = [
+    {
+        "recipe_id": 3004,
+        "name": "Medium Armor Kit",
+        "profession": "Leatherworking",
+        "crafted_item_id": 2313,
+        "yield": 1.0,
+        "reagents": [{"item_id": 2319, "count": 4}, {"item_id": 2320, "count": 1}],
+    },
+    {
+        "recipe_id": 4004,
+        "name": "Lesser Healing Potion",
+        "profession": "Alchemy",
+        "crafted_item_id": 858,
+        "yield": 1.0,
+        "reagents": [{"item_id": 118, "count": 1}, {"item_id": 2450, "count": 1}],
+    },
+    {
+        "recipe_id": 4005,
+        "name": "Healing Potion",
+        "profession": "Alchemy",
+        "crafted_item_id": 929,
+        "yield": 1.0,
+        "reagents": [{"item_id": 2453, "count": 1}, {"item_id": 2450, "count": 1}, {"item_id": 3372, "count": 1}],
+    },
+]
+
+
+def load_recipes(conn: sqlite3.Connection, recipes_path: str = "data/recipes_era_1_15.json") -> int:
+    """Load recipe graph for crafting professions from JSON catalog or builtin fallback."""
+    recipes_data = None
+    if recipes_path and os.path.exists(recipes_path):
+        try:
+            with open(recipes_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list) and len(loaded) > 0:
+                recipes_data = list(loaded)
+                existing_ids = {int(r["recipe_id"]) for r in recipes_data}
+                for alias in R45_RECIPE_COMPAT_ALIASES:
+                    if alias["recipe_id"] not in existing_ids:
+                        recipes_data.append(alias)
+        except Exception:
+            pass
+
+    if not recipes_data:
+        recipes_data = [
         # --- Engineering ---
         {
             "recipe_id": 1001,
@@ -962,8 +1008,45 @@ def load_recipes(conn: sqlite3.Connection) -> int:
         }
     ]
 
+    # Foreign key safety: ensure crafted_item_id and reagent_item_id exist in items table
+    items_to_ensure = []
+    for r in recipes_data:
+        c_id = int(r["crafted_item_id"])
+        c_name = str(r.get("name", f"Item {c_id}"))
+        c_ru = r.get("name_ru")
+        loc_c = ITEM_LOCALIZATION.get(c_id, {})
+        items_to_ensure.append((
+            c_id,
+            loc_c.get("en") or c_name,
+            c_ru or loc_c.get("ru")
+        ))
+        for reg in r.get("reagents", []):
+            if isinstance(reg, dict):
+                reg_id = int(reg["item_id"])
+            else:
+                reg_id = int(reg[0])
+            loc_r = ITEM_LOCALIZATION.get(reg_id, {})
+            items_to_ensure.append((
+                reg_id,
+                loc_r.get("en") or f"Item {reg_id}",
+                loc_r.get("ru")
+            ))
+
     with conn:
+        conn.executemany("""
+            INSERT OR IGNORE INTO items (item_id, name, name_ru)
+            VALUES (?, ?, ?)
+        """, items_to_ensure)
+
         for r in recipes_data:
+            recipe_id = int(r["recipe_id"])
+            name = str(r["name"])
+            profession = str(r["profession"])
+            crafted_item_id = int(r["crafted_item_id"])
+            yield_val = float(r.get("yield", 1.0))
+            yield_min = int(r.get("yield_min", max(1, int(yield_val))))
+            yield_max = int(r.get("yield_max", max(yield_min, int(yield_val))))
+
             conn.execute("""
                 INSERT INTO recipes (
                     recipe_id, name, profession, crafted_item_id, yield, yield_min, yield_max
@@ -976,18 +1059,25 @@ def load_recipes(conn: sqlite3.Connection) -> int:
                     yield_min = excluded.yield_min,
                     yield_max = excluded.yield_max
             """, (
-                r["recipe_id"],
-                r["name"],
-                r["profession"],
-                r["crafted_item_id"],
-                float(r["yield"]),
-                int(r.get("yield_min", 1)),
-                int(r.get("yield_max", 1))
+                recipe_id,
+                name,
+                profession,
+                crafted_item_id,
+                yield_val,
+                yield_min,
+                yield_max
             ))
 
-            conn.execute("DELETE FROM recipe_reagents WHERE recipe_id = ?", (r["recipe_id"],))
+            conn.execute("DELETE FROM recipe_reagents WHERE recipe_id = ?", (recipe_id,))
 
-            for reagent_id, count in r["reagents"]:
+            for reg in r.get("reagents", []):
+                if isinstance(reg, dict):
+                    reagent_id = int(reg["item_id"])
+                    count = int(reg.get("count", 1))
+                else:
+                    reagent_id = int(reg[0])
+                    count = int(reg[1])
+
                 conn.execute("""
                     INSERT INTO recipe_reagents (
                         recipe_id, reagent_item_id, reagent_id, count, quantity
@@ -997,11 +1087,11 @@ def load_recipes(conn: sqlite3.Connection) -> int:
                         count = excluded.count,
                         quantity = excluded.quantity
                 """, (
-                    r["recipe_id"],
-                    int(reagent_id),
-                    int(reagent_id),
-                    int(count),
-                    int(count)
+                    recipe_id,
+                    reagent_id,
+                    reagent_id,
+                    count,
+                    count
                 ))
 
     cursor = conn.cursor()
