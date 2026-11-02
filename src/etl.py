@@ -14,6 +14,8 @@ from watchdog.observers import Observer
 
 from src.database import init_db
 
+SQLITE_MAX_INT = 9223372036854775807
+
 # Configure structured logging to watcher.log
 LOG_FILE = "watcher.log"
 logger = logging.getLogger("watcher")
@@ -39,7 +41,7 @@ def normalize_item_id(raw_id: Any) -> Optional[int]:
     if raw_id is None or isinstance(raw_id, bool):
         return None
     if isinstance(raw_id, int):
-        return raw_id if raw_id > 0 else None
+        return raw_id if 1 <= raw_id <= SQLITE_MAX_INT else None
 
     try:
         s = str(raw_id).strip()
@@ -64,9 +66,9 @@ def normalize_item_id(raw_id: Any) -> Optional[int]:
                 break
         try:
             val = int(token)
-            if val > 0:
+            if 1 <= val <= SQLITE_MAX_INT:
                 return val
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             continue
     return None
 
@@ -189,7 +191,71 @@ def _compute_file_meta(path: str) -> Tuple[int, str]:
 _IN_MEMORY_ETL_META: Dict[Tuple[int, str], Dict[str, Any]] = {}
 
 
-def parse_auctionator_data(file_path: str) -> dict:
+def _get_recorded_source_mtime(
+    conn: Optional[sqlite3.Connection] = None,
+    db_path: Optional[str] = None,
+    realm: Optional[str] = None,
+) -> Optional[int]:
+    """Retrieve recorded source_mtime from _etl_metadata for the target realm if available."""
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            if realm:
+                cur.execute(
+                    "SELECT source_mtime FROM _etl_metadata WHERE realm = ?", (realm,)
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    return int(row[0])
+            else:
+                cur.execute("SELECT MAX(source_mtime) FROM _etl_metadata")
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    return int(row[0])
+        except (sqlite3.Error, OverflowError):
+            pass
+
+    if db_path and os.path.isfile(db_path):
+        try:
+            with sqlite3.connect(db_path) as temp_conn:
+                cur = temp_conn.cursor()
+                if realm:
+                    cur.execute(
+                        "SELECT source_mtime FROM _etl_metadata WHERE realm = ?", (realm,)
+                    )
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        return int(row[0])
+                else:
+                    cur.execute("SELECT MAX(source_mtime) FROM _etl_metadata")
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        return int(row[0])
+        except (sqlite3.Error, OverflowError):
+            pass
+
+    if realm:
+        for (_, r), meta in _IN_MEMORY_ETL_META.items():
+            if r == realm and meta.get("source_mtime") is not None:
+                return int(meta["source_mtime"])
+    else:
+        mtimes = [
+            int(meta["source_mtime"])
+            for meta in _IN_MEMORY_ETL_META.values()
+            if meta.get("source_mtime") is not None
+        ]
+        if mtimes:
+            return max(mtimes)
+
+    return None
+
+
+def parse_auctionator_data(
+    file_path: str,
+    conn: Optional[sqlite3.Connection] = None,
+    realm: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> dict:
     """Safely parse AUCTIONATOR_PRICE_DATABASE via luadata with automatic fallback to .bak."""
     if file_path.endswith(".bak") and os.path.isfile(file_path):
         bak_mtime = int(os.path.getmtime(file_path))
@@ -200,6 +266,18 @@ def parse_auctionator_data(file_path: str) -> dict:
                 int(time.time() - bak_mtime),
             )
             raise ValueError(f"Backup file '{file_path}' is older than 2 hours")
+        rec_mtime = _get_recorded_source_mtime(conn=conn, db_path=db_path, realm=realm)
+        if rec_mtime is not None and bak_mtime <= rec_mtime:
+            logger.warning(
+                "Backup file '%s' has mtime %d <= recorded source_mtime %d for realm '%s'. Discarding old backup.",
+                file_path,
+                bak_mtime,
+                rec_mtime,
+                realm or "all",
+            )
+            raise ValueError(
+                f"Backup file '{file_path}' has mtime {bak_mtime} <= recorded source_mtime {rec_mtime}"
+            )
         data = _parse_single_lua_file(file_path)
         if isinstance(data, dict):
             mtime, content_hash = _compute_file_meta(file_path)
@@ -236,6 +314,16 @@ def parse_auctionator_data(file_path: str) -> dict:
                     "Backup file '%s' is older than 2 hours (age: %d seconds). Discarding to prevent time-series poisoning.",
                     bak_path,
                     int(time.time() - bak_mtime),
+                )
+                continue
+            rec_mtime = _get_recorded_source_mtime(conn=conn, db_path=db_path, realm=realm)
+            if rec_mtime is not None and bak_mtime <= rec_mtime:
+                logger.warning(
+                    "Backup file '%s' has mtime %d <= recorded source_mtime %d for realm '%s'. Discarding old backup.",
+                    bak_path,
+                    bak_mtime,
+                    rec_mtime,
+                    realm or "all",
                 )
                 continue
             try:
@@ -283,7 +371,7 @@ def ingest_price_snapshot(
                 if r[1] == "main" and r[2]:
                     resolved_db_path = r[2]
                     break
-        except Exception:
+        except (sqlite3.Error, OverflowError):
             pass
     if not resolved_db_path:
         resolved_db_path = getattr(conn, "_db_path", None)
@@ -368,166 +456,197 @@ def ingest_price_snapshot(
         return 0
 
     cur = conn.cursor()
-    last_hash: Optional[str] = None
-    last_mtime: Optional[int] = None
     try:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS _etl_metadata (
-                realm TEXT PRIMARY KEY,
-                content_hash TEXT,
-                source_mtime INTEGER,
-                last_imported_time INTEGER
-            )
-            """
-        )
-        cur.execute(
-            "SELECT content_hash, source_mtime FROM _etl_metadata WHERE realm = ?",
-            (target_realm,),
-        )
-        row = cur.fetchone()
-        if row:
-            last_hash, last_mtime = row[0], row[1]
-    except sqlite3.Error:
+        if getattr(conn, "in_transaction", None) is True:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+    except (sqlite3.Error, OverflowError):
         pass
 
-    mem_key = (id(conn), target_realm)
-    if last_hash is None and last_mtime is None and mem_key in _IN_MEMORY_ETL_META:
-        last_hash = _IN_MEMORY_ETL_META[mem_key].get("content_hash")
-        last_mtime = _IN_MEMORY_ETL_META[mem_key].get("source_mtime")
-
-    # Query latest snapshot for each item in the realm for deduplication
-    existing_latest: Dict[int, Tuple[int, int]] = {}
     try:
-        cur.execute(
-            "SELECT item_id, price, MAX(timestamp) FROM price_snapshots WHERE realm = ? GROUP BY item_id",
-            (target_realm,),
-        )
-        for row in cur.fetchall():
-            existing_latest[int(row[0])] = (int(row[1]), int(row[2]))
-    except sqlite3.Error as e:
-        logger.warning("Could not query existing snapshots for deduplication: %s", e)
+        last_hash: Optional[str] = None
+        last_mtime: Optional[int] = None
+        try:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS _etl_metadata (
+                    realm TEXT PRIMARY KEY,
+                    content_hash TEXT,
+                    source_mtime INTEGER,
+                    last_imported_time INTEGER
+                )
+                """
+            )
+            cur.execute(
+                "SELECT content_hash, source_mtime FROM _etl_metadata WHERE realm = ?",
+                (target_realm,),
+            )
+            row = cur.fetchone()
+            if row:
+                last_hash, last_mtime = row[0], row[1]
+        except (sqlite3.Error, OverflowError):
+            pass
 
-    batch_to_insert: List[Tuple[int, str, int, int]] = []
+        mem_key = (id(conn), target_realm)
+        if last_hash is None and last_mtime is None and mem_key in _IN_MEMORY_ETL_META:
+            last_hash = _IN_MEMORY_ETL_META[mem_key].get("content_hash")
+            last_mtime = _IN_MEMORY_ETL_META[mem_key].get("source_mtime")
 
-    for raw_key, val in realm_data.items():
-        if raw_key in ("_source_mtime", "_content_hash"):
-            continue
-        item_id = normalize_item_id(raw_key)
-        if item_id is None and isinstance(val, dict):
-            item_id = normalize_item_id(val.get("id") or val.get("item_id"))
-        if item_id is None:
-            continue
+        # Query latest snapshot for each item in the realm for deduplication
+        existing_latest: Dict[int, Tuple[int, int]] = {}
+        try:
+            cur.execute(
+                "SELECT item_id, price, MAX(timestamp) FROM price_snapshots WHERE realm = ? GROUP BY item_id",
+                (target_realm,),
+            )
+            for row in cur.fetchall():
+                existing_latest[int(row[0])] = (int(row[1]), int(row[2]))
+        except (sqlite3.Error, OverflowError) as e:
+            logger.warning("Could not query existing snapshots for deduplication: %s", e)
 
-        price: Optional[int] = None
-        if isinstance(val, dict):
-            # 1. Auctionator v341: buyout price in val["m"]
-            if "m" in val and val["m"] is not None:
-                m_val = val["m"]
-                if not isinstance(m_val, bool):
-                    try:
-                        price = int(m_val)
-                    except (ValueError, TypeError):
-                        pass
+        batch_to_insert: List[Tuple[int, str, int, int]] = []
 
-            # 2. Fallback to legacy fields mr / price
-            if price is None and "mr" in val and val["mr"] is not None:
-                mr_val = val["mr"]
-                if not isinstance(mr_val, bool):
-                    try:
-                        price = int(mr_val)
-                    except (ValueError, TypeError):
-                        pass
-            if price is None and "price" in val and val["price"] is not None:
-                p_val = val["price"]
-                if not isinstance(p_val, bool):
-                    try:
-                        price = int(p_val)
-                    except (ValueError, TypeError):
-                        pass
+        for raw_key, val in realm_data.items():
+            if raw_key in ("_source_mtime", "_content_hash"):
+                continue
+            item_id = normalize_item_id(raw_key)
+            if item_id is None and isinstance(val, dict):
+                item_id = normalize_item_id(val.get("id") or val.get("item_id"))
+            if item_id is None or not (1 <= item_id <= SQLITE_MAX_INT):
+                continue
 
-            # 3. Extremums and historical tables (nested h/l or flat H/L)
-            if price is None:
-                for k, v in val.items():
-                    k_str = str(k)
-                    k_lower = k_str.lower()
-                    if k_lower in ("l", "h") and isinstance(v, dict):
-                        for sub_k, sub_v in v.items():
-                            if not isinstance(sub_v, bool):
-                                try:
-                                    price = int(sub_v)
-                                    break
-                                except (ValueError, TypeError):
-                                    pass
-                        if price is not None:
-                            break
-                    elif k_lower in ("l", "h") and isinstance(v, (list, tuple)) and v:
-                        for sub_v in v:
-                            if not isinstance(sub_v, bool):
-                                try:
-                                    price = int(sub_v)
-                                    break
-                                except (ValueError, TypeError):
-                                    pass
-                        if price is not None:
-                            break
-                    elif (k_str.startswith("L") or k_str.startswith("H")) and isinstance(
-                        v, (int, float, str)
-                    ):
-                        if not isinstance(v, bool):
-                            try:
-                                price = int(v)
+            price: Optional[int] = None
+            if isinstance(val, dict):
+                # 1. Auctionator v341: buyout price in val["m"]
+                if "m" in val and val["m"] is not None:
+                    m_val = val["m"]
+                    if not isinstance(m_val, bool):
+                        try:
+                            p = int(m_val)
+                            if 1 <= p <= SQLITE_MAX_INT:
+                                price = p
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+
+                # 2. Fallback to legacy fields mr / price
+                if price is None and "mr" in val and val["mr"] is not None:
+                    mr_val = val["mr"]
+                    if not isinstance(mr_val, bool):
+                        try:
+                            p = int(mr_val)
+                            if 1 <= p <= SQLITE_MAX_INT:
+                                price = p
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+                if price is None and "price" in val and val["price"] is not None:
+                    p_val = val["price"]
+                    if not isinstance(p_val, bool):
+                        try:
+                            p = int(p_val)
+                            if 1 <= p <= SQLITE_MAX_INT:
+                                price = p
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+
+                # 3. Extremums and historical tables (nested h/l or flat H/L)
+                if price is None:
+                    for k, v in val.items():
+                        k_str = str(k)
+                        k_lower = k_str.lower()
+                        if k_lower in ("l", "h") and isinstance(v, dict):
+                            latest_ts: Optional[int] = None
+                            latest_price: Optional[int] = None
+                            for sub_k, sub_v in v.items():
+                                if not isinstance(sub_v, bool):
+                                    try:
+                                        p = int(sub_v)
+                                        ts = int(float(sub_k))
+                                        if 1 <= p <= SQLITE_MAX_INT:
+                                            if latest_ts is None or ts > latest_ts:
+                                                latest_ts = ts
+                                                latest_price = p
+                                    except (ValueError, TypeError, OverflowError):
+                                        pass
+                            if latest_price is not None:
+                                price = latest_price
                                 break
-                            except (ValueError, TypeError):
-                                pass
-        elif isinstance(val, (int, float)) and not isinstance(val, bool):
-            price = int(val)
-        elif isinstance(val, str) and val.isdigit():
-            price = int(val)
+                        elif k_lower in ("l", "h") and isinstance(v, (list, tuple)) and v:
+                            for sub_v in v:
+                                if not isinstance(sub_v, bool):
+                                    try:
+                                        p = int(sub_v)
+                                        if 1 <= p <= SQLITE_MAX_INT:
+                                            price = p
+                                            break
+                                    except (ValueError, TypeError, OverflowError):
+                                        pass
+                            if price is not None:
+                                break
+                        elif (k_str.startswith("L") or k_str.startswith("H")) and isinstance(
+                            v, (int, float, str)
+                        ):
+                            if not isinstance(v, bool):
+                                try:
+                                    p = int(v)
+                                    if 1 <= p <= SQLITE_MAX_INT:
+                                        price = p
+                                        break
+                                except (ValueError, TypeError, OverflowError):
+                                    pass
+            elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                try:
+                    p = int(val)
+                    if 1 <= p <= SQLITE_MAX_INT:
+                        price = p
+                except (ValueError, TypeError, OverflowError):
+                    pass
+            elif isinstance(val, str) and val.isdigit():
+                try:
+                    p = int(val)
+                    if 1 <= p <= SQLITE_MAX_INT:
+                        price = p
+                except (ValueError, TypeError, OverflowError):
+                    pass
 
-        if isinstance(price, bool):
-            price = None
+            if price is None or not (1 <= price <= SQLITE_MAX_INT):
+                continue
 
-        if price is None or price <= 0:
-            continue
+            # Deduplication: identical price within dedupe window or unchanged file cache is skipped
+            if item_id in existing_latest:
+                prev_price, prev_time = existing_latest[item_id]
+                if prev_price == price:
+                    if (
+                        (source_mtime is not None and prev_time == source_mtime)
+                        or (content_hash is not None and last_hash is not None and content_hash == last_hash)
+                        or (source_mtime is not None and last_mtime is not None and source_mtime <= last_mtime)
+                        or abs(now - prev_time) < window_seconds
+                    ):
+                        continue
 
-        # Deduplication: identical price within dedupe window or unchanged file cache is skipped
-        if item_id in existing_latest:
-            prev_price, prev_time = existing_latest[item_id]
-            if prev_price == price:
-                if (
-                    (source_mtime is not None and prev_time == source_mtime)
-                    or (content_hash is not None and last_hash is not None and content_hash == last_hash)
-                    or (source_mtime is not None and last_mtime is not None and source_mtime == last_mtime)
-                    or abs(now - prev_time) < window_seconds
-                ):
-                    continue
+            existing_latest[item_id] = (price, now)
+            batch_to_insert.append((item_id, target_realm, price, now))
 
-        existing_latest[item_id] = (price, now)
-        batch_to_insert.append((item_id, target_realm, price, now))
-
-    if not batch_to_insert:
-        if content_hash is not None or source_mtime is not None:
-            _IN_MEMORY_ETL_META[mem_key] = {
-                "content_hash": content_hash,
-                "source_mtime": source_mtime,
-                "last_imported_time": now,
-            }
-            try:
-                with conn:
+        if not batch_to_insert:
+            if content_hash is not None or source_mtime is not None:
+                _IN_MEMORY_ETL_META[mem_key] = {
+                    "content_hash": content_hash,
+                    "source_mtime": source_mtime,
+                    "last_imported_time": now,
+                }
+                try:
                     cur.execute(
                         "INSERT OR REPLACE INTO _etl_metadata (realm, content_hash, source_mtime, last_imported_time) VALUES (?, ?, ?, ?)",
                         (target_realm, content_hash, source_mtime, now),
                     )
-            except sqlite3.Error:
-                pass
-        logger.info(
-            "Ingested 0 price snapshots for realm '%s' (all lots deduplicated or empty)",
-            target_realm,
-        )
-        return 0
+                except (sqlite3.Error, OverflowError):
+                    pass
+            conn.commit()
+            logger.info(
+                "Ingested 0 price snapshots for realm '%s' (all lots deduplicated or empty)",
+                target_realm,
+            )
+            return 0
 
-    try:
         # Ensure foreign key constraints succeed if items table exists
         items_to_resolve: List[int] = []
         try:
@@ -550,7 +669,7 @@ def ingest_price_snapshot(
                 "INSERT OR IGNORE INTO items (item_id, name) VALUES (?, ?)",
                 [(item[0], f"Item {item[0]}") for item in batch_to_insert],
             )
-        except sqlite3.Error:
+        except (sqlite3.Error, OverflowError):
             pass
 
         # Background Wowhead resolution for unresolved items if db_path is available
@@ -564,33 +683,43 @@ def ingest_price_snapshot(
             except Exception:
                 pass
 
-        with conn:
-            cur.executemany(
-                "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
-                batch_to_insert,
-            )
-            if content_hash is not None or source_mtime is not None:
-                _IN_MEMORY_ETL_META[mem_key] = {
-                    "content_hash": content_hash,
-                    "source_mtime": source_mtime,
-                    "last_imported_time": now,
-                }
-                try:
-                    cur.execute(
-                        "INSERT OR REPLACE INTO _etl_metadata (realm, content_hash, source_mtime, last_imported_time) VALUES (?, ?, ?, ?)",
-                        (target_realm, content_hash, source_mtime, now),
-                    )
-                except sqlite3.Error:
-                    pass
+        cur.executemany(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, ?, ?, ?)",
+            batch_to_insert,
+        )
+        if content_hash is not None or source_mtime is not None:
+            _IN_MEMORY_ETL_META[mem_key] = {
+                "content_hash": content_hash,
+                "source_mtime": source_mtime,
+                "last_imported_time": now,
+            }
+            try:
+                cur.execute(
+                    "INSERT OR REPLACE INTO _etl_metadata (realm, content_hash, source_mtime, last_imported_time) VALUES (?, ?, ?, ?)",
+                    (target_realm, content_hash, source_mtime, now),
+                )
+            except (sqlite3.Error, OverflowError):
+                pass
 
+        conn.commit()
         inserted_count = len(batch_to_insert)
         logger.info("Ingested %d price snapshots for realm '%s'", inserted_count, target_realm)
         return inserted_count
-    except sqlite3.Error as e:
+    except (sqlite3.Error, OverflowError) as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         logger.error(
             "Failed to insert price snapshots for realm '%s': %s", target_realm, e, exc_info=True
         )
         return 0
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
 
 
 class AuctionatorEventHandler(FileSystemEventHandler):
@@ -675,13 +804,18 @@ class AuctionatorEventHandler(FileSystemEventHandler):
                 if _ends_with_brace(file_path):
                     break
 
-        return True
+        return _ends_with_brace(file_path)
 
     def _trigger_etl(self, file_path: str):
         with self._lock:
             target_file = file_path if os.path.isfile(file_path) else self.full_target_path
 
-            self._wait_for_file_ready(target_file)
+            if not self._wait_for_file_ready(target_file):
+                logger.warning(
+                    "Watcher detected incomplete or unstable file '%s' (missing closing brace). Skipping ETL.",
+                    target_file,
+                )
+                return
 
             now = time.time()
             self._last_processed = now
@@ -690,7 +824,7 @@ class AuctionatorEventHandler(FileSystemEventHandler):
                 "Watcher detected update in '%s', starting ETL ingestion...", target_file
             )
             try:
-                raw_data = parse_auctionator_data(target_file)
+                raw_data = parse_auctionator_data(target_file, db_path=self.db_path, realm=self.realm)
                 src_mtime = raw_data.get("_source_mtime") if isinstance(raw_data, dict) else None
                 conn = init_db(self.db_path)
                 try:
@@ -701,8 +835,6 @@ class AuctionatorEventHandler(FileSystemEventHandler):
                         source_mtime=src_mtime,
                         db_path=self.db_path,
                     )
-                    if isinstance(raw_data, dict) and "_discovered_realm" in raw_data:
-                        self.realm = raw_data["_discovered_realm"]
                     logger.info(
                         "Watcher ETL finished: %d snapshots ingested from '%s'",
                         count,
@@ -719,6 +851,9 @@ class AuctionatorEventHandler(FileSystemEventHandler):
                 logger.error(
                     "Watcher ETL failed for '%s': %s", target_file, e, exc_info=True
                 )
+
+
+WatcherHandler = AuctionatorEventHandler
 
 
 def start_watcher(

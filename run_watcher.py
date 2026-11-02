@@ -94,7 +94,7 @@ def initial_ingest(conn: sqlite3.Connection, watch_dir: str, realm: str) -> int:
         return 0
 
     try:
-        raw_data = parse_auctionator_data(lua_path)
+        raw_data = parse_auctionator_data(lua_path, conn=conn, realm=realm)
     except Exception as e:
         print(f"[!] Initial ingest failed from '{lua_path}': {e}")
         logger.error("Initial ingest failed from '%s': %s", lua_path, e, exc_info=True)
@@ -152,6 +152,8 @@ def main(argv=None):
                         help="Enable Master Chef perk (1.1x yield on cooking recipes)")
     parser.add_argument("--max-age-hours", type=float, default=48.0,
                         help="Filter market prices older than max age in hours")
+    parser.add_argument("--run-once", action="store_true", default=False,
+                        help="Run initial ETL and generate portal once, then exit")
     args = parser.parse_args(argv)
 
     print(f"[*] Initializing Forever Trade database: {args.db}")
@@ -198,6 +200,9 @@ def main(argv=None):
         notify_high_value_arbitrage(arb)
     finally:
         conn.close()
+
+    if args.run_once:
+        return
 
     task_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()

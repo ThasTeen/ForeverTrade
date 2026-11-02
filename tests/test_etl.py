@@ -1,5 +1,7 @@
 """Tests for File Watcher and ETL Pipeline (Ticket 02, R05, R06, R07, R08, R48, R51)."""
 import argparse
+import subprocess
+import sys
 import unittest.mock
 from run_watcher import initial_ingest, main as watcher_main
 
@@ -102,6 +104,13 @@ class TestNormalizeItemId:
         assert normalize_item_id("unknown:format") is None
         assert normalize_item_id("") is None
         assert normalize_item_id(None) is None
+
+    def test_normalize_sqlite_integer_bounds(self):
+        """Verify item_id exceeding signed 64-bit int max is rejected safely (Audit §17)."""
+        assert normalize_item_id(9223372036854775807) == 9223372036854775807
+        assert normalize_item_id(9223372036854775808) is None
+        assert normalize_item_id("9223372036854775808") is None
+        assert normalize_item_id("9223372036854775808:0:0") is None
 
 
 class TestParseAuctionatorData:
@@ -299,6 +308,56 @@ class TestParseAuctionatorData:
         assert isinstance(data, dict)
         assert data.get("_source_mtime") == expected_bak_mtime
         assert data.get("_content_hash") == expected_bak_hash
+
+    def test_parse_older_bak_discarded_when_mtime_le_recorded_source_mtime(self, tmp_path):
+        """Verify an older .bak file (mtime <= last imported mtime) is discarded to prevent rollback (Audit §4)."""
+        db_file = str(tmp_path / "test_bak.db")
+        conn = init_db(db_file)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _etl_metadata (
+                realm TEXT PRIMARY KEY,
+                content_hash TEXT,
+                source_mtime INTEGER,
+                last_imported_time INTEGER
+            )
+            """
+        )
+        cur.execute(
+            "INSERT INTO _etl_metadata (realm, content_hash, source_mtime, last_imported_time) VALUES (?, ?, ?, ?)",
+            ("Everlook", "hash_t2000", 2000, 2000),
+        )
+        conn.commit()
+
+        primary_file = tmp_path / "Auctionator.lua"
+        primary_file.write_text("corrupted primary content {{{", encoding="utf-8")
+
+        bak_file = tmp_path / "Auctionator.lua.bak"
+        bak_file.write_text(
+            'AUCTIONATOR_PRICE_DATABASE = { ["Everlook"] = { ["2589"] = { ["m"] = 500 } } }',
+            encoding="utf-8",
+        )
+        now = int(time.time())
+        # Record source_mtime = now - 100
+        cur.execute(
+            "UPDATE _etl_metadata SET source_mtime = ?, last_imported_time = ? WHERE realm = ?",
+            (now - 100, now - 100, "Everlook"),
+        )
+        conn.commit()
+
+        # Set backup mtime to now - 200 (within 2h window, but older than recorded now - 100)
+        os.utime(bak_file, (now - 200, now - 200))
+
+        # Fallback to older backup must be rejected and raise exception
+        with pytest.raises(Exception):
+            parse_auctionator_data(str(primary_file), conn=conn, realm="Everlook")
+
+        # Direct parse of older backup file must raise ValueError
+        with pytest.raises(ValueError) as exc_info:
+            parse_auctionator_data(str(bak_file), conn=conn, realm="Everlook")
+        assert "recorded source_mtime" in str(exc_info.value)
+        conn.close()
 
 
 class TestIngestPriceSnapshot:
@@ -677,6 +736,131 @@ class TestIngestPriceSnapshot:
         rows = cur.fetchall()
         assert len(rows) == 2
 
+    def test_ingest_historical_price_picks_highest_timestamp_unsorted(self, memory_db):
+        """Verify ingest_price_snapshot selects the price for the latest timestamp in unsorted h/l history (Audit §7)."""
+        raw_data = {
+            "Everlook": {
+                # Nested 'h' history with reverse order timestamps: {"1700000000": 780, "1700003600": 900}
+                "2589": {
+                    "h": {
+                        "1700000000": 780,
+                        "1700003600": 900,
+                    }
+                },
+                # Nested 'l' history with unsorted timestamps
+                "1205": {
+                    "l": {
+                        "1700001000": 200,
+                        "1700009999": 350,
+                        "1700005000": 300,
+                    }
+                },
+            }
+        }
+
+        count = ingest_price_snapshot(memory_db, raw_data, realm="Everlook", current_time=1000)
+        assert count == 2
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT item_id, price FROM price_snapshots WHERE realm = 'Everlook' ORDER BY item_id")
+        rows = dict(cur.fetchall())
+
+        assert rows[2589] == 900  # highest timestamp 1700003600 picks 900, not 780
+        assert rows[1205] == 350  # highest timestamp 1700009999 picks 350
+
+    def test_ingest_sqlite_integer_bounds_overflow_error_handled_safely(self, memory_db):
+        """Verify ingest_price_snapshot safely discards item_id or price >= 9223372036854775808 without OverflowError (Audit §17)."""
+        overflow_val = 9223372036854775808  # 2^63, exceeds SQLite signed 64-bit int max
+        raw_data = {
+            "Everlook": {
+                # Overflow item_id (string & numeric)
+                "9223372036854775808": {"m": 500},
+                overflow_val: {"m": 500},
+                # Overflow price in 'm'
+                "2589": {"m": overflow_val},
+                # Overflow price as direct scalar
+                "1205": overflow_val,
+                # Overflow price in 'mr'
+                "774": {"mr": overflow_val},
+                # Overflow price in 'price'
+                "888": {"price": overflow_val},
+                # Overflow price in nested 'h'
+                "999": {"h": {"1700000000": overflow_val}},
+                # Overflow price in nested 'l'
+                "1000": {"l": {"1700000000": overflow_val}},
+                # Valid normal item to verify batch ingestion continues safely
+                "3858": {"m": 1200},
+            }
+        }
+
+        # Must not raise OverflowError or crash
+        count = ingest_price_snapshot(memory_db, raw_data, realm="Everlook", current_time=1000)
+        assert count == 1
+
+        cur = memory_db.cursor()
+        cur.execute("SELECT item_id, price FROM price_snapshots WHERE realm = 'Everlook'")
+        rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == 3858
+        assert rows[0][1] == 1200
+
+    def test_atomic_deduplication_with_begin_immediate_concurrent(self, tmp_path):
+        """Verify concurrent ingestion with BEGIN IMMEDIATE ensures atomicity and no duplicate snapshots (Audit §18)."""
+        db_file = str(tmp_path / "concurrent_market.db")
+        init_db(db_file).close()
+
+        raw_data = {
+            "_content_hash": "hash_concurrent_test_begin_immediate",
+            "_source_mtime": 1700000000,
+            "Everlook": {
+                "2589": {"m": 1500},
+                "1205": {"m": 320},
+                "3858": {"m": 450},
+            },
+        }
+
+        results = []
+        barrier = threading.Barrier(2)
+
+        def worker():
+            barrier.wait()
+            conn = sqlite3.connect(db_file, timeout=15.0)
+            try:
+                inserted = ingest_price_snapshot(
+                    conn,
+                    raw_data,
+                    realm="Everlook",
+                    current_time=1700000000,
+                    db_path=db_file,
+                )
+                results.append(inserted)
+            finally:
+                conn.close()
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10.0)
+        t2.join(timeout=10.0)
+
+        assert len(results) == 2
+        # One thread should insert 3 items, the second should be deduplicated and insert 0 items
+        assert sorted(results) == [0, 3]
+
+        # Verify exact snapshot count in database: exactly 3 rows, no duplicate snapshots
+        verify_conn = sqlite3.connect(db_file)
+        cur = verify_conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM price_snapshots WHERE realm = 'Everlook'")
+        total_snapshots = cur.fetchone()[0]
+        cur.execute("SELECT item_id, COUNT(*) FROM price_snapshots WHERE realm = 'Everlook' GROUP BY item_id")
+        per_item_counts = cur.fetchall()
+        verify_conn.close()
+
+        assert total_snapshots == 3
+        for item_id, count in per_item_counts:
+            assert count == 1, f"Item {item_id} has duplicate snapshot count {count}"
+
 
 class TestWatcherEngine:
     """Tests for file system watcher and event handling (R05)."""
@@ -994,6 +1178,55 @@ class TestWatcherEngine:
         finally:
             t.join()
 
+    def test_wait_for_file_ready_incomplete_file_returns_false(self, tmp_path):
+        """Verify _wait_for_file_ready returns False when trailing closing brace is missing (Audit §4)."""
+        test_file = tmp_path / "IncompleteAuctionator.lua"
+        test_file.write_text(
+            'AUCTIONATOR_PRICE_DATABASE = {\n  ["Everlook"] = {\n    ["2589"] = { ["mr"] = 1500\n',
+            encoding="utf-8",
+        )
+
+        handler = AuctionatorEventHandler(
+            target_filename="IncompleteAuctionator.lua",
+            full_target_path=str(test_file),
+            db_path=str(tmp_path / "market.db"),
+            realm="Everlook",
+            debounce_seconds=0.01,
+        )
+        ready = handler._wait_for_file_ready(str(test_file))
+        assert ready is False
+
+    def test_realm_discovery_isolation_preserves_handler_realm(self, tmp_path):
+        """Verify realm auto-discovery does not mutate handler.realm on AuctionatorEventHandler (Audit §5)."""
+        watch_dir = tmp_path / "SavedVariables"
+        watch_dir.mkdir()
+        target_file = watch_dir / "Auctionator.lua"
+        db_path = str(tmp_path / "market.db")
+        init_db(db_path).close()
+
+        handler = AuctionatorEventHandler(
+            target_filename="Auctionator.lua",
+            full_target_path=str(target_file),
+            db_path=db_path,
+            realm="AllianceRealm",
+            debounce_seconds=0.01,
+        )
+
+        lua_content = (
+            'AUCTIONATOR_PRICE_DATABASE = {\n'
+            '  ["HordeRealm"] = {\n'
+            '    ["2589:0:0:0:0"] = { ["mr"] = 7777 }\n'
+            '  }\n'
+            '}\n'
+        )
+        target_file.write_text(lua_content, encoding="utf-8")
+
+        event = FileModifiedEvent(str(target_file))
+        handler.on_modified(event)
+
+        # Handler's configured realm must remain untouched
+        assert handler.realm == "AllianceRealm"
+
 
 class TestInitialIngestAndCLI:
     """Tests for initial database ingestion, realm validation, and CLI configuration (R51)."""
@@ -1190,6 +1423,50 @@ class TestInitialIngestAndCLI:
         assert parsed.watch_dir == custom_dir
         assert parsed.db == "custom.db"
         assert parsed.dashboard_out == "custom_portal.html"
+
+    def test_cli_run_once_argument_and_execution(self, tmp_path):
+        """Verify --run-once CLI flag exists, executes without unrecognized arguments, and exits with code 0 (Audit §16)."""
+        # 1. Subprocess check with --run-once and --help
+        res_help = subprocess.run(
+            [sys.executable, "run_watcher.py", "--run-once", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert res_help.returncode == 0
+        assert "unrecognized arguments" not in res_help.stderr.lower()
+        assert "--run-once" in res_help.stdout
+
+        # 2. Main argument parsing check
+        captured_args = []
+        orig_parse_args = argparse.ArgumentParser.parse_args
+
+        def intercept_parse_args(parser_self, *args, **kwargs):
+            res = orig_parse_args(parser_self, *args, **kwargs)
+            captured_args.append(res)
+            raise StopIteration("cli_intercepted")
+
+        with unittest.mock.patch("argparse.ArgumentParser.parse_args", intercept_parse_args):
+            with pytest.raises(StopIteration, match="cli_intercepted"):
+                watcher_main(["--run-once"])
+
+        assert len(captured_args) == 1
+        assert captured_args[0].run_once is True
+
+        # 3. Execution check: watcher_main with --run-once exits immediately without starting watcher observer
+        db_file = str(tmp_path / "cli_run_once.db")
+        portal_file = str(tmp_path / "portal.html")
+        mock_advice = {"title": "Test Plan", "summary": "Test Summary", "actions": []}
+        with unittest.mock.patch("run_watcher.start_watcher") as mock_watcher, \
+             unittest.mock.patch("run_watcher.generate_market_advice", return_value=mock_advice):
+            watcher_main([
+                "--run-once",
+                "--watch-dir", str(tmp_path),
+                "--db", db_file,
+                "--dashboard-out", portal_file,
+                "--realm", "Everlook",
+            ])
+            mock_watcher.assert_not_called()
 
 
 class TestWowheadFetcherAndResolver:
