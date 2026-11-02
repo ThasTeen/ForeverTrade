@@ -24,6 +24,14 @@ class RobustHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=DIRECTORY, **kwargs)
 
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            pass
+        except Exception as e:
+            log(f"Handler exception: {e}")
+
     def end_headers(self):
         # Disable caching for live autopilot state and html
         if self.path.endswith("state.js") or self.path.endswith("dashboard.html"):
@@ -39,6 +47,12 @@ class RobustHandler(http.server.SimpleHTTPRequestHandler):
 class ReusableThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc_type, exc_val, _ = sys.exc_info()
+        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            return
+        log(f"Server handle_error from {client_address}: {exc_val}")
 
 def write_pid(port):
     try:
