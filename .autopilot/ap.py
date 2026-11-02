@@ -518,7 +518,7 @@ def is_ours(cmd):
     c = cmd.replace("\\", "/")
     c = c.lower() if WIN else c
     return ((bool(re.search(r"-m\s+http\.server\b", c)) and bool(_OURS.search(c)))
-            or ("serve_permanent.py" in c))
+            or ("serve_permanent.py" in c and _norm(A).lower() in c.lower()))
 
 
 def kill(pid):

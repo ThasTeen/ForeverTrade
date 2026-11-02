@@ -147,7 +147,11 @@ def build_compact_context(
     3. Top-3 raw materials experiencing severe price drops (Z <= -1.8, STRONG_BUY).
     """
     # 1. Top-3 vendor arbitrage
-    vendor_arbitrage_raw = get_vendor_arbitrage(conn, min_profit_copper=50, realm=realm)
+    vendor_arbitrage_raw = kwargs.get("vendor_arbitrage")
+    if vendor_arbitrage_raw is None:
+        vendor_arbitrage_raw = get_vendor_arbitrage(
+            conn, min_profit_copper=50, realm=realm, max_age_hours=kwargs.get("max_age_hours")
+        )
     top_vendor = []
     for item in vendor_arbitrage_raw[:3]:
         buyout = _safe_int(item.get("buyout_price") if item.get("buyout_price") is not None else item.get("price"), 0)
@@ -165,7 +169,15 @@ def build_compact_context(
         })
 
     # 2. Top-3 Waylaid Crates crafting margins
-    crafting_raw = get_crafting_margins(conn, realm=realm)
+    crafting_raw = kwargs.get("crafting_margins")
+    if crafting_raw is None:
+        crafting_raw = get_crafting_margins(
+            conn,
+            realm=realm,
+            has_bartering=kwargs.get("has_bartering", False),
+            has_master_chef=kwargs.get("has_master_chef", False),
+            max_age_hours=kwargs.get("max_age_hours"),
+        )
     waylaid_recipes = [c for c in crafting_raw if c.get("is_waylaid_target")]
     crafting_pool = waylaid_recipes if waylaid_recipes else crafting_raw
     top_crafting = []
@@ -197,7 +209,9 @@ def build_compact_context(
         })
 
     # 3. Top-3 price drop anomalies (Z <= -1.8)
-    anomalies_raw = get_zscore_anomalies(conn, z_buy_threshold=-1.8, realm=realm)
+    anomalies_raw = kwargs.get("zscore_anomalies")
+    if anomalies_raw is None:
+        anomalies_raw = get_zscore_anomalies(conn, realm=realm, max_age_hours=kwargs.get("max_age_hours"))
     deep_drops = [
         a for a in anomalies_raw
         if a.get("signal") == "STRONG_BUY" or _safe_float(a.get("z_score") if a.get("z_score") is not None else a.get("z"), 0.0) <= -1.8

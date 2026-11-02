@@ -1733,3 +1733,18 @@ class TestWowheadFetcherAndResolver:
 
         cur.execute("SELECT price FROM price_snapshots WHERE item_id = 3859")
         assert cur.fetchone()[0] == 2200
+
+
+def test_ap_is_ours_identifies_own_server():
+    """Verify is_ours from .autopilot/ap.py accurately distinguishes project server from foreign ones (Audit §20)."""
+    import importlib.util
+    from pathlib import Path
+
+    ap_path = Path(__file__).resolve().parent.parent / ".autopilot" / "ap.py"
+    spec = importlib.util.spec_from_file_location("autopilot_ap", str(ap_path))
+    assert spec is not None and spec.loader is not None
+    ap_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ap_mod)
+
+    assert ap_mod.is_ours("python /other/project/serve_permanent.py") is False
+    assert ap_mod.is_ours(f"python {ap_mod._norm(ap_mod.A)}/serve_permanent.py") is True

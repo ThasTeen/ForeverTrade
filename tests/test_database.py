@@ -956,40 +956,31 @@ def test_load_catalog_forever_catalog_priority_and_overrides(memory_db, tmp_path
     assert item_10004["is_override"] == 0
 
 
-def test_load_catalog_default_items_forever_path(memory_db):
-    """Verify load_catalog default forever_catalog_path ('data/items_forever.json') loads when present."""
-    default_forever_path = "data/items_forever.json"
-    existed_before = os.path.exists(default_forever_path)
+def test_load_catalog_default_items_forever_path(memory_db, tmp_path):
+    """Verify load_catalog forever_catalog_path loads when present without modifying data/ (Audit §10)."""
+    fake_forever_path = tmp_path / "items_forever.json"
     test_item_id = 99997
 
-    try:
-        os.makedirs("data", exist_ok=True)
-        sample_forever = [
-            {
-                "item_id": test_item_id,
-                "name": "Default Path Forever Item",
-                "name_ru": "Предмет из data/items_forever.json",
-                "vendor_sell_copper": 345,
-                "vendor_buy_copper": 678,
-                "quality": 2,
-            }
-        ]
-        with open(default_forever_path, "w", encoding="utf-8") as f:
-            json.dump(sample_forever, f)
+    sample_forever = [
+        {
+            "item_id": test_item_id,
+            "name": "Default Path Forever Item",
+            "name_ru": "Предмет из data/items_forever.json",
+            "vendor_sell_copper": 345,
+            "vendor_buy_copper": 678,
+            "quality": 2,
+        }
+    ]
+    with open(fake_forever_path, "w", encoding="utf-8") as f:
+        json.dump(sample_forever, f)
 
-        load_catalog(memory_db)
-        item = get_item(memory_db, test_item_id)
-        assert item is not None
-        assert item["name"] == "Default Path Forever Item"
-        assert item["name_ru"] == "Предмет из data/items_forever.json"
-        assert item["vendor_sell_copper"] == 345
-        assert item["vendor_buy_copper"] == 678
-    finally:
-        if not existed_before and os.path.exists(default_forever_path):
-            try:
-                os.remove(default_forever_path)
-            except OSError:
-                pass
+    load_catalog(memory_db, forever_catalog_path=str(fake_forever_path))
+    item = get_item(memory_db, test_item_id)
+    assert item is not None
+    assert item["name"] == "Default Path Forever Item"
+    assert item["name_ru"] == "Предмет из data/items_forever.json"
+    assert item["vendor_sell_copper"] == 345
+    assert item["vendor_buy_copper"] == 678
 
 
 

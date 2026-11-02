@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+from unittest.mock import patch
 import pytest
 
 from src.database import init_db
@@ -1340,6 +1341,199 @@ def test_all_signal_tabs_present_and_configured(populated_dashboard_db, tmp_path
     assert "function switchTab(tabId)" in html_content
     assert "btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId)" in html_content
     assert "pane.classList.toggle('active', pane.id === tabId)" in html_content
+
+
+def test_top_snipe_card_summary_uses_expected_net_profit(memory_db, tmp_path):
+    """Verify Top Snipe card displays expected_net_profit (+22c) and not unadjusted markup (+37c) (Audit §12)."""
+    fake_anomaly = [{
+        "item_id": 5001,
+        "name": "Audit Snipe Target",
+        "signal": "STRONG_BUY",
+        "current_price": 50,
+        "mean_price": 91.67,
+        "deposit": 15,
+        "expected_net_profit": 22,
+        "z_score": -2.1,
+        "sample_count": 10,
+        "realm": "Everlook",
+    }]
+
+    out_file = tmp_path / "top_snipe_dashboard.html"
+    with patch("src.dashboard.get_zscore_anomalies", return_value=fake_anomaly), \
+         patch("src.dashboard.get_vendor_arbitrage", return_value=[]), \
+         patch("src.dashboard.get_crafting_margins", return_value=[]):
+        html_content = build_standalone_dashboard(
+            memory_db,
+            output_path=str(out_file),
+            realm="Everlook",
+        )
+
+    assert "ТОП СНАЙП (Флип)" in html_content
+    assert "Audit Snipe Target" in html_content
+    assert "+22c" in html_content or f"+{format_currency(22)}" in html_content
+    assert "+37c" not in html_content
+
+
+def test_anomalies_only_strong_sell_shows_empty_state_in_strong_buy_table(memory_db, tmp_path):
+    """Verify that when anomalies only contains STRONG_SELL, Strong Buy table shows empty state and no sell rows (Audit §13)."""
+    sell_only_anomalies = [{
+        "item_id": 5002,
+        "name": "Overpriced Herb",
+        "signal": "STRONG_SELL",
+        "current_price": 5000,
+        "mean_price": 1000.0,
+        "deposit": 20,
+        "expected_net_profit": 0,
+        "z_score": 3.5,
+        "sample_count": 12,
+        "realm": "Everlook",
+    }]
+
+    out_file = tmp_path / "strong_sell_dashboard.html"
+    with patch("src.dashboard.get_zscore_anomalies", return_value=sell_only_anomalies), \
+         patch("src.dashboard.get_vendor_arbitrage", return_value=[]), \
+         patch("src.dashboard.get_crafting_margins", return_value=[]):
+        html_content = build_standalone_dashboard(
+            memory_db,
+            output_path=str(out_file),
+            realm="Everlook",
+        )
+
+    # Strong buy count badge should be 0
+    assert '<span class="tab-count" id="strong-buy-count">0</span>' in html_content
+
+    # Extract price-anomalies pane tbody
+    pane_match = re.search(
+        r'<div\s+class=[\'"][^\'"]*tab-pane[^\'"]*[\'"][^>]*id=[\'"]price-anomalies[\'"][^>]*>.*?<tbody>(.*?)</tbody>',
+        html_content,
+        re.DOTALL,
+    )
+    assert pane_match is not None, "price-anomalies tbody not found"
+    tbody_html = pane_match.group(1)
+
+    assert "empty-state" in tbody_html
+    assert "Аномальных сбросов или всплесков цен не обнаружено" in tbody_html
+    assert "STRONG_SELL" not in tbody_html
+    assert "Overpriced Herb" not in tbody_html
+
+
+def test_generate_dashboard_html_embeds_strong_buy_item_ids_and_script_resolves(memory_db, tmp_path):
+    """Verify generate_dashboard_html embeds STRONG_BUY_ITEM_IDS and client script resolves via it (Audit §14)."""
+    generate_dashboard_html = build_standalone_dashboard
+
+    strong_buys = [
+        {
+            "item_id": 7001,
+            "name": "Snipe Target Alpha",
+            "signal": "STRONG_BUY",
+            "current_price": 100,
+            "mean_price": 300.0,
+            "deposit": 10,
+            "expected_net_profit": 175,
+            "z_score": -2.2,
+            "sample_count": 10,
+            "realm": "Everlook",
+        },
+        {
+            "item_id": 7002,
+            "name": "Snipe Target Beta",
+            "signal": "STRONG_BUY",
+            "current_price": 250,
+            "mean_price": 700.0,
+            "deposit": 25,
+            "expected_net_profit": 390,
+            "z_score": -2.4,
+            "sample_count": 8,
+            "realm": "Everlook",
+        },
+    ]
+
+    out_file = tmp_path / "strong_buy_ids_dashboard.html"
+    with patch("src.dashboard.get_zscore_anomalies", return_value=strong_buys), \
+         patch("src.dashboard.get_vendor_arbitrage", return_value=[]), \
+         patch("src.dashboard.get_crafting_margins", return_value=[]):
+        html_content = generate_dashboard_html(
+            memory_db,
+            output_path=str(out_file),
+            realm="Everlook",
+        )
+
+    # 1. Verify const STRONG_BUY_ITEM_IDS is embedded with verified IDs [7001, 7002]
+    ids_match = re.search(r'const STRONG_BUY_ITEM_IDS = (\[.*?\]);', html_content)
+    assert ids_match is not None, "STRONG_BUY_ITEM_IDS variable not found in script"
+    parsed_ids = json.loads(ids_match.group(1))
+    assert parsed_ids == [7001, 7002]
+
+    # 2. Verify client-side script uses STRONG_BUY_ITEM_IDS to resolve items from ITEM_STORE
+    assert "if (typeof STRONG_BUY_ITEM_IDS !== 'undefined' && STRONG_BUY_ITEM_IDS.length > 0)" in html_content
+    assert "STRONG_BUY_ITEM_IDS.forEach(function(id)" in html_content
+    assert "var it = ITEM_STORE[id];" in html_content
+
+
+def test_waylaid_tab_renders_crate_turnin_economics_not_single_item_craft(memory_db, tmp_path):
+    """Verify Waylaid tab (tab-crates) renders crate turn-in economics rather than 1-item AH crafting (Audit §15)."""
+    dual_crafting_data = [
+        {
+            "crafted_item_id": 8001,
+            "crafted_item_name": "Rough Sharpening Stone",
+            "name": "Rough Sharpening Stone",
+            "profession": "Blacksmithing",
+            "is_waylaid_target": True,
+            "waylaid_crate_name": "Waylaid Shipment: Rough Sharpening Stones",
+            # 1-item AH crafting economics
+            "cost_copper": 150,
+            "revenue_copper": 400,
+            "profit_copper": 250,
+            "roi_percent": 166.7,
+            # Full crate turn-in economics (pack of 4 items turned into NPC for fixed reward)
+            "pack_cost_copper": 600,
+            "pack_craft_cost_copper": 600,
+            "reward_copper": 1500,
+            "craft_turnin_profit_copper": 900,
+            "turnin_profit_copper": 900,
+        }
+    ]
+
+    out_file = tmp_path / "waylaid_turnin_dashboard.html"
+    with patch("src.dashboard.get_crafting_margins", return_value=dual_crafting_data), \
+         patch("src.dashboard.get_vendor_arbitrage", return_value=[]), \
+         patch("src.dashboard.get_zscore_anomalies", return_value=[]):
+        html_content = build_standalone_dashboard(
+            memory_db,
+            output_path=str(out_file),
+            realm="Everlook",
+        )
+
+    # Extract Dual tab (waylaid-crates)
+    dual_match = re.search(
+        r'<div\s+class=[\'"][^\'"]*tab-pane[^\'"]*[\'"][^>]*id=[\'"]waylaid-crates[\'"][^>]*>.*?<tbody>(.*?)</tbody>',
+        html_content,
+        re.DOTALL,
+    )
+    assert dual_match is not None
+    dual_tbody = dual_match.group(1)
+
+    # Extract Waylaid Crates Only tab (tab-crates)
+    crate_match = re.search(
+        r'<div\s+class=[\'"][^\'"]*tab-pane[^\'"]*[\'"][^>]*id=[\'"]tab-crates[\'"][^>]*>.*?<tbody>(.*?)</tbody>',
+        html_content,
+        re.DOTALL,
+    )
+    assert crate_match is not None
+    crate_tbody = crate_match.group(1)
+
+    # Dual tab renders 1-item AH crafting profit (250c) and cost (150c)
+    assert "data-value='250'" in dual_tbody
+    assert "data-value='150'" in dual_tbody
+
+    # Waylaid tab (tab-crates) renders crate turn-in economics:
+    # Cost = pack_craft_cost_copper (600c), Revenue = reward_copper (1500c), Profit = craft_turnin_profit_copper (900c)
+    assert "data-value='600'" in crate_tbody
+    assert "data-value='1500'" in crate_tbody
+    assert "data-value='900'" in crate_tbody
+    # Must NOT render 1-item AH profit (250c) in crate turn-in tab
+    assert "data-value='250'" not in crate_tbody
+
 
 
 

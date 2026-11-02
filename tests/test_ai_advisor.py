@@ -283,6 +283,105 @@ def test_build_compact_context_realm_isolation(populated_advisor_db):
     assert len(context_other["price_anomalies"]) == 0
 
 
+def test_build_compact_context_with_precalculated_kwargs(memory_db):
+    """Verify build_compact_context uses precalculated kwargs directly and preserves items (Audit §8)."""
+    vendor_raw = [
+        {
+            "item_id": 9001,
+            "name": "Precalculated Vendor Item",
+            "buyout_price": 100,
+            "vendor_sell_price": 500,
+            "profit_copper": 400,
+        }
+    ]
+    crafting_raw = [
+        {
+            "recipe_id": 9002,
+            "crafted_item_name": "Precalculated Potion",
+            "profession": "Alchemy",
+            "cost_copper": 200,
+            "revenue_copper": 600,
+            "profit_copper": 400,
+            "roi_percent": 200.0,
+            "is_waylaid_target": False,
+        }
+    ]
+    anomalies_raw = [
+        {
+            "item_id": 9003,
+            "name": "Precalculated Herb",
+            "current_price": 50,
+            "mean_price": 150.0,
+            "z_score": -2.5,
+            "signal": "STRONG_BUY",
+        }
+    ]
+
+    with patch("src.ai_advisor.get_vendor_arbitrage") as mock_arb, \
+         patch("src.ai_advisor.get_crafting_margins") as mock_craft, \
+         patch("src.ai_advisor.get_zscore_anomalies") as mock_anom:
+        context = build_compact_context(
+            memory_db,
+            realm="Everlook",
+            vendor_arbitrage=vendor_raw,
+            crafting_margins=crafting_raw,
+            zscore_anomalies=anomalies_raw,
+        )
+
+        mock_arb.assert_not_called()
+        mock_craft.assert_not_called()
+        mock_anom.assert_not_called()
+
+    # Precalculated items must be directly preserved in compact context
+    assert len(context["vendor_arbitrage"]) == 1
+    assert context["vendor_arbitrage"][0]["item_id"] == 9001
+    assert context["vendor_arbitrage"][0]["profit_copper"] == 400
+    assert context["vendor_arbitrage"][0]["name"] == "Precalculated Vendor Item"
+
+    assert len(context["waylaid_crafting"]) == 1
+    assert context["waylaid_crafting"][0]["recipe_id"] == 9002
+    assert context["waylaid_crafting"][0]["profit_copper"] == 400
+    assert context["waylaid_crafting"][0]["name"] == "Precalculated Potion"
+
+    assert len(context["price_anomalies"]) == 1
+    assert context["price_anomalies"][0]["item_id"] == 9003
+    assert context["price_anomalies"][0]["z_score"] == -2.5
+    assert context["price_anomalies"][0]["signal"] == "STRONG_BUY"
+
+
+def test_build_compact_context_forwards_kwargs_when_omitted(memory_db):
+    """Verify build_compact_context forwards max_age_hours, has_bartering, has_master_chef when lists omitted (Audit §8)."""
+    with patch("src.ai_advisor.get_vendor_arbitrage", return_value=[]) as mock_arb, \
+         patch("src.ai_advisor.get_crafting_margins", return_value=[]) as mock_craft, \
+         patch("src.ai_advisor.get_zscore_anomalies", return_value=[]) as mock_anom:
+        context = build_compact_context(
+            memory_db,
+            realm="Everlook",
+            max_age_hours=24.0,
+            has_bartering=True,
+            has_master_chef=True,
+        )
+
+        mock_arb.assert_called_once_with(
+            memory_db, min_profit_copper=50, realm="Everlook", max_age_hours=24.0
+        )
+        mock_craft.assert_called_once_with(
+            memory_db,
+            realm="Everlook",
+            has_bartering=True,
+            has_master_chef=True,
+            max_age_hours=24.0,
+        )
+        mock_anom.assert_called_once_with(
+            memory_db, realm="Everlook", max_age_hours=24.0
+        )
+
+        assert context["realm"] == "Everlook"
+        assert context["vendor_arbitrage"] == []
+        assert context["waylaid_crafting"] == []
+        assert context["price_anomalies"] == []
+
+
 # ---------------------------------------------------------------------------
 # R16: AntigravityManagerClient & Heuristic Fallback Tests
 # ---------------------------------------------------------------------------

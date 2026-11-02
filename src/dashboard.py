@@ -634,9 +634,9 @@ def build_standalone_dashboard(
     top_snipe_html = "—"
     top_snipe_click = ""
     if strong_buys:
-        best_snipe = max(strong_buys, key=lambda x: (x.get("mean_price", 0) * 0.95) - x.get("current_price", 0))
+        best_snipe = max(strong_buys, key=lambda x: x.get("expected_net_profit", 0))
         snipe_name = html.escape(str(best_snipe.get("name") or "Item"))
-        snipe_profit = int(round((best_snipe.get("mean_price", 0) * 0.95) - best_snipe.get("current_price", 0)))
+        snipe_profit = int(round(best_snipe.get("expected_net_profit", 0)))
         top_snipe_html = f"<strong>{snipe_name}</strong> <span class='profit-cell'>+{format_currency(snipe_profit)}</span>"
         if best_snipe.get("item_id"):
             top_snipe_click = f"selectInspectorItem({best_snipe['item_id']})"
@@ -654,9 +654,11 @@ def build_standalone_dashboard(
     top_crate_html = "—"
     top_crate_click = ""
     if crates_only:
-        best_crate = max(crates_only, key=lambda x: x.get("profit_copper", 0))
+        def _crate_turnin_profit(c):
+            return c.get("craft_turnin_profit_copper") or c.get("turnin_profit_copper") or c.get("profit_copper", 0)
+        best_crate = max(crates_only, key=_crate_turnin_profit)
         crate_name = html.escape(str(best_crate.get("waylaid_crate_name") or best_crate.get("name") or "Crate"))
-        crate_profit = best_crate.get("profit_copper", 0)
+        crate_profit = _crate_turnin_profit(best_crate)
         top_crate_html = f"<strong>{crate_name}</strong> <span class='profit-cell'>+{format_currency(crate_profit)}</span>"
         if best_crate.get("crafted_item_id"):
             top_crate_click = f"selectInspectorItem({best_crate['crafted_item_id']})"
@@ -788,7 +790,37 @@ def build_standalone_dashboard(
         )
         crafting_rows.append(row_html)
         if is_waylaid:
-            crates_rows.append(row_html)
+            c_cost = item.get("pack_craft_cost_copper") or item.get("pack_cost_copper") or item.get("cost_copper", 0)
+            c_revenue = item.get("reward_copper") or item.get("revenue_copper", 0)
+            c_profit = item.get("craft_turnin_profit_copper") or item.get("turnin_profit_copper") or item.get("profit_copper", 0)
+            c_roi_pct = round((c_profit / c_cost * 100), 1) if c_cost > 0 else 0.0
+
+            crate_row_html = (
+                f"<tr {id_attr} {click_attr} class='clickable-row'>"
+                f"<td data-value='{escaped_name_ru}'>"
+                f"<div class='item-cell-wrap'>"
+                f"<div>"
+                f"<div class='item-title-row'>"
+                f"{badge_html} "
+                f"<strong>{wh_link_open}<span class='item-name i18n' data-ru='{escaped_name_ru}' data-en='{escaped_name_en}'>{escaped_name_ru}</span>{wh_link_close}</strong>"
+                f"</div>"
+                f"{reagents_html}"
+                f"</div>"
+                f"<div class='item-actions'>"
+                f"<button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button>"
+                f"{graph_btn}"
+                f"</div>"
+                f"</div>"
+                f"</td>"
+                f"<td data-value='{profession}'>{profession}</td>"
+                f"<td data-value='{crate_name}' class='crate-cell'>{crate_name}</td>"
+                f"<td data-value='{c_cost}'>{format_currency(c_cost, as_html=True)}</td>"
+                f"<td data-value='{c_revenue}'>{format_currency(c_revenue, as_html=True)}</td>"
+                f"<td data-value='{c_profit}' class='profit-cell'>{format_currency(c_profit, as_html=True)}</td>"
+                f"<td data-value='{c_roi_pct}' class='roi-cell'>+{c_roi_pct}%</td>"
+                f"</tr>"
+            )
+            crates_rows.append(crate_row_html)
 
     if not crafting_rows:
         crafting_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='Нет активных маржинальных рецептов (ROI ≥ 25%)' data-en='No active profitable recipes (ROI ≥ 25%)'>Нет активных маржинальных рецептов (ROI ≥ 25%)</td></tr>"
@@ -802,7 +834,7 @@ def build_standalone_dashboard(
 
     # 6. Build Price Anomalies table rows
     anomaly_rows = []
-    for item in anomalies:
+    for item in strong_buys:
         item_id = item.get("item_id")
         raw_name = item.get("name")
         if item_id is not None:
@@ -873,6 +905,8 @@ def build_standalone_dashboard(
     # 8. Serialize items market data to JSON
     items_store_json = json.dumps(items_market_data, ensure_ascii=False)
     items_store_json = items_store_json.replace("</", r"<\/").replace("<", r"\u003c")
+    strong_buy_ids = [int(a["item_id"]) for a in strong_buys if a.get("item_id") is not None]
+    strong_buy_ids_json = json.dumps(strong_buy_ids)
 
     # 9. Assemble full HTML document
     html_content = f"""<!DOCTYPE html>
@@ -1769,6 +1803,7 @@ def build_standalone_dashboard(
     <!-- Client-side Interactive Logic -->
     <script>
         var ITEM_STORE = {items_store_json};
+        const STRONG_BUY_ITEM_IDS = {strong_buy_ids_json};
         var currentActiveTab = 'price-anomalies';
         var currentSelectedItemId = null;
         var currentSearchQuery = '';
@@ -1930,14 +1965,16 @@ def build_standalone_dashboard(
             var items = [];
             var lang = getStoredLang();
 
-            // Collect items with STRONG_BUY signal
-            Object.keys(ITEM_STORE).forEach(function(k) {{
-                var it = ITEM_STORE[k];
-                if (it && (it.z_score <= -1.8 || (it.deal_info && it.deal_info.signal && it.deal_info.signal.indexOf('BUY') !== -1))) {{
-                    var n = (lang === 'en' ? it.name_en : it.name_ru) || it.name_ru || it.name_en;
-                    if (n && items.indexOf(n) === -1) items.push(n);
-                }}
-            }});
+            // Collect items with STRONG_BUY signal from verified STRONG_BUY_ITEM_IDS
+            if (typeof STRONG_BUY_ITEM_IDS !== 'undefined' && STRONG_BUY_ITEM_IDS.length > 0) {{
+                STRONG_BUY_ITEM_IDS.forEach(function(id) {{
+                    var it = ITEM_STORE[id];
+                    if (it) {{
+                        var n = (lang === 'en' ? it.name_en : it.name_ru) || it.name_ru || it.name_en;
+                        if (n && items.indexOf(n) === -1) items.push(n);
+                    }}
+                }});
+            }}
 
             // If no strong buys, collect from currently active table
             if (items.length === 0) {{
