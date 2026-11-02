@@ -13,7 +13,7 @@ window.STATE =
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
   "baseCommit": null,
   "startedAt": "2026-11-03T00:12:46+03:00",
-  "updatedAt": "2026-11-03T01:23:22+03:00",
+  "updatedAt": "2026-11-03T01:35:21+03:00",
   "finishedAt": null,
   "stages": [
     {
@@ -63,8 +63,8 @@ window.STATE =
   ],
   "requirements": {
     "total": 27,
-    "done": 20,
-    "inTicket": 7,
+    "done": 23,
+    "inTicket": 4,
     "inSpec": 0,
     "placeholder": 0,
     "deferred": 0,
@@ -200,10 +200,16 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "in-progress",
+      "status": "done",
       "retries": 0,
       "repairs": 0,
-      "startedAt": "2026-11-03T01:23:22+03:00"
+      "startedAt": "2026-11-03T01:23:22+03:00",
+      "finishedAt": "2026-11-03T01:35:16+03:00",
+      "tests": {
+        "passed": 193,
+        "failed": 0
+      },
+      "commit": "8cd4063"
     },
     {
       "id": "05",
@@ -226,13 +232,14 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "pending",
+      "status": "in-progress",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-11-03T01:35:21+03:00"
     }
   ],
   "tests": {
-    "passed": 190,
+    "passed": 193,
     "failed": 0
   },
   "debt": {
@@ -264,9 +271,11 @@ window.STATE =
     "2026-11-03T00:55:08+03:00",
     "2026-11-03T00:55:13+03:00",
     "2026-11-03T01:23:18+03:00",
-    "2026-11-03T01:23:22+03:00"
+    "2026-11-03T01:23:22+03:00",
+    "2026-11-03T01:35:16+03:00",
+    "2026-11-03T01:35:21+03:00"
   ],
-  "rev": 21,
+  "rev": 23,
   "waiting": null,
   "waits": [],
   "log": [
@@ -416,6 +425,26 @@ window.STATE =
         "04"
       ],
       "act": "start"
+    },
+    {
+      "t": "2026-11-03T01:35:16+03:00",
+      "k": "ticket",
+      "ids": [
+        "04"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 193,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-03T01:35:21+03:00",
+      "k": "ticket",
+      "ids": [
+        "05"
+      ],
+      "act": "start"
     }
   ],
   "reqList": [
@@ -507,17 +536,17 @@ window.STATE =
     {
       "id": "R18",
       "text": "«Робастный DBMarket и Hampel Filter: замена классической sigma на робастную sigma_MAD = 1.4826  MAD с отсечением выбросов»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R19",
       "text": "«Экспоненциальное затухание (EWMA) с полураспадом 3.5 дня: w_i = exp(-lambda  delta_t)»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R20",
       "text": "«Таблица кэша item_market_metrics в src/database.py»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R21",

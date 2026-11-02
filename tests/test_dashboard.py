@@ -1661,6 +1661,147 @@ def test_dashboard_disenchant_tab_and_inspector_integration(memory_db, tmp_path)
     assert "deCard.style.display = 'flex';" in html_content
 
 
+def test_dashboard_crafting_dag_tree_integration(memory_db, tmp_path):
+    """Verify generate_dashboard_html integrates DAG crafting tree in Inspector and client script (Ticket 05).
+
+    Verifies:
+      1. Inspection panel layout contains #crafting-tree and #tab-crafting container.
+      2. ITEM_STORE client dataset transmits reagents_tree structure with has_subcraft flag.
+      3. JavaScript includes renderCraftingTree() function, dynamic tree population logic,
+         and badges [🔨 Craft], [🏛️ Vendor], [🛒 AH].
+    """
+    # 1. Setup catalog items cache
+    _CATALOG_CACHE[2320] = {
+        "item_id": 2320,
+        "name": "Coarse Thread",
+        "name_ru": "Грубая нить",
+        "quality": 1,
+        "item_class": 7,
+        "category": "reagent",
+    }
+    _CATALOG_CACHE[2589] = {
+        "item_id": 2589,
+        "name": "Linen Cloth",
+        "name_ru": "Льняная ткань",
+        "quality": 1,
+        "item_class": 7,
+        "category": "reagent",
+    }
+    _CATALOG_CACHE[2996] = {
+        "item_id": 2996,
+        "name": "Bolt of Linen Cloth",
+        "name_ru": "Рулон льняной ткани",
+        "quality": 1,
+        "item_class": 7,
+        "category": "trade_goods",
+    }
+    _CATALOG_CACHE[4238] = {
+        "item_id": 4238,
+        "name": "Linen Bag",
+        "name_ru": "Льняная сумка",
+        "quality": 1,
+        "item_class": 1,
+        "category": "container",
+    }
+
+    now = int(time.time())
+    with memory_db:
+        # Insert items
+        memory_db.executemany(
+            """INSERT INTO items (
+                item_id, name, name_ru, quality, item_class, category,
+                vendor_sell_price, vendor_buy_copper
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (2320, "Coarse Thread", "Грубая нить", 1, 7, "reagent", 2, 10),
+                (2589, "Linen Cloth", "Льняная ткань", 1, 7, "reagent", 5, 0),
+                (2996, "Bolt of Linen Cloth", "Рулон льняной ткани", 1, 7, "trade_goods", 10, 0),
+                (4238, "Linen Bag", "Льняная сумка", 1, 1, "container", 50, 0),
+            ],
+        )
+
+        # Insert recipes: Linen Cloth -> Bolt, and Bolt + Thread -> Linen Bag
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, crafted_item_id, yield, profession)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (3001, "Bolt of Linen Cloth", 2996, 1.0, "Tailoring"),
+                (3002, "Linen Bag", 4238, 1.0, "Tailoring"),
+            ],
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (3001, 2589, 2589, 2, 2),
+                (3002, 2996, 2996, 3, 3),
+                (3002, 2320, 2320, 1, 1),
+            ],
+        )
+
+        # Insert price snapshots
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (2589, "Everlook", 10, now),
+                (2996, "Everlook", 50, now),
+                (4238, "Everlook", 200, now),
+            ],
+        )
+
+    # 2. Invoke generate_dashboard_html()
+    out_file = tmp_path / "portal_crafting_dag_test.html"
+    html_content = generate_dashboard_html(
+        memory_db,
+        output_path=str(out_file),
+        realm="Everlook",
+    )
+
+    # 3. Verify file generation
+    assert out_file.is_file(), "Generated dashboard HTML file must exist on disk"
+    assert len(html_content) > 1000
+
+    # 4. Verify inspector DOM markup for crafting tree
+    assert 'id="crafting-tree"' in html_content
+    assert 'class="crafting-tree-list"' in html_content
+    assert 'id="tab-crafting"' in html_content
+    assert "crafting-tree-card" in html_content
+    assert "Дерево компонентов (DAG Craft)" in html_content or "Crafting Tree (DAG Craft)" in html_content
+
+    # 5. Verify client script data transmission (ITEM_STORE JSON)
+    store_match = re.search(r'var ITEM_STORE = (\{.*?\});\s*(?:var|const|\n)', html_content, re.DOTALL)
+    assert store_match is not None, "ITEM_STORE JSON was not serialized into client script"
+    item_store = json.loads(store_match.group(1))
+
+    # Verify Linen Bag (item 4238) contains reagents_tree in deal_info
+    assert "4238" in item_store, "Item 4238 missing from client ITEM_STORE"
+    bag_item = item_store["4238"]
+    assert "deal_info" in bag_item
+    deal = bag_item["deal_info"]
+    assert deal.get("has_subcraft") is True
+    assert "reagents_tree" in deal
+    reagents_tree = deal["reagents_tree"]
+    assert len(reagents_tree) == 2
+
+    # Verify Bolt node in reagents_tree has sub_tree
+    bolt_node = next((n for n in reagents_tree if n["item_id"] == 2996), None)
+    assert bolt_node is not None, "Bolt reagent node missing from reagents_tree"
+    assert bolt_node["source"] == "craft"
+    assert bolt_node["effective_unit_cost"] == 20
+    assert len(bolt_node["sub_tree"]) == 1
+    assert bolt_node["sub_tree"][0]["item_id"] == 2589
+    assert bolt_node["sub_tree"][0]["source"] == "ah"
+
+    # 6. Verify client JavaScript implementation of renderCraftingTree
+    assert "function renderCraftingTree(nodes, depth, lang)" in html_content
+    assert "badge-craft" in html_content
+    assert "badge-vendor" in html_content
+    assert "badge-ah" in html_content
+    assert "treeContainer.innerHTML = renderCraftingTree(" in html_content
+
+
+
 
 
 

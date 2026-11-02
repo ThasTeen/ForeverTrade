@@ -21,9 +21,9 @@
 | R15 | «Из TradeSkillMaster/Data/Disenchanting.lua извлекаются матрицы матожидания E[mats] и сохраняются в data/disenchant_tables_era.json» | done | — | T01 → 8393e2a |
 | R16 | «Метод get_disenchant_arbitrage() находит на аукционе экипировку, выставленную дешевле стоимости распыла минус 5% комиссии» | done | — | T03 → 066f2c5 |
 | R17 | «Новый таб в Goblin Terminal: ✨ Дизэнчант и раскладка дропа в инспекторе» | done | — | T03 → 066f2c5 |
-| R18 | «Робастный DBMarket и Hampel Filter: замена классической sigma на робастную sigma_MAD = 1.4826 * MAD с отсечением выбросов» | in-ticket | — | T04 |
-| R19 | «Экспоненциальное затухание (EWMA) с полураспадом 3.5 дня: w_i = exp(-lambda * delta_t)» | in-ticket | — | T04 |
-| R20 | «Таблица кэша item_market_metrics в src/database.py» | in-ticket | — | T04 |
+| R18 | «Робастный DBMarket и Hampel Filter: замена классической sigma на робастную sigma_MAD = 1.4826 * MAD с отсечением выбросов» | done | — | T04 → 8cd4063 |
+| R19 | «Экспоненциальное затухание (EWMA) с полураспадом 3.5 дня: w_i = exp(-lambda * delta_t)» | done | — | T04 → 8cd4063 |
+| R20 | «Таблица кэша item_market_metrics в src/database.py» | done | — | T04 → 8cd4063 |
 | R21 | «Liquidity Score (L) — расчет коэффициента L in [0.01, 1.0], предметы с L < 0.20 помечаются как ILLIQUID_TRAP» | done | — | T01 → 8393e2a |
 | R22 | «Учет ожидаемых потерь залога при повторных выставлениях ((1-L)/L) и заморозки капитала при оценке чистой прибыли Z-score» | done | — | T01 → 8393e2a |
 | R23 | «Рекурсивный DAG-крафт (Make-vs-Buy): MatPrice(r) = min(P_vendor_buy, P_ah, C_craft) и расчет полуфабрикатов из базового сырья» | in-ticket | — | T05 |

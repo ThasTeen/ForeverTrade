@@ -265,6 +265,238 @@ def get_vendor_shuffle(
     )
 
 
+def resolve_effective_material_cost(
+    item_id: int,
+    db_conn: Optional[sqlite3.Connection],
+    realm: Optional[str] = None,
+    depth: int = 0,
+    max_depth: int = 4,
+    visited_recipes: Optional[set] = None,
+    has_bartering: bool = False,
+    has_master_chef: bool = False,
+    max_age_hours: Optional[float] = None,
+    **kwargs: Any,
+) -> dict:
+    """Make-vs-Buy: recursively resolve effective unit cost for an item / intermediate reagent.
+
+    Checks:
+      1. Vendor buy price (P_vendor_buy) if item is in VENDOR_REAGENTS_WHITELIST.
+      2. Auction House price (P_ah) from latest price snapshot or item_market_metrics.
+      3. Crafting cost (C_craft) from recipes where crafted_item_id == item_id.
+         If depth < max_depth and recipe_id not in visited_recipes, recursively resolves
+         reagents: sum(count * resolve(sub_r)) / yield.
+
+    Selects optimal source: MatPrice = min(P_vendor_buy, P_ah, C_craft) among available > 0.
+    Protects against cycles via visited_recipes.
+
+    Returns:
+        dict: {
+            "item_id": item_id,
+            "name": name,
+            "name_ru": name_ru,
+            "effective_unit_cost": int,
+            "source": str,  # 'vendor', 'ah', 'craft', or 'none'
+            "vendor_price": int or None,
+            "ah_price": int or None,
+            "craft_cost": int or None,
+            "sub_tree": list[dict],
+        }
+    """
+    try:
+        item_id = int(item_id)
+    except (ValueError, TypeError):
+        pass
+
+    if visited_recipes is None:
+        visited_recipes = set()
+    else:
+        visited_recipes = set(visited_recipes)
+
+    name = get_item_name(db_conn, item_id, "en") if db_conn else f"Item {item_id}"
+    name_ru = get_item_name(db_conn, item_id, "ru") if db_conn else f"Item {item_id}"
+
+    cursor = db_conn.cursor() if db_conn is not None else None
+
+    # 1. Vendor buy price (with VENDOR_REAGENTS_WHITELIST check)
+    v_buy = 0
+    if cursor is not None:
+        try:
+            cursor.execute(
+                "SELECT vendor_buy_copper, vendor_buy_price FROM items WHERE item_id = ?",
+                (item_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                v_buy = row[0] or row[1] or 0
+        except sqlite3.OperationalError:
+            try:
+                cursor.execute(
+                    "SELECT vendor_buy_price FROM items WHERE item_id = ?",
+                    (item_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    v_buy = row[0] or 0
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    vendor_price: Optional[int] = None
+    if item_id in VENDOR_REAGENTS_WHITELIST and v_buy > 0:
+        if has_bartering:
+            eff_v = v_buy * 0.95
+            vendor_price = int(round(eff_v))
+        else:
+            vendor_price = int(v_buy)
+
+    # 2. AH price from latest snapshot or item_market_metrics
+    ah_price: Optional[int] = None
+    if cursor is not None:
+        min_ts = _get_cutoff_timestamp(db_conn, realm, max_age_hours) if max_age_hours else None
+        try:
+            cursor.execute("""
+                SELECT price FROM price_snapshots
+                WHERE item_id = ?
+                  AND (? IS NULL OR realm = ?)
+                  AND (? IS NULL OR timestamp >= ?)
+                  AND price > 0
+                ORDER BY timestamp DESC, id DESC
+                LIMIT 1
+            """, (item_id, realm, realm, min_ts, min_ts))
+            row = cursor.fetchone()
+            if row and row[0] is not None and row[0] > 0:
+                ah_price = int(round(row[0]))
+            else:
+                cursor.execute("""
+                    SELECT ewma_price, median_price FROM item_market_metrics
+                    WHERE item_id = ? AND (? IS NULL OR realm = ?)
+                    LIMIT 1
+                """, (item_id, realm, realm))
+                mrow = cursor.fetchone()
+                if mrow:
+                    m_val = mrow[0] or mrow[1]
+                    if m_val and m_val > 0:
+                        ah_price = int(round(m_val))
+        except Exception:
+            pass
+
+    # 3. Crafting cost (DAG recursion)
+    craft_cost: Optional[int] = None
+    best_sub_tree: list[dict] = []
+
+    if depth < max_depth and cursor is not None:
+        try:
+            cursor.execute(
+                "SELECT recipe_id, name, yield, profession FROM recipes WHERE crafted_item_id = ?",
+                (item_id,),
+            )
+            candidate_recipes = cursor.fetchall()
+        except Exception:
+            candidate_recipes = []
+
+        best_recipe_unit_cost: Optional[int] = None
+        best_recipe_sub_tree: list[dict] = []
+
+        for r_id, r_name, r_yield, r_prof in candidate_recipes:
+            if r_id in visited_recipes:
+                continue
+
+            try:
+                cursor.execute(
+                    "SELECT reagent_item_id, count, quantity FROM recipe_reagents WHERE recipe_id = ?",
+                    (r_id,),
+                )
+                reagents = cursor.fetchall()
+            except Exception:
+                reagents = []
+
+            if not reagents:
+                continue
+
+            base_yield = float(r_yield or 1.0)
+            if has_master_chef and (r_prof or "").strip().lower() == "cooking":
+                expected_yield = 1.1 * base_yield
+            else:
+                expected_yield = base_yield
+            if expected_yield <= 0:
+                expected_yield = 1.0
+
+            current_visited = visited_recipes | {r_id}
+            recipe_possible = True
+            current_sub_tree: list[dict] = []
+            recipe_total_cost = 0.0
+
+            for row_reag in reagents:
+                reag_id = row_reag[0]
+                reag_count = row_reag[1] or row_reag[2] or 1
+
+                sub_res = resolve_effective_material_cost(
+                    item_id=reag_id,
+                    db_conn=db_conn,
+                    realm=realm,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    visited_recipes=current_visited,
+                    has_bartering=has_bartering,
+                    has_master_chef=has_master_chef,
+                    max_age_hours=max_age_hours,
+                    **kwargs,
+                )
+
+                sub_unit_cost = sub_res.get("effective_unit_cost")
+                if sub_unit_cost is None or sub_unit_cost <= 0 or sub_res.get("source") == "none":
+                    recipe_possible = False
+                    break
+
+                sub_item = dict(sub_res)
+                sub_item["count"] = reag_count
+                current_sub_tree.append(sub_item)
+                recipe_total_cost += float(sub_unit_cost) * reag_count
+
+            if recipe_possible and recipe_total_cost > 0:
+                unit_craft = int(round(recipe_total_cost / expected_yield))
+                if best_recipe_unit_cost is None or unit_craft < best_recipe_unit_cost:
+                    best_recipe_unit_cost = unit_craft
+                    best_recipe_sub_tree = current_sub_tree
+
+        if best_recipe_unit_cost is not None:
+            craft_cost = best_recipe_unit_cost
+            best_sub_tree = best_recipe_sub_tree
+
+    # Optimal source selection: min(P_vendor_buy, P_ah, C_craft) among available > 0
+    candidates: list[tuple[int, int, str]] = []
+    if vendor_price is not None and vendor_price > 0:
+        candidates.append((vendor_price, 1, "vendor"))
+    if ah_price is not None and ah_price > 0:
+        candidates.append((ah_price, 2, "ah"))
+    if craft_cost is not None and craft_cost > 0:
+        candidates.append((craft_cost, 3, "craft"))
+
+    if candidates:
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        best_price, _, best_source = candidates[0]
+        effective_unit_cost = int(round(best_price))
+        source = best_source
+    else:
+        effective_unit_cost = 0
+        source = "none"
+
+    sub_tree_res = best_sub_tree if source == "craft" else []
+
+    return {
+        "item_id": item_id,
+        "name": name,
+        "name_ru": name_ru,
+        "effective_unit_cost": effective_unit_cost,
+        "source": source,
+        "vendor_price": vendor_price,
+        "ah_price": ah_price,
+        "craft_cost": craft_cost,
+        "sub_tree": sub_tree_res,
+    }
+
+
 def get_crafting_margins(
     conn: sqlite3.Connection,
     has_bartering: bool = False,
@@ -273,6 +505,7 @@ def get_crafting_margins(
     realm: Optional[str] = None,
     include_ah_deposit: bool = True,
     max_age_hours: Optional[float] = None,
+    resolve_subcrafts: bool = False,
 ) -> list[dict]:
     """Calculate crafting margins accounting for Bartering (-5% NPC), Master Chef (1.1x Cooking),
 
@@ -280,6 +513,7 @@ def get_crafting_margins(
     Supports both recipe-crafted items and raw-resource Waylaid Crates (211501-211507).
     Filters recipes where profit > 0 and ROI >= min_roi, sorted by ROI and profit descending.
     Perks default to False for starting characters.
+    When resolve_subcrafts=True, recursively evaluates DAG crafting costs for sub-reagents.
     """
     check_and_reload_overrides(conn)
     if realm is None:
@@ -298,6 +532,7 @@ def get_crafting_margins(
                         realm=r,
                         include_ah_deposit=include_ah_deposit,
                         max_age_hours=max_age_hours,
+                        resolve_subcrafts=resolve_subcrafts,
                     )
                 )
             combined.sort(key=lambda x: (x["roi"], x["profit"]), reverse=True)
@@ -407,41 +642,70 @@ def get_crafting_margins(
         total_cost = 0.0
         missing_reagent = False
         reagents_detail = []
+        reagents_tree = []
 
         for reagent_id, count in reagents:
             reagent_meta = items_by_id.get(reagent_id, {})
             v_buy = reagent_meta.get("vendor_buy_price") or reagent_meta.get("vendor_buy_copper") or 0
-            category = reagent_meta.get("category")
+
+            res = resolve_effective_material_cost(
+                item_id=reagent_id,
+                db_conn=conn,
+                realm=realm,
+                depth=0,
+                max_depth=4 if resolve_subcrafts else 0,
+                visited_recipes={recipe_id},
+                has_bartering=has_bartering,
+                has_master_chef=has_master_chef,
+                max_age_hours=max_age_hours,
+            )
+
+            eff_cost = res.get("effective_unit_cost")
+            source = res.get("source")
+
+            if eff_cost is None or eff_cost <= 0 or source == "none":
+                missing_reagent = True
+                break
 
             is_vendor = (reagent_id in VENDOR_REAGENTS_WHITELIST and v_buy > 0)
-
-            p_ah = latest_prices.get(reagent_id)
-
-            if is_vendor:
-                eff_v_buy = (v_buy * 0.95) if has_bartering else float(v_buy)
-                if p_ah is not None and p_ah > 0:
-                    unit_cost = min(float(p_ah), eff_v_buy)
-                else:
-                    unit_cost = eff_v_buy
+            if is_vendor and has_bartering:
+                unit_cost = round(v_buy * 0.95, 2)
+                if res.get("ah_price") is not None and res["ah_price"] > 0:
+                    unit_cost = min(float(res["ah_price"]), unit_cost)
             else:
-                unit_cost = p_ah
-                if unit_cost is None or unit_cost <= 0:
-                    missing_reagent = True
-                    break
+                unit_cost = float(eff_cost)
 
             reagent_cost = unit_cost * count
             total_cost += reagent_cost
+
             reagents_detail.append({
                 "item_id": reagent_id,
-                "name": reagent_meta.get("name") or f"Item {reagent_id}",
+                "name": reagent_meta.get("name") or res.get("name") or f"Item {reagent_id}",
+                "name_ru": res.get("name_ru") or reagent_meta.get("name_ru"),
                 "count": count,
                 "unit_cost": round(unit_cost, 2),
                 "total_cost": round(reagent_cost, 2),
                 "is_vendor": is_vendor,
+                "source": source,
             })
+
+            node = dict(res)
+            node["count"] = count
+            node["total_cost"] = round(reagent_cost, 2)
+            reagents_tree.append(node)
 
         if missing_reagent or total_cost <= 0:
             continue
+
+        def _tree_has_subcraft(nodes: list[dict]) -> bool:
+            for n in nodes:
+                if n.get("source") == "craft":
+                    return True
+                if _tree_has_subcraft(n.get("sub_tree", [])):
+                    return True
+            return False
+
+        has_subcraft = _tree_has_subcraft(reagents_tree)
 
         # Net revenue after 5% auction house commission
         revenue = p_out * 0.95 * expected_yield
@@ -535,6 +799,8 @@ def get_crafting_margins(
             "craft_turnin_profit": round(craft_turnin_profit, 2) if craft_turnin_profit is not None else None,
             "craft_turnin_profit_copper": int(round(craft_turnin_profit)) if craft_turnin_profit is not None else None,
             "reagents": reagents_detail,
+            "reagents_tree": reagents_tree,
+            "has_subcraft": has_subcraft,
             "realm": realm,
         })
 
@@ -617,7 +883,21 @@ def get_crafting_margins(
                 "unit_cost": round(float(p_out), 2),
                 "total_cost": round(pack_cost, 2),
                 "is_vendor": False,
+                "source": "ah",
             }],
+            "reagents_tree": [{
+                "item_id": target_id,
+                "name": target_meta.get("name", f"Item {target_id}"),
+                "name_ru": target_meta.get("name_ru") or target_meta.get("name", f"Item {target_id}"),
+                "count": target_count,
+                "effective_unit_cost": int(round(p_out)),
+                "source": "ah",
+                "vendor_price": None,
+                "ah_price": int(round(p_out)),
+                "craft_cost": None,
+                "sub_tree": [],
+            }],
+            "has_subcraft": False,
             "realm": realm,
         })
 
@@ -2089,6 +2369,31 @@ def generate_dashboard_data(
         "anomalies": anomalies,
         "disenchant_arbitrage": disenchant,
     }
+
+
+def get_profitable_crafts(
+    conn: sqlite3.Connection,
+    has_bartering: bool = False,
+    has_master_chef: bool = False,
+    min_roi: float = 0.25,
+    realm: Optional[str] = None,
+    include_ah_deposit: bool = True,
+    max_age_hours: Optional[float] = None,
+    resolve_subcrafts: bool = True,
+) -> list[dict]:
+    """Calculate profitable crafts using recursive DAG Make-vs-Buy material cost resolution."""
+    return get_crafting_margins(
+        conn=conn,
+        has_bartering=has_bartering,
+        has_master_chef=has_master_chef,
+        min_roi=min_roi,
+        realm=realm,
+        include_ah_deposit=include_ah_deposit,
+        max_age_hours=max_age_hours,
+        resolve_subcrafts=resolve_subcrafts,
+    )
+
+
 
 
 

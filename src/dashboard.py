@@ -510,6 +510,10 @@ def _get_all_items_market_data(
                             d["reagents"] = it.get("reagents", [])
                             if "expected_de_value" in it:
                                 d["is_disenchant"] = True
+                        if "reagents_tree" in it and it.get("reagents_tree"):
+                            d["reagents_tree"] = it.get("reagents_tree", [])
+                        if "has_subcraft" in it:
+                            d["has_subcraft"] = bool(it.get("has_subcraft"))
                 except (ValueError, TypeError):
                     pass
 
@@ -602,6 +606,7 @@ def build_standalone_dashboard(
             has_master_chef=has_master_chef,
             realm=realm,
             max_age_hours=max_age_hours,
+            resolve_subcrafts=True,
         )
     except TypeError:
         try:
@@ -610,9 +615,18 @@ def build_standalone_dashboard(
                 has_bartering=has_bartering,
                 has_master_chef=has_master_chef,
                 realm=realm,
+                max_age_hours=max_age_hours,
             )
         except TypeError:
-            all_crafting = get_crafting_margins(conn, realm=realm)
+            try:
+                all_crafting = get_crafting_margins(
+                    conn,
+                    has_bartering=has_bartering,
+                    has_master_chef=has_master_chef,
+                    realm=realm,
+                )
+            except TypeError:
+                all_crafting = get_crafting_margins(conn, realm=realm)
 
     try:
         anomalies = get_zscore_anomalies(conn, realm=realm, max_age_hours=max_age_hours)
@@ -1625,6 +1639,85 @@ def build_standalone_dashboard(
             text-overflow: ellipsis;
         }}
 
+        .crafting-tree-card {{
+            background: #0b0e14;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 8px;
+            max-height: 260px;
+            overflow-y: auto;
+        }}
+
+        .crafting-tree-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 0.82rem;
+        }}
+
+        .crafting-node {{
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }}
+
+        .crafting-node-header {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }}
+
+        .tree-branch {{
+            color: #64748b;
+            font-family: monospace;
+            font-weight: 700;
+        }}
+
+        .badge-ah {{
+            background: rgba(56, 189, 248, 0.15);
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }}
+
+        .badge-vendor {{
+            background: rgba(34, 197, 94, 0.15);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }}
+
+        .badge-craft {{
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }}
+
+        .craft-count {{
+            color: #94a3b8;
+            font-size: 0.78rem;
+        }}
+
+        .craft-cost {{
+            color: #cbd5e1;
+            font-size: 0.78rem;
+        }}
+
         /* Toast notification */
         .toast {{
             position: fixed;
@@ -1975,6 +2068,14 @@ def build_standalone_dashboard(
                         </div>
                         <div class="de-reagents-list" id="de-reagents-list"></div>
                     </div>
+
+                    <!-- Crafting Tree (DAG Components) Card -->
+                    <div class="crafting-tree-card" id="tab-crafting" style="display: none;">
+                        <div class="calc-header">
+                            ⚗️ <span class="i18n" data-ru="Дерево компонентов (DAG Craft)" data-en="Crafting Tree (DAG Craft)">Дерево компонентов (DAG Craft)</span>
+                        </div>
+                        <div id="crafting-tree" class="crafting-tree-list"></div>
+                    </div>
                 </div>
             </aside>
         </main>
@@ -2232,6 +2333,9 @@ def build_standalone_dashboard(
         }}
 
         function switchTab(tabId) {{
+            if (tabId === 'tab-crafting' || tabId === 'crafting') {{
+                tabId = 'waylaid-crates';
+            }}
             currentActiveTab = tabId;
             try {{
                 localStorage.setItem('ft_active_tab', tabId);
@@ -2248,6 +2352,10 @@ def build_standalone_dashboard(
             if (currentSearchQuery) {{
                 onItemSearch(currentSearchQuery);
             }}
+
+            if (currentSelectedItemId) {{
+                selectInspectorItem(currentSelectedItemId);
+            }}
         }}
 
         function toggleAiBanner() {{
@@ -2255,6 +2363,47 @@ def build_standalone_dashboard(
             if (b) {{
                 b.style.display = b.style.display === 'none' ? 'block' : 'none';
             }}
+        }}
+
+        function renderCraftingTree(nodes, depth, lang) {{
+            if (!nodes || nodes.length === 0) return '';
+            var html = '';
+            var indentPx = depth * 16;
+            nodes.forEach(function(node) {{
+                var name = (lang === 'en' ? node.name : node.name_ru) || node.name_ru || node.name || ('Item ' + node.item_id);
+                var safeName = String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                var count = node.count || 1;
+                var source = String(node.source || 'ah').toLowerCase();
+
+                var badge = '';
+                if (source === 'vendor') {{
+                    badge = '<span class="badge badge-vendor i18n" data-ru="[🏛️ Vendor]" data-en="[🏛️ Vendor]">[🏛️ Vendor]</span>';
+                }} else if (source === 'craft') {{
+                    badge = '<span class="badge badge-craft i18n" data-ru="[🔨 Craft]" data-en="[🔨 Craft]">[🔨 Craft]</span>';
+                }} else {{
+                    badge = '<span class="badge badge-ah i18n" data-ru="[🛒 AH]" data-en="[🛒 AH]">[🛒 AH]</span>';
+                }}
+
+                var costVal = node.effective_unit_cost !== undefined ? node.effective_unit_cost : (node.unit_cost || 0);
+                var costStr = formatCurrencyHtml(costVal);
+
+                html += '<div class="crafting-node depth-' + depth + '" style="margin-left: ' + indentPx + 'px;">';
+                html += '<div class="crafting-node-header">';
+                if (depth > 0) {{
+                    html += '<span class="tree-branch">└─ </span>';
+                }}
+                html += badge + ' ';
+                html += '<a href="https://www.wowhead.com/forever/item=' + node.item_id + '" data-wowhead="domain=forever" target="_blank" rel="noopener" class="wowhead-link item-name">' + safeName + '</a> ';
+                html += '<span class="craft-count">&times; ' + count + '</span> ';
+                html += '<span class="craft-cost">(' + costStr + ')</span>';
+                html += '</div>';
+
+                if (source === 'craft' && node.sub_tree && node.sub_tree.length > 0) {{
+                    html += renderCraftingTree(node.sub_tree, depth + 1, lang);
+                }}
+                html += '</div>';
+            }});
+            return html;
         }}
 
         function onRowClick(event, itemId) {{
@@ -2385,6 +2534,39 @@ def build_standalone_dashboard(
                     }}
                 }} else {{
                     deCard.style.display = 'none';
+                }}
+            }}
+
+            // Crafting Tree (DAG Components) card updates
+            var craftCard = document.getElementById('tab-crafting');
+            if (craftCard) {{
+                var isCraftTab = (currentActiveTab === 'waylaid-crates' || currentActiveTab === 'tab-crates' || currentActiveTab === 'tab-crafting');
+                var hasTreeData = deal && deal.reagents_tree && deal.reagents_tree.length > 0;
+                var hasReagents = deal && deal.reagents && deal.reagents.length > 0;
+                var shouldShow = (hasTreeData || (isCraftTab && hasReagents));
+
+                if (shouldShow) {{
+                    craftCard.style.display = 'flex';
+                    var treeContainer = document.getElementById('crafting-tree');
+                    if (treeContainer) {{
+                        var treeData = deal.reagents_tree;
+                        if (!treeData || treeData.length === 0) {{
+                            treeData = (deal.reagents || []).map(function(r) {{
+                                return {{
+                                    item_id: r.item_id,
+                                    name: r.name,
+                                    name_ru: r.name_ru || r.name,
+                                    count: r.count || 1,
+                                    effective_unit_cost: r.unit_cost || 0,
+                                    source: r.source || (r.is_vendor ? 'vendor' : 'ah'),
+                                    sub_tree: []
+                                }};
+                            }});
+                        }}
+                        treeContainer.innerHTML = renderCraftingTree(treeData, 0, lang);
+                    }}
+                }} else {{
+                    craftCard.style.display = 'none';
                 }}
             }}
 

@@ -34,6 +34,8 @@ from src.analytics import (
     calculate_disenchant_value,
     export_sniper_addon_config,
     _CATALOG_CACHE,
+    resolve_effective_material_cost,
+    get_profitable_crafts,
 )
 
 
@@ -2979,6 +2981,255 @@ def test_update_all_market_metrics_integration(memory_db):
     # 6. Check edge cases
     assert update_all_market_metrics(None) == 0
     assert update_all_market_metrics(memory_db, realm="NonExistentRealm") == 0
+
+
+# ---------------------------------------------------------------------------
+# Ticket 05: Make-vs-Buy DAG Recursive Crafting Tests
+# ---------------------------------------------------------------------------
+
+def test_resolve_effective_material_cost_dag_make_vs_buy(memory_db):
+    """Test Make-vs-Buy recursive DAG material cost resolution (Ticket 05).
+
+    Verifies:
+      1. Source 'vendor': Reagent in VENDOR_REAGENTS_WHITELIST (e.g. Coarse Thread)
+         resolves to vendor price and source 'vendor'.
+      2. Source 'ah': Raw material (e.g. Linen Cloth) absent from vendor
+         and without recipe resolves to latest AH snapshot and source 'ah'.
+      3. Source 'craft': Intermediate product (e.g. Bolt of Linen Cloth) where AH price
+         is 50c, but crafting from raw cloth costs 20c -> resolves to 'craft',
+         effective_unit_cost == 20, and sub_tree containing base components.
+      4. Cycle protection: Circular recipe graph A -> B -> A terminates cleanly
+         without infinite recursion.
+    """
+    now = int(time.time())
+
+    with memory_db:
+        # Items table setup
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, name_ru, vendor_buy_copper)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (2320, "Coarse Thread", "Грубая нить", 10),      # Vendor whitelist item
+                (2321, "Fine Thread", "Тонкая нить", 100),        # Vendor whitelist item
+                (2589, "Linen Cloth", "Льняная ткань", 0),        # Raw AH material
+                (2996, "Bolt of Linen Cloth", "Рулон льняной ткани", 0),  # Intermediate craftable
+                (8001, "Reagent A", "Реагент А", 0),              # Cycle test A
+                (8002, "Reagent B", "Реагент Б", 0),              # Cycle test B
+            ],
+        )
+
+        # Price snapshots on Everlook
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (2320, "Everlook", 100, now),   # Vendor sells for 10c, AH sells for 100c
+                (2589, "Everlook", 10, now),    # Linen Cloth at AH: 10c each
+                (2996, "Everlook", 50, now),    # Bolt at AH: 50c each
+            ],
+        )
+
+        # Recipe 3001: 2x Linen Cloth (2589) -> 1x Bolt (2996)
+        memory_db.execute(
+            """INSERT INTO recipes (recipe_id, name, crafted_item_id, yield, profession)
+               VALUES (3001, 'Bolt of Linen Cloth', 2996, 1.0, 'Tailoring')"""
+        )
+        memory_db.execute(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (3001, 2589, 2589, 2, 2)"""
+        )
+
+        # Cycle recipes: 8101 crafts A (8001) from B (8002), 8102 crafts B (8002) from A (8001)
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, crafted_item_id, yield, profession)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (8101, "Recipe Cycle A", 8001, 1.0, "Alchemy"),
+                (8102, "Recipe Cycle B", 8002, 1.0, "Alchemy"),
+            ],
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (8101, 8002, 8002, 1, 1),
+                (8102, 8001, 8001, 1, 1),
+            ],
+        )
+
+    # 1. Source 'vendor' test: Coarse Thread (2320)
+    res_vendor = resolve_effective_material_cost(2320, memory_db, realm="Everlook")
+    assert res_vendor["source"] == "vendor"
+    assert res_vendor["effective_unit_cost"] == 10
+    assert res_vendor["vendor_price"] == 10
+    assert res_vendor["ah_price"] == 100
+    assert res_vendor["sub_tree"] == []
+
+    # Test bartering perk (5% discount on 100c item)
+    res_vendor_barter = resolve_effective_material_cost(2321, memory_db, realm="Everlook", has_bartering=True)
+    assert res_vendor_barter["source"] == "vendor"
+    assert res_vendor_barter["effective_unit_cost"] == 95
+
+    # 2. Source 'ah' test: Linen Cloth (2589)
+    res_ah = resolve_effective_material_cost(2589, memory_db, realm="Everlook")
+    assert res_ah["source"] == "ah"
+    assert res_ah["effective_unit_cost"] == 10
+    assert res_ah["ah_price"] == 10
+    assert res_ah["vendor_price"] is None
+    assert res_ah["craft_cost"] is None
+    assert res_ah["sub_tree"] == []
+
+    # 3. Source 'craft' test: Bolt of Linen Cloth (2996)
+    # AH sells Bolt for 50c, but crafting 1 Bolt costs 2 * 10c = 20c -> Make chooses 'craft'
+    res_craft = resolve_effective_material_cost(2996, memory_db, realm="Everlook")
+    assert res_craft["source"] == "craft"
+    assert res_craft["effective_unit_cost"] == 20
+    assert res_craft["craft_cost"] == 20
+    assert res_craft["ah_price"] == 50
+    assert len(res_craft["sub_tree"]) == 1
+    sub_node = res_craft["sub_tree"][0]
+    assert sub_node["item_id"] == 2589
+    assert sub_node["count"] == 2
+    assert sub_node["effective_unit_cost"] == 10
+    assert sub_node["source"] == "ah"
+
+    # What if AH price of Bolt drops to 15c? (15c < 20c craft cost -> Buy chooses 'ah')
+    with memory_db:
+        memory_db.execute(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (2996, 'Everlook', 15, ?)",
+            (now + 10,)
+        )
+    res_buy_bolt = resolve_effective_material_cost(2996, memory_db, realm="Everlook")
+    assert res_buy_bolt["source"] == "ah"
+    assert res_buy_bolt["effective_unit_cost"] == 15
+    assert res_buy_bolt["sub_tree"] == []
+
+    # 4. Cycle protection test: Circular dependency A (8001) -> B (8002) -> A (8001)
+    res_cycle = resolve_effective_material_cost(8001, memory_db, realm="Everlook")
+    assert res_cycle["source"] == "none"
+    assert res_cycle["effective_unit_cost"] == 0
+    assert res_cycle["sub_tree"] == []
+
+
+def test_get_profitable_crafts_with_dag_subcrafts(memory_db):
+    """Test get_profitable_crafts() end-to-end DAG subcraft cost resolution (Ticket 05).
+
+    Verifies:
+      1. Final craft (Linen Bag, item_id 4238) requires 3x Bolt (2996) and 1x Coarse Thread (2320).
+      2. Bolt AH price is 50c, but DAG resolves Bolt craft cost to 20c (2x Linen Cloth at 10c).
+      3. Total material cost of Bag is 3 * 20c + 1 * 10c = 70c (instead of 3 * 50c + 10c = 160c).
+      4. Result flags has_subcraft == True and includes detailed reagents_tree hierarchy.
+      5. Comparison with resolve_subcrafts=False confirms that without DAG, cost uses AH price (160c).
+    """
+    now = int(time.time())
+
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (
+                item_id, name, name_ru, quality, item_class, category,
+                vendor_sell_price, vendor_buy_copper
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (2320, "Coarse Thread", "Грубая нить", 1, 7, "reagent", 2, 10),
+                (2589, "Linen Cloth", "Льняная ткань", 1, 7, "reagent", 5, 0),
+                (2996, "Bolt of Linen Cloth", "Рулон льняной ткани", 1, 7, "trade_goods", 10, 0),
+                (4238, "Linen Bag", "Льняная сумка", 1, 1, "container", 50, 0),
+            ],
+        )
+
+        memory_db.executemany(
+            """INSERT INTO recipes (recipe_id, name, crafted_item_id, yield, profession)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (3001, "Bolt of Linen Cloth", 2996, 1.0, "Tailoring"),
+                (3002, "Linen Bag", 4238, 1.0, "Tailoring"),
+            ],
+        )
+
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (3001, 2589, 2589, 2, 2),  # 1 Bolt = 2 Linen Cloth
+                (3002, 2996, 2996, 3, 3),  # 1 Bag = 3 Bolts
+                (3002, 2320, 2320, 1, 1),  # 1 Bag = 1 Coarse Thread
+            ],
+        )
+
+        # Snapshots:
+        # Linen Cloth = 10c (raw material)
+        # Bolt AH = 50c (expensive on AH vs 20c craft)
+        # Linen Bag AH = 200c (revenue after 5% AH cut = 190c)
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (2589, "Everlook", 10, now),
+                (2996, "Everlook", 50, now),
+                (4238, "Everlook", 200, now),
+            ],
+        )
+
+    # 1. Run get_profitable_crafts with default DAG subcraft resolution enabled
+    crafts = get_profitable_crafts(memory_db, realm="Everlook")
+    bag_deals = [c for c in crafts if c.get("item_id") == 4238 or c.get("crafted_item_id") == 4238]
+    assert len(bag_deals) == 1, "Expected Linen Bag to be returned as a profitable craft"
+    bag = bag_deals[0]
+
+    # Material cost must be: 3 * 20c (Bolt craft) + 1 * 10c (Coarse Thread vendor) = 70c
+    assert bag["cost"] == 70.0
+    assert bag["cost_copper"] == 70
+    assert bag["has_subcraft"] is True
+
+    # Revenue: 200 * 0.95 = 190c
+    # AH Deposit: max(15, int(50 * 0.05)) = 15c
+    # Net profit: 190 - 70 - 15 = 105c
+    # ROI: 105 / 70 * 100 = 150.0%
+    assert bag["profit"] == 105.0
+    assert bag["profit_copper"] == 105
+    assert bag["deposit"] == 15
+    assert round(bag["roi_percent"], 2) == 150.0
+
+    # Check reagents_tree structure
+    tree = bag.get("reagents_tree", [])
+    assert len(tree) == 2, "reagents_tree must have 2 top-level reagent nodes"
+
+    # Find Bolt node
+    bolt_node = next((n for n in tree if n["item_id"] == 2996), None)
+    assert bolt_node is not None, "Bolt node missing from reagents_tree"
+    assert bolt_node["count"] == 3
+    assert bolt_node["source"] == "craft"
+    assert bolt_node["effective_unit_cost"] == 20
+    assert len(bolt_node["sub_tree"]) == 1
+
+    # Check sub_tree of Bolt (raw Linen Cloth)
+    cloth_sub = bolt_node["sub_tree"][0]
+    assert cloth_sub["item_id"] == 2589
+    assert cloth_sub["count"] == 2
+    assert cloth_sub["source"] == "ah"
+    assert cloth_sub["effective_unit_cost"] == 10
+
+    # Find Coarse Thread node
+    thread_node = next((n for n in tree if n["item_id"] == 2320), None)
+    assert thread_node is not None, "Coarse Thread node missing from reagents_tree"
+    assert thread_node["count"] == 1
+    assert thread_node["source"] == "vendor"
+    assert thread_node["effective_unit_cost"] == 10
+
+    # 2. Compare with resolve_subcrafts=False (disabling DAG Make-vs-Buy)
+    # At default min_roi=0.25, Bag is filtered out as unprofitable without DAG (cost 160c -> ROI 9.38% < 25%)
+    crafts_no_dag_default = get_crafting_margins(memory_db, realm="Everlook", resolve_subcrafts=False)
+    assert not any(c.get("item_id") == 4238 or c.get("crafted_item_id") == 4238 for c in crafts_no_dag_default)
+
+    # With min_roi=0.0 to inspect cost calculation:
+    crafts_no_dag = get_crafting_margins(memory_db, realm="Everlook", min_roi=0.0, resolve_subcrafts=False)
+    bag_no_dag = [c for c in crafts_no_dag if c.get("item_id") == 4238 or c.get("crafted_item_id") == 4238][0]
+    # Without DAG, Bolt uses AH price (50c) -> 3 * 50 + 1 * 10 = 160c
+    assert bag_no_dag["cost"] == 160.0
+    assert bag_no_dag["cost_copper"] == 160
+    assert bag_no_dag["has_subcraft"] is False
+    assert bag_no_dag["profit"] == 15.0
+
 
 
 
