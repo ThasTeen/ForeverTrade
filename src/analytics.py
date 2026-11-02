@@ -8,6 +8,15 @@ import sqlite3
 import time
 from typing import Optional, Any, Union
 
+try:
+    from src.database import get_item_name
+except ImportError:
+    try:
+        from database import get_item_name
+    except ImportError:
+        def get_item_name(conn: Optional[sqlite3.Connection], item_id: int, lang: str = "en") -> str:
+            return f"Item {item_id}"
+
 _OVERRIDES_PATH: str = "forever_overrides.json"
 try:
     _OVERRIDES_MTIME: float = os.path.getmtime(_OVERRIDES_PATH) if os.path.exists(_OVERRIDES_PATH) else 0.0
@@ -803,6 +812,71 @@ get_price_anomalies = get_zscore_anomalies
 # Classic Era Disenchanting & Liquidity Shield
 # ---------------------------------------------------------------------------
 
+_DISENCHANT_REAGENT_NAMES: dict[int, dict[str, str]] = {
+    10940: {"en": "Strange Dust", "ru": "Странная пыль"},
+    11083: {"en": "Soul Dust", "ru": "Пыль духа"},
+    11137: {"en": "Vision Dust", "ru": "Пыль провидения"},
+    11176: {"en": "Dream Dust", "ru": "Сонная пыль"},
+    16204: {"en": "Illusion Dust", "ru": "Пыль иллюзий"},
+    10938: {"en": "Lesser Magic Essence", "ru": "Простая магическая субстанция"},
+    10939: {"en": "Greater Magic Essence", "ru": "Великая магическая субстанция"},
+    10998: {"en": "Lesser Astral Essence", "ru": "Простая астральная субстанция"},
+    11082: {"en": "Greater Astral Essence", "ru": "Великая астральная субстанция"},
+    11134: {"en": "Lesser Mystic Essence", "ru": "Простая таинственная субстанция"},
+    11135: {"en": "Greater Mystic Essence", "ru": "Великая таинственная субстанция"},
+    11174: {"en": "Lesser Nether Essence", "ru": "Простая субстанция Пустоты"},
+    11175: {"en": "Greater Nether Essence", "ru": "Великая субстанция Пустоты"},
+    16202: {"en": "Lesser Eternal Essence", "ru": "Простая вечная субстанция"},
+    16203: {"en": "Greater Eternal Essence", "ru": "Великая вечная субстанция"},
+    10978: {"en": "Small Glimmering Shard", "ru": "Малый мерцающий осколок"},
+    11084: {"en": "Large Glimmering Shard", "ru": "Большой мерцающий осколок"},
+    11138: {"en": "Small Glowing Shard", "ru": "Малый светящийся осколок"},
+    11139: {"en": "Large Glowing Shard", "ru": "Большой светящийся осколок"},
+    11177: {"en": "Small Radiant Shard", "ru": "Малый лучистый осколок"},
+    11178: {"en": "Large Radiant Shard", "ru": "Большой лучистый осколок"},
+    14343: {"en": "Small Brilliant Shard", "ru": "Малый сияющий осколок"},
+    14344: {"en": "Large Brilliant Shard", "ru": "Большой сияющий осколок"},
+    20725: {"en": "Nexus Crystal", "ru": "Кристалл Бездны"},
+}
+
+
+class DisenchantResult(float):
+    """Float representing expected DE value with dictionary and attribute access to reagents."""
+
+    def __new__(cls, value: float, reagents: Optional[list[dict]] = None):
+        v = round(float(value), 2)
+        obj = super().__new__(cls, v)
+        obj.expected_value = v
+        obj.reagents = reagents if reagents is not None else []
+        return obj
+
+    def __getitem__(self, key: str):
+        if key == "expected_value":
+            return self.expected_value
+        elif key == "reagents":
+            return self.reagents
+        raise KeyError(key)
+
+    def get(self, key: str, default=None):
+        if key == "expected_value":
+            return self.expected_value
+        elif key == "reagents":
+            return self.reagents
+        return default
+
+    def __contains__(self, key: str):
+        return key in ("expected_value", "reagents")
+
+    def keys(self):
+        return ["expected_value", "reagents"]
+
+    def values(self):
+        return [self.expected_value, self.reagents]
+
+    def items(self):
+        return [("expected_value", self.expected_value), ("reagents", self.reagents)]
+
+
 _DISENCHANT_TABLES_CACHE: dict = {}
 
 
@@ -1154,28 +1228,46 @@ def get_strong_buys(
 
 
 def calculate_disenchant_value(
-    item_id: int,
+    item_id: Union[int, dict],
     conn: Optional[sqlite3.Connection] = None,
     realm: Optional[str] = None,
     item_meta: Optional[dict] = None,
     latest_prices: Optional[dict] = None,
     disenchant_tables: Optional[dict] = None,
-) -> float:
+    return_details: bool = False,
+) -> Union[float, dict]:
     """Calculate expected disenchant value E[DE Value] in copper for equipment (Era 1.15).
 
     Matches Classic Era TSM Disenchanting data matrices across uncommon, rare, and epic gear.
+    Returns DisenchantResult (float with .reagents and dict access), or a dict if return_details=True.
     """
+    actual_item_id = item_id
+    if isinstance(item_id, dict):
+        item_meta = dict(item_id)
+        actual_item_id = item_id.get("item_id")
+        if isinstance(conn, dict):
+            latest_prices = conn
+            conn = None
+        if isinstance(realm, dict):
+            disenchant_tables = realm
+            realm = None
+
     if disenchant_tables is None:
         disenchant_tables = load_disenchant_tables()
 
-    cat_meta = _get_catalog_item(item_id) if item_id else {}
+    cat_meta = _get_catalog_item(actual_item_id) if actual_item_id else {}
     meta = dict(cat_meta)
     if item_meta:
         meta.update(item_meta)
 
+    def _ret_zero():
+        if return_details:
+            return {"expected_value": 0.0, "reagents": []}
+        return DisenchantResult(0.0, [])
+
     quality = meta.get("quality")
     if quality not in (2, 3, 4):
-        return 0.0
+        return _ret_zero()
 
     item_class = meta.get("item_class") or meta.get("class")
     raw_class = str(item_class).strip().lower() if item_class is not None else ""
@@ -1190,17 +1282,17 @@ def calculate_disenchant_value(
         or meta.get("category") in ("armor", "armors")
     )
     if not (is_weapon or is_armor):
-        return 0.0
+        return _ret_zero()
 
     level = meta.get("item_level") or meta.get("level") or meta.get("req_level")
     if level is None:
-        return 0.0
+        return _ret_zero()
     try:
         level = int(level)
     except (ValueError, TypeError):
-        return 0.0
+        return _ret_zero()
     if level <= 0:
-        return 0.0
+        return _ret_zero()
 
     if latest_prices is None and conn is not None:
         try:
@@ -1226,7 +1318,7 @@ def calculate_disenchant_value(
 
     tier_key = {2: "uncommon", 3: "rare", 4: "epic"}.get(quality)
     if not tier_key:
-        return 0.0
+        return _ret_zero()
 
     tiers = disenchant_tables.get(tier_key, [])
     matching_tier = None
@@ -1236,7 +1328,30 @@ def calculate_disenchant_value(
             break
 
     if not matching_tier:
-        return 0.0
+        return _ret_zero()
+
+    def _build_reagent_entry(r_id: int, chance_val: float, exp_cnt: float, unit_price: float) -> dict:
+        r_id = int(r_id)
+        en_name = _DISENCHANT_REAGENT_NAMES.get(r_id, {}).get("en")
+        ru_name = _DISENCHANT_REAGENT_NAMES.get(r_id, {}).get("ru")
+        if not en_name or not ru_name:
+            try:
+                en_name = en_name or get_item_name(conn, r_id, "en")
+                ru_name = ru_name or get_item_name(conn, r_id, "ru")
+            except Exception:
+                en_name = en_name or f"Item {r_id}"
+                ru_name = ru_name or f"Item {r_id}"
+        return {
+            "reagent_id": r_id,
+            "reagent_name": en_name,
+            "reagent_name_ru": ru_name,
+            "chance": round(float(chance_val), 4),
+            "expected_count": round(float(exp_cnt), 2),
+            "unit_price_copper": int(round(float(unit_price))),
+        }
+
+    reagents = []
+    expected_val = 0.0
 
     if tier_key == "uncommon":
         dust_chance = float(matching_tier.get("weapon_dust_chance" if is_weapon else "armor_dust_chance", 0)) / 100.0
@@ -1255,6 +1370,12 @@ def calculate_disenchant_value(
 
         expected_val = (dust_chance * avg_dust * dust_price) + (essence_chance * avg_essence * essence_price)
 
+        if dust_id and dust_chance > 0:
+            reagents.append(_build_reagent_entry(dust_id, dust_chance, avg_dust, dust_price))
+
+        if essence_id and essence_chance > 0:
+            reagents.append(_build_reagent_entry(essence_id, essence_chance, avg_essence, essence_price))
+
         shard_id = matching_tier.get("shard_id")
         if shard_id:
             shard_chance_pct = matching_tier.get("shard_chance")
@@ -1263,24 +1384,26 @@ def calculate_disenchant_value(
                            float(matching_tier.get("weapon_essence_chance" if is_weapon else "armor_essence_chance", 0))
                 shard_chance_pct = max(0.0, 100.0 - used_pct)
             if shard_chance_pct > 0:
+                shard_chance = float(shard_chance_pct) / 100.0
                 shard_price = float(latest_prices.get(shard_id, 0) or 0)
-                expected_val += (float(shard_chance_pct) / 100.0) * 1.0 * shard_price
-
-        return round(expected_val, 2)
+                expected_val += shard_chance * 1.0 * shard_price
+                reagents.append(_build_reagent_entry(shard_id, shard_chance, 1.0, shard_price))
 
     elif tier_key == "rare":
         shard_id = matching_tier.get("shard_id")
         shard_chance = float(matching_tier.get("shard_chance", matching_tier.get("chance", 100))) / 100.0
         shard_price = float(latest_prices.get(shard_id, 0) or 0)
         expected_val = shard_chance * 1.0 * shard_price
+        if shard_id and shard_chance > 0:
+            reagents.append(_build_reagent_entry(shard_id, shard_chance, 1.0, shard_price))
 
         nexus_id = matching_tier.get("nexus_id")
         if nexus_id:
             nexus_chance = float(matching_tier.get("nexus_chance", 0)) / 100.0
             nexus_price = float(latest_prices.get(nexus_id, 0) or 0)
             expected_val += nexus_chance * 1.0 * nexus_price
-
-        return round(expected_val, 2)
+            if nexus_chance > 0:
+                reagents.append(_build_reagent_entry(nexus_id, nexus_chance, 1.0, nexus_price))
 
     elif tier_key == "epic":
         shard_id = matching_tier.get("shard_id")
@@ -1290,10 +1413,13 @@ def calculate_disenchant_value(
         avg_qty = (min_qty + max_qty) / 2.0
         shard_price = float(latest_prices.get(shard_id, 0) or 0)
         expected_val = chance * avg_qty * shard_price
+        if shard_id and chance > 0:
+            reagents.append(_build_reagent_entry(shard_id, chance, avg_qty, shard_price))
 
-        return round(expected_val, 2)
-
-    return 0.0
+    rounded_val = round(expected_val, 2)
+    if return_details:
+        return {"expected_value": rounded_val, "reagents": reagents}
+    return DisenchantResult(rounded_val, reagents)
 
 
 def export_sniper_addon_config(
@@ -1498,6 +1624,238 @@ def export_sniper_addon_config(
         "generated_at": gen_ts,
         "min_profit_copper": min_profit_copper,
         "targets": targets,
+    }
+
+
+def get_disenchant_arbitrage(
+    db_conn: Optional[sqlite3.Connection] = None,
+    realm: Optional[str] = None,
+    min_profit_copper: int = 1000,
+    de_tables_path: Optional[str] = None,
+    max_age_hours: Optional[float] = None,
+) -> list[dict]:
+    """Find equipment auction lots where E[DE Value] * 0.95 - buyout >= min_profit_copper.
+
+    Returns list of dicts sorted by expected_net_profit descending:
+      item_id, name, name_ru, quality, item_level, item_class, item_subclass,
+      buyout_copper, expected_de_value, expected_net_profit, roi_percent,
+      reagents, timestamp, realm.
+    """
+    if db_conn is None:
+        return []
+
+    check_and_reload_overrides(db_conn)
+    de_tables = load_disenchant_tables(de_tables_path) if de_tables_path else load_disenchant_tables()
+
+    min_ts = _get_cutoff_timestamp(db_conn, realm, max_age_hours)
+    cursor = db_conn.cursor()
+
+    # 1. Fetch latest prices on target realm for enchanting materials
+    latest_prices = {}
+    try:
+        cursor.execute("""
+            WITH latest_snapshots AS (
+                SELECT s.item_id, s.realm, s.price,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY s.item_id, s.realm
+                           ORDER BY s.timestamp DESC, s.id DESC
+                       ) as rn
+                FROM price_snapshots s
+                WHERE (? IS NULL OR s.realm = ?)
+                  AND s.price > 0
+            )
+            SELECT item_id, price FROM latest_snapshots WHERE rn = 1
+        """, (realm, realm))
+        latest_prices = {r[0]: r[1] for r in cursor.fetchall() if r[1] is not None and r[1] > 0}
+    except Exception:
+        latest_prices = {}
+
+    try:
+        cursor.execute("SELECT item_id, ewma_price FROM item_market_metrics WHERE (? IS NULL OR realm = ?)", (realm, realm))
+        for r in cursor.fetchall():
+            if r[1] and r[1] > 0:
+                latest_prices[r[0]] = int(r[1])
+    except Exception:
+        pass
+
+    # 2. Check if item_level column exists in items table
+    has_item_level = False
+    try:
+        cursor.execute("PRAGMA table_info(items)")
+        cols = [r[1] for r in cursor.fetchall()]
+        has_item_level = "item_level" in cols
+    except Exception:
+        pass
+
+    item_level_select = "i.item_level," if has_item_level else "NULL as item_level,"
+
+    # 3. Query candidate lots from latest_snapshots
+    query = f"""
+        WITH latest_snapshots AS (
+            SELECT s.item_id, s.realm, s.price, s.timestamp, s.id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY s.item_id, s.realm
+                       ORDER BY s.timestamp DESC, s.id DESC
+                   ) as rn
+            FROM price_snapshots s
+            WHERE (? IS NULL OR s.realm = ?)
+              AND (? IS NULL OR s.timestamp >= ?)
+              AND s.price > 0
+        )
+        SELECT s.item_id, s.price, s.timestamp,
+               i.name, i.name_ru, i.quality, i.item_class, i.item_subclass, i.category,
+               {item_level_select}
+               s.realm
+        FROM latest_snapshots s
+        LEFT JOIN items i ON s.item_id = i.item_id
+        WHERE s.rn = 1
+    """
+
+    results = []
+    try:
+        cursor.execute(query, (realm, realm, min_ts, min_ts))
+        rows = cursor.fetchall()
+    except Exception:
+        return []
+
+    for row in rows:
+        item_id = int(row[0])
+        buyout = int(row[1])
+        ts = row[2]
+        db_name = row[3]
+        db_name_ru = row[4]
+        db_quality = row[5]
+        db_class = row[6]
+        db_subclass = row[7]
+        db_cat = row[8]
+        db_level = row[9] if has_item_level else None
+
+        cat_item = _get_catalog_item(item_id)
+        combined_meta = dict(cat_item)
+
+        quality = db_quality if db_quality is not None else combined_meta.get("quality")
+        if quality not in (2, 3, 4):
+            continue
+
+        item_class = db_class if db_class is not None else combined_meta.get("item_class")
+        item_subclass = db_subclass if db_subclass is not None else combined_meta.get("item_subclass", 0)
+
+        level = db_level or combined_meta.get("item_level") or combined_meta.get("level") or combined_meta.get("req_level")
+        if level is None:
+            continue
+        try:
+            level = int(level)
+        except (ValueError, TypeError):
+            continue
+        if level <= 0:
+            continue
+
+        combined_meta["quality"] = quality
+        combined_meta["item_class"] = item_class
+        combined_meta["item_subclass"] = item_subclass
+        combined_meta["item_level"] = level
+
+        de_res = calculate_disenchant_value(
+            item_id=item_id,
+            conn=db_conn,
+            realm=realm,
+            item_meta=combined_meta,
+            latest_prices=latest_prices,
+            disenchant_tables=de_tables,
+        )
+
+        expected_de_val = float(de_res)
+        if expected_de_val <= 0:
+            continue
+
+        net_profit = round((expected_de_val * 0.95) - buyout, 2)
+        if net_profit < min_profit_copper:
+            continue
+
+        roi_pct = round((net_profit / buyout) * 100, 2) if buyout > 0 else 0.0
+
+        name_en = combined_meta.get("name") or db_name or get_item_name(db_conn, item_id, "en")
+        name_ru = db_name_ru or combined_meta.get("name_ru") or get_item_name(db_conn, item_id, "ru")
+
+        reagents = getattr(de_res, "reagents", [])
+        if not reagents and isinstance(de_res, dict):
+            reagents = de_res.get("reagents", [])
+
+        results.append({
+            "item_id": item_id,
+            "name": name_en,
+            "name_ru": name_ru,
+            "quality": int(quality),
+            "item_level": int(level),
+            "item_class": int(item_class) if item_class is not None else 0,
+            "item_subclass": int(item_subclass) if item_subclass is not None else 0,
+            "buyout_copper": int(buyout),
+            "expected_de_value": float(expected_de_val),
+            "expected_net_profit": float(net_profit),
+            "profit_copper": int(round(net_profit)),
+            "roi_percent": float(roi_pct),
+            "reagents": reagents,
+            "timestamp": ts,
+            "realm": row[10] if len(row) > 10 else realm,
+        })
+
+    results.sort(key=lambda x: x.get("expected_net_profit", 0), reverse=True)
+    return results
+
+
+def generate_dashboard_data(
+    conn: sqlite3.Connection,
+    realm: Optional[str] = None,
+    has_bartering: bool = False,
+    has_master_chef: bool = False,
+    max_age_hours: Optional[float] = None,
+    min_de_profit_copper: int = 1000,
+) -> dict[str, list[dict]]:
+    """Gather all market arbitrage streams for dashboard consumption."""
+    try:
+        vendor_arb = get_vendor_arbitrage(conn, realm=realm, max_age_hours=max_age_hours)
+    except TypeError:
+        vendor_arb = get_vendor_arbitrage(conn, realm=realm)
+
+    try:
+        crafting = get_crafting_margins(
+            conn,
+            has_bartering=has_bartering,
+            has_master_chef=has_master_chef,
+            realm=realm,
+            max_age_hours=max_age_hours,
+        )
+    except TypeError:
+        try:
+            crafting = get_crafting_margins(
+                conn,
+                has_bartering=has_bartering,
+                has_master_chef=has_master_chef,
+                realm=realm,
+            )
+        except TypeError:
+            crafting = get_crafting_margins(conn, realm=realm)
+
+    try:
+        anomalies = get_zscore_anomalies(conn, realm=realm, max_age_hours=max_age_hours)
+    except TypeError:
+        anomalies = get_zscore_anomalies(conn, realm=realm)
+
+    try:
+        disenchant = get_disenchant_arbitrage(
+            conn,
+            realm=realm,
+            min_profit_copper=min_de_profit_copper,
+            max_age_hours=max_age_hours,
+        )
+    except TypeError:
+        disenchant = get_disenchant_arbitrage(conn, realm=realm)
+
+    return {
+        "vendor_arbitrage": vendor_arb,
+        "crafting": crafting,
+        "anomalies": anomalies,
+        "disenchant_arbitrage": disenchant,
     }
 
 

@@ -24,11 +24,14 @@ from unittest.mock import patch
 import pytest
 
 from src.database import init_db
+from src.analytics import _CATALOG_CACHE
 from src.dashboard import (
     format_currency,
     notify_high_value_arbitrage,
     build_standalone_dashboard,
 )
+
+generate_dashboard_html = build_standalone_dashboard
 
 
 @pytest.fixture
@@ -1533,6 +1536,130 @@ def test_waylaid_tab_renders_crate_turnin_economics_not_single_item_craft(memory
     assert "data-value='900'" in crate_tbody
     # Must NOT render 1-item AH profit (250c) in crate turn-in tab
     assert "data-value='250'" not in crate_tbody
+
+
+def test_dashboard_disenchant_tab_and_inspector_integration(memory_db, tmp_path):
+    """Verify generate_dashboard_html renders disenchant tab, inspector card and transmits data to client script (Ticket 03)."""
+    # 1. Setup catalog items
+    _CATALOG_CACHE[9201] = {
+        "item_id": 9201,
+        "name": "Glowing Green Blade",
+        "name_ru": "Светящийся зеленый клинок",
+        "quality": 2,
+        "item_class": 2,  # Weapon
+        "item_level": 22,
+        "category": "weapon",
+    }
+    _CATALOG_CACHE[9202] = {
+        "item_id": 9202,
+        "name": "Bulwark of Ancient Kings",
+        "name_ru": "Оплот древних королей",
+        "quality": 3,
+        "item_class": 4,  # Armor / Shield
+        "item_level": 35,
+        "category": "armor",
+    }
+
+    now = int(time.time())
+    with memory_db:
+        # Insert equipment items and enchanting reagents into SQLite
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, name_ru, quality, item_class, category, vendor_sell_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (9201, "Glowing Green Blade", "Светящийся зеленый клинок", 2, 2, "weapon", 50),
+                (9202, "Bulwark of Ancient Kings", "Оплот древних королей", 3, 4, "armor", 200),
+                (10940, "Strange Dust", "Странная пыль", 1, 7, "trade_goods", 4),
+                (10939, "Greater Magic Essence", "Большая магическая эссенция", 2, 7, "trade_goods", 45),
+                (11138, "Small Radiant Shard", "Малый светящийся осколок", 3, 7, "trade_goods", 500),
+            ]
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                (10940, "Everlook", 200, now),
+                (10939, "Everlook", 1000, now),
+                (11138, "Everlook", 5000, now),
+                (9201, "Everlook", 100, now),
+                (9202, "Everlook", 1000, now),
+            ]
+        )
+
+    # 2. Call generate_dashboard_html()
+    out_file = tmp_path / "portal_de_test.html"
+    html_content = generate_dashboard_html(
+        memory_db,
+        output_path=str(out_file),
+        realm="Everlook",
+    )
+
+    # 3. Verify HTML output file is generated
+    assert out_file.is_file(), "portal HTML file was not written to output_path"
+    assert len(html_content) > 1000
+
+    # 4. Verify Disenchant Tab existence in navigation
+    assert 'data-tab="tab-disenchant"' in html_content
+    assert "tab-disenchant" in html_content
+    assert "Дизэнчант" in html_content
+
+    # Verify tab-pane container
+    assert '<div class="tab-pane" id="tab-disenchant">' in html_content
+
+    # Extract disenchant table rows
+    de_match = re.search(
+        r'<div\s+class=[\'"][^\'"]*tab-pane[^\'"]*[\'"][^>]*id=[\'"]tab-disenchant[\'"][^>]*>.*?<tbody>(.*?)</tbody>',
+        html_content,
+        re.DOTALL,
+    )
+    assert de_match is not None, "tab-disenchant tbody was not found in generated HTML"
+    de_tbody = de_match.group(1)
+
+    # Verify rows for both items rendered in table
+    assert "data-item-id='9202'" in de_tbody
+    assert "data-item-id='9201'" in de_tbody
+    assert "data-is-de='1'" in de_tbody
+    assert "Bulwark of Ancient Kings" in de_tbody or "Оплот древних королей" in de_tbody
+    assert "Glowing Green Blade" in de_tbody or "Светящийся зеленый клинок" in de_tbody
+    assert "reagent-summary" in de_tbody
+
+    # 5. Verify Disenchant Card in Inspector layout
+    assert 'id="disenchant-card"' in html_content
+    assert 'id="de-card-expected-val"' in html_content
+    assert 'id="de-reagents-list"' in html_content
+    assert "Карточка распыления (Disenchant)" in html_content
+
+    # 6. Verify client script data transmission (ITEM_STORE JSON)
+    store_match = re.search(r'var ITEM_STORE = (\{.*?\});\s*(?:var|const|\n)', html_content, re.DOTALL)
+    assert store_match is not None, "ITEM_STORE JSON was not serialized into client script"
+    item_store = json.loads(store_match.group(1))
+
+    # Verify item 9202 (Shield) in ITEM_STORE
+    assert "9202" in item_store, "Item 9202 missing from client ITEM_STORE"
+    item_9202 = item_store["9202"]
+    assert "deal_info" in item_9202
+    deal_9202 = item_9202["deal_info"]
+    assert deal_9202.get("is_disenchant") is True
+    assert deal_9202.get("expected_de_value") == 5000.0
+    assert deal_9202.get("buyout") == 1000
+    assert deal_9202.get("profit") == 3750
+    assert deal_9202.get("roi") == 375.0
+    assert "reagents" in deal_9202 and len(deal_9202["reagents"]) > 0
+    assert deal_9202["reagents"][0]["reagent_id"] == 11138
+
+    # Verify item 9201 (Sword) in ITEM_STORE
+    assert "9201" in item_store, "Item 9201 missing from client ITEM_STORE"
+    deal_9201 = item_store["9201"]["deal_info"]
+    assert deal_9201.get("is_disenchant") is True
+    assert deal_9201.get("expected_de_value") == 1275.0
+    assert deal_9201.get("buyout") == 100
+    assert deal_9201.get("roi") == 1111.25
+
+    # Verify client JavaScript dynamic update handlers for disenchant card
+    assert "var deCard = document.getElementById('disenchant-card');" in html_content
+    assert "deal.is_disenchant || deal.expected_de_value !== undefined" in html_content
+    assert "deCard.style.display = 'flex';" in html_content
+
 
 
 

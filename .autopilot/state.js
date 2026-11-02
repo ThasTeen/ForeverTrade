@@ -13,7 +13,7 @@ window.STATE =
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
   "baseCommit": null,
   "startedAt": "2026-11-03T00:12:46+03:00",
-  "updatedAt": "2026-11-03T00:33:17+03:00",
+  "updatedAt": "2026-11-03T00:55:13+03:00",
   "finishedAt": null,
   "stages": [
     {
@@ -63,8 +63,8 @@ window.STATE =
   ],
   "requirements": {
     "total": 27,
-    "done": 3,
-    "inTicket": 24,
+    "done": 18,
+    "inTicket": 9,
     "inSpec": 0,
     "placeholder": 0,
     "deferred": 0,
@@ -135,10 +135,16 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "in-progress",
+      "status": "done",
       "retries": 0,
       "repairs": 0,
-      "startedAt": "2026-11-03T00:33:17+03:00"
+      "startedAt": "2026-11-03T00:33:17+03:00",
+      "finishedAt": "2026-11-03T00:55:08+03:00",
+      "tests": {
+        "passed": 188,
+        "failed": 0
+      },
+      "commit": "06e8b31"
     },
     {
       "id": "03",
@@ -161,9 +167,10 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "pending",
+      "status": "in-progress",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-11-03T00:55:13+03:00"
     },
     {
       "id": "04",
@@ -218,7 +225,7 @@ window.STATE =
     }
   ],
   "tests": {
-    "passed": 184,
+    "passed": 188,
     "failed": 0
   },
   "debt": {
@@ -246,9 +253,11 @@ window.STATE =
     "2026-11-03T00:17:23+03:00",
     "2026-11-03T00:17:30+03:00",
     "2026-11-03T00:33:13+03:00",
-    "2026-11-03T00:33:17+03:00"
+    "2026-11-03T00:33:17+03:00",
+    "2026-11-03T00:55:08+03:00",
+    "2026-11-03T00:55:13+03:00"
   ],
-  "rev": 17,
+  "rev": 19,
   "waiting": null,
   "waits": [],
   "log": [
@@ -358,78 +367,98 @@ window.STATE =
         "02"
       ],
       "act": "start"
+    },
+    {
+      "t": "2026-11-03T00:55:08+03:00",
+      "k": "ticket",
+      "ids": [
+        "02"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 188,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-03T00:55:13+03:00",
+      "k": "ticket",
+      "ids": [
+        "03"
+      ],
+      "act": "start"
     }
   ],
   "reqList": [
     {
       "id": "R01",
       "text": "«Отказ от установки и зависимости от внутриигрового аддона TSM»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R02",
       "text": "«Собственный микро-аддон ForeverTrade_Sniper (250–300 строк Lua), использующий портированные и защищённые низкоуровневые алгоритмы сканирования TSM»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R03",
       "text": "«Индексация последней страницы и компенсация сдвига (Page Shift): FT_TargetPage, FT_CheckPrevPageNext»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R04",
       "text": "«Событийный Token-Bucket рейт-лимит и пауза при захвате цели: задержка 1.2–1.4 сек, таймаут 3.0 сек»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R05",
       "text": "«Автоматическая пауза сканера при захвате цели (защита от сдвига строк), звуковой алерт»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R06",
       "text": "«Поштучная проверка цены, фильтр минимального профита со стака min_profit_copper»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R07",
       "text": "«LRU-кэш из последних 200 записей (owner и timeLeft исключены из ключа хеша), выбор лота с максимальным totalSaved»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R08",
       "text": "«Безопасный выкуп через колесо мыши (Hardware Event + верификация слота): SecureActionButtonTemplate, SetOverrideBindingClick, FT_ExecuteVerifiedBuy»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R09",
       "text": "«При закрытии окна аукциона (AUCTION_HOUSE_CLOSED) автоматически вызывается FT_DisarmSniperBuy()»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R10",
       "text": "«При входе в мир или /reload аддон выводит в системный чат время генерации конфига (generated_at) и общее число загруженных ID»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R11",
       "text": "«В src/analytics.py реализуется функция export_sniper_addon_config(): генерирует плоскую хеш-таблицу таргетов config.lua»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R12",
       "text": "«Интеграция пути в run_watcher.py (CLI флаг --wow-addon-path)»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R13",
       "text": "«Вычисляет потолок выкупа за 1 единицу предмета по единой формуле MaxBuyout = max(I(L>=0.50)floor(0.65dbmarket), floor(0.80E[DE Value]), P_vendor_sell - Delta_vendor)»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R14",
       "text": "«Delta_vendor = max(50c, floor(1500c / max_stack)) — защита от засорения инвентаря и почты одиночными предметами»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R15",
@@ -484,7 +513,7 @@ window.STATE =
     {
       "id": "R25",
       "text": "«Найди способ сделать аддон максимально рабочим без тестирования на реальной игре. Говорят можно добыть точные сигнатуры апи без входа в игровой мир. Сделай это клиент wow forever ты знаешь где лежит, либо скопируй у тсм.»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R26",

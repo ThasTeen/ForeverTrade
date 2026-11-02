@@ -22,6 +22,7 @@ from src.analytics import (
     get_crafting_margins,
     get_zscore_anomalies,
     get_waylaid_crate_arbitrage,
+    get_disenchant_arbitrage,
     check_and_reload_overrides,
     reload_overrides,
     load_disenchant_tables,
@@ -2592,6 +2593,200 @@ def test_sniper_addon_lua_and_toc_structure():
         assert isinstance(item_id, int)
         assert isinstance(max_buyout, int)
         assert max_buyout > 0
+
+
+# ---------------------------------------------------------------------------
+# Ticket 03: Disenchant Arbitrage Tests
+# ---------------------------------------------------------------------------
+
+def test_get_disenchant_arbitrage_profitable_and_filtering(memory_db):
+    """Verify get_disenchant_arbitrage detects profitable equipment DE lots and enforces all filters (Ticket 03)."""
+    # 1. Populate catalog cache for test items
+    _CATALOG_CACHE[9101] = {
+        "item_id": 9101,
+        "name": "Green Sword of Power",
+        "quality": 2,
+        "item_class": 2,  # Weapon
+        "item_level": 22,
+        "category": "weapon",
+    }
+    _CATALOG_CACHE[9102] = {
+        "item_id": 9102,
+        "name": "Rare Aegis of the Sun",
+        "quality": 3,
+        "item_class": 4,  # Armor / Shield
+        "item_level": 35,
+        "category": "armor",
+    }
+    _CATALOG_CACHE[9103] = {
+        "item_id": 9103,
+        "name": "Overpriced Claymore",
+        "quality": 2,
+        "item_class": 2,  # Weapon
+        "item_level": 22,
+        "category": "weapon",
+    }
+    _CATALOG_CACHE[9104] = {
+        "item_id": 9104,
+        "name": "Silk Cloth Bolt",
+        "quality": 2,
+        "item_class": 7,  # Trade goods (non-equipment)
+        "item_level": 30,
+        "category": "trade_goods",
+    }
+    _CATALOG_CACHE[9105] = {
+        "item_id": 9105,
+        "name": "Silverleaf Bundle",
+        "quality": 1,
+        "item_class": 7,  # Herb (non-equipment)
+        "item_level": 5,
+        "category": "trade_goods",
+    }
+    _CATALOG_CACHE[9106] = {
+        "item_id": 9106,
+        "name": "Foreign Dagger",
+        "quality": 2,
+        "item_class": 2,  # Weapon on another realm
+        "item_level": 22,
+        "category": "weapon",
+    }
+
+    now = int(time.time())
+    with memory_db:
+        # Insert items into SQLite
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [
+                (9101, "Green Sword of Power", 2, 2, "weapon", 50),
+                (9102, "Rare Aegis of the Sun", 3, 4, "armor", 200),
+                (9103, "Overpriced Claymore", 2, 2, "weapon", 60),
+                (9104, "Silk Cloth Bolt", 2, 7, "trade_goods", 10),
+                (9105, "Silverleaf Bundle", 1, 7, "trade_goods", 5),
+                (9106, "Foreign Dagger", 2, 2, "weapon", 50),
+                (10940, "Strange Dust", 1, 7, "trade_goods", 4),
+                (10939, "Greater Magic Essence", 2, 7, "trade_goods", 45),
+                (11138, "Small Radiant Shard", 3, 7, "trade_goods", 500),
+            ]
+        )
+        # Insert price snapshots for Everlook and Razorfen
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [
+                # Enchanting materials for Everlook
+                (10940, "Everlook", 100, now),     # Strange Dust = 100c
+                (10939, "Everlook", 500, now),     # Greater Magic Essence = 500c
+                (11138, "Everlook", 5000, now),    # Small Radiant Shard = 5000c
+
+                # Equipment candidate lots on Everlook:
+                # 9101: Green sword ilvl 22 -> E[DE] = 637.5c, buyout = 200c -> net_profit = 637.5 * 0.95 - 200 = 405.62c
+                (9101, "Everlook", 200, now),
+                # 9102: Rare shield ilvl 35 -> E[DE] = 5000c, buyout = 1000c -> net_profit = 5000 * 0.95 - 1000 = 3750c
+                (9102, "Everlook", 1000, now),
+                # 9103: Overpriced sword -> buyout 10,000c -> net_profit < 0 (< min_profit_copper)
+                (9103, "Everlook", 10000, now),
+                # 9104: Non-equipment cloth -> buyout 10c (cheap, but class 7)
+                (9104, "Everlook", 10, now),
+                # 9105: Non-equipment herb -> buyout 5c (cheap, but class 7, quality 1)
+                (9105, "Everlook", 5, now),
+
+                # Enchanting materials and lot on Razorfen (for realm filtering verification)
+                (10940, "Razorfen", 100, now),
+                (10939, "Razorfen", 500, now),
+                (9106, "Razorfen", 200, now),
+            ]
+        )
+
+    # 2. Call get_disenchant_arbitrage for realm 'Everlook' with min_profit_copper = 100
+    results = get_disenchant_arbitrage(memory_db, realm="Everlook", min_profit_copper=100)
+
+    # Verify profitable lots returned and non-equipment / unprofitable / other realm filtered out
+    assert len(results) == 2, f"Expected 2 profitable lots, got {len(results)}"
+    res_ids = [r["item_id"] for r in results]
+    assert res_ids == [9102, 9101], f"Expected [9102, 9101] sorted descending, got {res_ids}"
+
+    # Verify sorted by expected_net_profit descending
+    assert results[0]["expected_net_profit"] >= results[1]["expected_net_profit"]
+    assert results[0]["expected_net_profit"] == 3750.0
+    assert results[1]["expected_net_profit"] == 405.62
+
+    # Verify math and dictionary fields
+    for r in results:
+        # Check required fields
+        for field in (
+            "item_id", "name", "quality", "item_level",
+            "expected_de_value", "expected_net_profit", "roi_percent", "reagents"
+        ):
+            assert field in r, f"Missing required field '{field}' in result: {r}"
+
+        # Check types
+        assert isinstance(r["item_id"], int)
+        assert isinstance(r["name"], str)
+        assert isinstance(r["quality"], int)
+        assert isinstance(r["item_level"], int)
+        assert isinstance(r["expected_de_value"], (int, float))
+        assert isinstance(r["expected_net_profit"], (int, float))
+        assert isinstance(r["roi_percent"], (int, float))
+        assert isinstance(r["reagents"], list)
+        assert len(r["reagents"]) > 0
+
+        # Check net profit formula: expected_de_value * 0.95 - buyout >= min_profit_copper
+        expected_calc = round((r["expected_de_value"] * 0.95) - r["buyout_copper"], 2)
+        assert r["expected_net_profit"] == expected_calc
+        assert r["expected_net_profit"] >= 100
+
+        # Check reagents structure
+        for reagent in r["reagents"]:
+            assert "reagent_id" in reagent
+            assert "chance" in reagent
+            assert "expected_count" in reagent
+            assert "unit_price_copper" in reagent
+
+    # Verify specific details of Rare Shield (9102)
+    shield_res = results[0]
+    assert shield_res["item_id"] == 9102
+    assert shield_res["quality"] == 3
+    assert shield_res["item_level"] == 35
+    assert shield_res["buyout_copper"] == 1000
+    assert shield_res["expected_de_value"] == 5000.0
+    assert shield_res["roi_percent"] == 375.0
+    assert len(shield_res["reagents"]) == 1
+    assert shield_res["reagents"][0]["reagent_id"] == 11138
+
+    # Verify specific details of Green Sword (9101)
+    sword_res = results[1]
+    assert sword_res["item_id"] == 9101
+    assert sword_res["quality"] == 2
+    assert sword_res["item_level"] == 22
+    assert sword_res["buyout_copper"] == 200
+    assert sword_res["expected_de_value"] == 637.5
+    assert sword_res["roi_percent"] == 202.81
+    reagent_ids = [rg["reagent_id"] for rg in sword_res["reagents"]]
+    assert 10940 in reagent_ids
+    assert 10939 in reagent_ids
+
+    # 3. Verify threshold filtering (cutoff of lots below min_profit_copper)
+    high_threshold_results = get_disenchant_arbitrage(memory_db, realm="Everlook", min_profit_copper=4000)
+    assert len(high_threshold_results) == 0
+
+    medium_threshold_results = get_disenchant_arbitrage(memory_db, realm="Everlook", min_profit_copper=1000)
+    assert len(medium_threshold_results) == 1
+    assert medium_threshold_results[0]["item_id"] == 9102
+
+    # 4. Verify realm filtering
+    razorfen_results = get_disenchant_arbitrage(memory_db, realm="Razorfen", min_profit_copper=100)
+    assert len(razorfen_results) == 1
+    assert razorfen_results[0]["item_id"] == 9106
+    assert razorfen_results[0]["realm"] == "Razorfen"
+
+    # Ensure other realm lots are never mixed in
+    everlook_item_ids = {r["item_id"] for r in results}
+    assert 9106 not in everlook_item_ids
+    razorfen_item_ids = {r["item_id"] for r in razorfen_results}
+    assert 9101 not in razorfen_item_ids
+    assert 9102 not in razorfen_item_ids
+
 
 
 

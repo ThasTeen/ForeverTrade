@@ -18,12 +18,14 @@ import plotly.graph_objects as go
 try:
     from src.analytics import (
         get_crafting_margins,
+        get_disenchant_arbitrage,
         get_vendor_arbitrage,
         get_zscore_anomalies,
     )
 except ImportError:
     from analytics import (
         get_crafting_margins,
+        get_disenchant_arbitrage,
         get_vendor_arbitrage,
         get_zscore_anomalies,
     )
@@ -483,6 +485,8 @@ def _get_all_items_market_data(
                         d = market_data[iid]["deal_info"]
                         if "buyout_price" in it or "price" in it:
                             d["buyout"] = it.get("buyout_price", it.get("price", 0))
+                        elif "buyout_copper" in it:
+                            d["buyout"] = it.get("buyout_copper", 0)
                         if "vendor_sell_price" in it:
                             d["vendor_sell"] = it.get("vendor_sell_price", 0)
                         if "cost_copper" in it or "cost" in it:
@@ -491,12 +495,21 @@ def _get_all_items_market_data(
                             d["revenue"] = it.get("revenue_copper", it.get("revenue", 0))
                         if "profit_copper" in it or "profit" in it:
                             d["profit"] = it.get("profit_copper", it.get("profit", 0))
+                        elif "expected_net_profit" in it:
+                            d["profit"] = it.get("expected_net_profit", 0)
                         if "roi_percent" in it or "roi" in it:
                             d["roi"] = it.get("roi_percent", it.get("roi", 0))
                         if "signal" in it:
                             d["signal"] = it.get("signal")
                         if it.get("is_waylaid_target"):
                             d["is_waylaid"] = True
+                        if "expected_de_value" in it:
+                            d["expected_de_value"] = it.get("expected_de_value", 0)
+                            d["is_disenchant"] = True
+                        if "reagents" in it and it.get("reagents"):
+                            d["reagents"] = it.get("reagents", [])
+                            if "expected_de_value" in it:
+                                d["is_disenchant"] = True
                 except (ValueError, TypeError):
                     pass
 
@@ -606,6 +619,16 @@ def build_standalone_dashboard(
     except TypeError:
         anomalies = get_zscore_anomalies(conn, realm=realm)
 
+    try:
+        disenchant_arbitrage = get_disenchant_arbitrage(conn, realm=realm, max_age_hours=max_age_hours)
+    except TypeError:
+        try:
+            disenchant_arbitrage = get_disenchant_arbitrage(conn, realm=realm)
+        except Exception:
+            disenchant_arbitrage = []
+    except Exception:
+        disenchant_arbitrage = []
+
     crafting_display = all_crafting
     crates_only = [c for c in crafting_display if c.get("is_waylaid_target")]
     strong_buys = [a for a in anomalies if "BUY" in str(a.get("signal", ""))]
@@ -621,7 +644,7 @@ def build_standalone_dashboard(
     escaped_realm = html.escape(str(realm or "Everlook"))
 
     # Market metadata
-    extra_items = list(vendor_arbitrage) + list(crafting_display) + list(anomalies)
+    extra_items = list(vendor_arbitrage) + list(crafting_display) + list(anomalies) + list(disenchant_arbitrage)
     items_market_data = _get_all_items_market_data(conn, realm=realm, extra_items=extra_items)
 
     # Render Plotly price history chart
@@ -885,7 +908,99 @@ def build_standalone_dashboard(
     else:
         anomaly_tbody = "\n".join(anomaly_rows)
 
-    # 7. Dropdown options
+    # 7. Build Disenchant Shuffle table rows
+    disenchant_rows = []
+    for item in disenchant_arbitrage:
+        item_id = item.get("item_id")
+        q = item.get("quality", 2)
+        ilvl = item.get("item_level", "—")
+        raw_name = item.get("name")
+        if item_id is not None:
+            name_ru = get_item_name(conn, item_id, "ru")
+            name_en = get_item_name(conn, item_id, "en")
+        else:
+            name_ru = str(raw_name) if raw_name is not None else "Equipment"
+            name_en = name_ru
+
+        escaped_name_ru = html.escape(name_ru)
+        escaped_name_en = html.escape(name_en)
+
+        buyout = item.get("buyout_copper", 0)
+        expected_de_val = item.get("expected_de_value", 0)
+        net_profit = item.get("expected_net_profit", item.get("profit_copper", 0))
+        roi_pct = item.get("roi_percent", 0.0)
+
+        q_map = {
+            2: ("Необычный", "Uncommon"),
+            3: ("Редкий", "Rare"),
+            4: ("Эпический", "Epic"),
+        }
+        q_ru, q_en = q_map.get(q, ("Обычный", "Common"))
+
+        reagents = item.get("reagents", [])
+        if reagents:
+            materials_parts_ru = []
+            materials_parts_en = []
+            for r in reagents[:3]:
+                r_name_ru = r.get("reagent_name_ru") or r.get("reagent_name") or f"Item {r.get('reagent_id')}"
+                r_name_en = r.get("reagent_name") or f"Item {r.get('reagent_id')}"
+                ch = r.get("chance", 1.0)
+                ch_pct = int(round(ch * 100)) if ch <= 1.0 else int(round(ch))
+                materials_parts_ru.append(f"{r_name_ru} ({ch_pct}%)")
+                materials_parts_en.append(f"{r_name_en} ({ch_pct}%)")
+            mat_text_ru = ", ".join(materials_parts_ru)
+            mat_text_en = ", ".join(materials_parts_en)
+            if len(reagents) > 3:
+                mat_text_ru += f" (+{len(reagents)-3})"
+                mat_text_en += f" (+{len(reagents)-3})"
+            materials_html = (
+                f"<span class='reagent-summary i18n' "
+                f"data-ru='{html.escape(mat_text_ru)}' "
+                f"data-en='{html.escape(mat_text_en)}'>"
+                f"{html.escape(mat_text_ru)}</span>"
+            )
+        else:
+            materials_html = "—"
+
+        id_attr = f"data-item-id='{item_id}'" if item_id is not None else ""
+        click_attr = f"onclick=\"onRowClick(event, {item_id})\"" if item_id is not None else ""
+        graph_btn = f"<button class='graph-btn' title='График / Chart' onclick='openItemModal({item_id}, event)'>📈</button>" if item_id is not None else ""
+        wh_link_open = f"<a href='https://www.wowhead.com/forever/item={item_id}' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link q-{q}'>" if item_id is not None else ""
+        wh_link_close = "</a>" if item_id is not None else ""
+
+        row_html = (
+            f"<tr {id_attr} {click_attr} data-is-de='1' class='clickable-row'>"
+            f"<td class='q-{q}' data-value='{escaped_name_ru}'>"
+            f"<div class='item-cell-wrap'>"
+            f"{wh_link_open}<span class='item-name i18n' data-ru='{escaped_name_ru}' data-en='{escaped_name_en}'>{escaped_name_ru}</span>{wh_link_close}"
+            f"<div class='item-actions'>"
+            f"<button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button>"
+            f"{graph_btn}"
+            f"</div>"
+            f"</div>"
+            f"</td>"
+            f"<td data-value='{ilvl}'>{ilvl}</td>"
+            f"<td data-value='{q}'><span class='q-{q} i18n' data-ru='{q_ru}' data-en='{q_en}'>{q_ru}</span></td>"
+            f"<td data-value='{buyout}'>{format_currency(buyout, as_html=True)}</td>"
+            f"<td data-value='{expected_de_val}'>{format_currency(expected_de_val, as_html=True)}</td>"
+            f"<td data-value='{net_profit}' class='profit-cell'>{format_currency(net_profit, as_html=True)}</td>"
+            f"<td data-value='{roi_pct}' class='roi-cell'>+{roi_pct}%</td>"
+            f"<td class='materials-cell'>{materials_html}</td>"
+            f"</tr>"
+        )
+        disenchant_rows.append(row_html)
+
+    if not disenchant_rows:
+        disenchant_tbody = (
+            "<tr><td colspan='8' class='empty-state i18n' "
+            "data-ru='Нет прибыльных предметов для распыления (≥ 10s)' "
+            "data-en='No profitable disenchant opportunities (≥ 10s)'>"
+            "Нет прибыльных предметов для распыления (≥ 10s)</td></tr>"
+        )
+    else:
+        disenchant_tbody = "\n".join(disenchant_rows)
+
+    # 8. Dropdown options
     sorted_items = sorted(
         items_market_data.values(),
         key=lambda x: str(x.get("name_ru") or x.get("name_en") or "").lower(),
@@ -1441,6 +1556,75 @@ def build_standalone_dashboard(
             font-weight: 600;
         }}
 
+        .disenchant-card {{
+            background: #0b0e14;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 8px;
+        }}
+
+        .de-summary-row {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.85rem;
+            padding: 4px 0;
+            border-bottom: 1px dashed var(--border-color);
+        }}
+
+        .de-reagents-header {{
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
+        }}
+
+        .de-reagents-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }}
+
+        .de-reagent-row {{
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 6px 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }}
+
+        .de-reagent-top {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.82rem;
+            font-weight: 600;
+        }}
+
+        .de-reagent-bottom {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: #8b949e;
+        }}
+
+        .materials-cell {{
+            font-size: 0.8rem;
+            color: #8b949e;
+            max-width: 250px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+
         /* Toast notification */
         .toast {{
             position: fixed;
@@ -1579,6 +1763,9 @@ def build_standalone_dashboard(
                     <button class="tab-btn" data-tab="vendor-arbitrage" onclick="switchTab('vendor-arbitrage')">
                         ⚔️ <span class="i18n" data-ru="Арбитраж" data-en="Arbitrage">Арбитраж</span> <span class="tab-count">{len(vendor_arbitrage)}</span>
                     </button>
+                    <button class="tab-btn" data-tab="tab-disenchant" onclick="switchTab('tab-disenchant')">
+                        ✨ <span class="i18n" data-ru="Дизэнчант" data-en="Disenchant">Дизэнчант</span> <span class="tab-count">{len(disenchant_arbitrage)}</span>
+                    </button>
                     <button class="tab-btn" data-tab="waylaid-crates" onclick="switchTab('waylaid-crates')">
                         ⚗️ <span class="i18n" data-ru="Крафт (Dual)" data-en="Craft (Dual)">Крафт (Dual)</span> <span class="tab-count">{len(crafting_display)}</span>
                     </button>
@@ -1631,6 +1818,29 @@ def build_standalone_dashboard(
                                 </thead>
                                 <tbody>
                                     {arbitrage_tbody}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Дизэнчант (Disenchant Shuffle) -->
+                    <div class="tab-pane" id="tab-disenchant">
+                        <div class="table-responsive">
+                            <table class="sortable">
+                                <thead>
+                                    <tr>
+                                        <th class="i18n" data-ru="Предмет" data-en="Item">Предмет</th>
+                                        <th class="i18n" data-ru="ilvl" data-en="ilvl">ilvl</th>
+                                        <th class="i18n" data-ru="Качество" data-en="Quality">Качество</th>
+                                        <th class="i18n" data-ru="Выкуп" data-en="Buyout">Выкуп</th>
+                                        <th class="i18n" data-ru="DE Value" data-en="DE Value">DE Value</th>
+                                        <th class="i18n" data-ru="Чистая прибыль" data-en="Net Profit">Чистая прибыль</th>
+                                        <th class="i18n" data-ru="ROI" data-en="ROI">ROI</th>
+                                        <th class="i18n" data-ru="Материалы" data-en="Materials">Материалы</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {disenchant_tbody}
                                 </tbody>
                             </table>
                         </div>
@@ -1749,6 +1959,21 @@ def build_standalone_dashboard(
                                 <span id="calc-roi" class="calc-val roi-cell">—</span>
                             </div>
                         </div>
+                    </div>
+
+                    <!-- Disenchant Breakdown Card -->
+                    <div class="disenchant-card" id="disenchant-card" style="display: none;">
+                        <div class="calc-header">
+                            ✨ <span class="i18n" data-ru="Карточка распыления (Disenchant)" data-en="Disenchant Breakdown">Карточка распыления (Disenchant)</span>
+                        </div>
+                        <div class="de-summary-row">
+                            <span class="calc-label i18n" data-ru="Ожидаемое DE Value:" data-en="Expected DE Value:">Ожидаемое DE Value:</span>
+                            <span id="de-card-expected-val" class="calc-val profit-cell">—</span>
+                        </div>
+                        <div class="de-reagents-header i18n" data-ru="Выпадающие материалы (Drop Table):" data-en="Disenchant Materials:">
+                            Выпадающие материалы (Drop Table):
+                        </div>
+                        <div class="de-reagents-list" id="de-reagents-list"></div>
                     </div>
                 </div>
             </aside>
@@ -2096,6 +2321,13 @@ def build_standalone_dashboard(
                 breakeven = cost;
                 profit = deal.profit !== undefined ? deal.profit : (vendorSell - cost);
                 roi = cost > 0 ? '+' + ((profit / cost) * 100).toFixed(1) + '%' : '—';
+            }} else if (deal.expected_de_value !== undefined) {{
+                cost = deal.buyout !== undefined ? deal.buyout : (item.current_price || 0);
+                var expDe = deal.expected_de_value;
+                ahCut = Math.round(expDe * 0.05);
+                breakeven = Math.round(cost / 0.95);
+                profit = deal.profit !== undefined ? deal.profit : Math.round(expDe * 0.95 - cost);
+                roi = cost > 0 ? '+' + ((profit / cost) * 100).toFixed(1) + '%' : '—';
             }} else {{
                 cost = item.current_price || 0;
                 var expSell = item.mean_price || item.current_price || 0;
@@ -2115,6 +2347,46 @@ def build_standalone_dashboard(
             if (elProfit) elProfit.innerHTML = formatCurrencyHtml(profit);
             var elRoi = document.getElementById('calc-roi');
             if (elRoi) elRoi.textContent = roi;
+
+            // Disenchant Breakdown card updates
+            var deCard = document.getElementById('disenchant-card');
+            if (deCard) {{
+                var isDe = (deal && (deal.is_disenchant || deal.expected_de_value !== undefined)) || (currentActiveTab === 'tab-disenchant');
+                if (isDe && deal && deal.reagents && deal.reagents.length > 0) {{
+                    deCard.style.display = 'flex';
+                    var deExpEl = document.getElementById('de-card-expected-val');
+                    if (deExpEl) {{
+                        deExpEl.innerHTML = formatCurrencyHtml(deal.expected_de_value || 0);
+                    }}
+                    var listEl = document.getElementById('de-reagents-list');
+                    if (listEl) {{
+                        var rHtml = '';
+                        deal.reagents.forEach(function(r) {{
+                            var rName = (lang === 'en' ? r.reagent_name : r.reagent_name_ru) || r.reagent_name || r.reagent_name_ru || ('Item ' + r.reagent_id);
+                            var chancePct = r.chance <= 1.0 ? Math.round(r.chance * 1000) / 10 : r.chance;
+                            var expCount = r.expected_count !== undefined ? r.expected_count : 1.0;
+                            var unitPrice = r.unit_price_copper || 0;
+                            var totalVal = Math.round((r.chance <= 1.0 ? r.chance : r.chance / 100) * expCount * unitPrice);
+                            var safeName = String(rName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                            rHtml += '<div class="de-reagent-row">' +
+                                '<div class="de-reagent-top">' +
+                                    '<a href="https://www.wowhead.com/forever/item=' + r.reagent_id + '" data-wowhead="domain=forever" target="_blank" rel="noopener" class="wowhead-link">' +
+                                        safeName +
+                                    '</a>' +
+                                    '<span class="profit-cell">+' + formatCurrencyHtml(totalVal) + '</span>' +
+                                '</div>' +
+                                '<div class="de-reagent-bottom">' +
+                                    '<span>' + (lang === 'en' ? 'Chance: ' : 'Шанс: ') + chancePct + '% &times; ' + expCount + '</span>' +
+                                    '<span>AH: ' + formatCurrencyHtml(unitPrice) + '</span>' +
+                                '</div>' +
+                            '</div>';
+                        }});
+                        listEl.innerHTML = rHtml;
+                    }}
+                }} else {{
+                    deCard.style.display = 'none';
+                }}
+            }}
 
             updateInspectorChart(item, activeName);
 
