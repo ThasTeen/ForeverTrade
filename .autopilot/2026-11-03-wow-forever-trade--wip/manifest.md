@@ -19,8 +19,8 @@
 | R13 | «Вычисляет потолок выкупа за 1 единицу предмета по единой формуле MaxBuyout = max(I(L>=0.50)*floor(0.65*dbmarket), floor(0.80*E[DE Value]), P_vendor_sell - Delta_vendor)» | done | — | T02 → 06e8b31 |
 | R14 | «Delta_vendor = max(50c, floor(1500c / max_stack)) — защита от засорения инвентаря и почты одиночными предметами» | done | — | T02 → 06e8b31 |
 | R15 | «Из TradeSkillMaster/Data/Disenchanting.lua извлекаются матрицы матожидания E[mats] и сохраняются в data/disenchant_tables_era.json» | done | — | T01 → 8393e2a |
-| R16 | «Метод get_disenchant_arbitrage() находит на аукционе экипировку, выставленную дешевле стоимости распыла минус 5% комиссии» | in-ticket | — | T03 |
-| R17 | «Новый таб в Goblin Terminal: ✨ Дизэнчант и раскладка дропа в инспекторе» | in-ticket | — | T03 |
+| R16 | «Метод get_disenchant_arbitrage() находит на аукционе экипировку, выставленную дешевле стоимости распыла минус 5% комиссии» | done | — | T03 → 066f2c5 |
+| R17 | «Новый таб в Goblin Terminal: ✨ Дизэнчант и раскладка дропа в инспекторе» | done | — | T03 → 066f2c5 |
 | R18 | «Робастный DBMarket и Hampel Filter: замена классической sigma на робастную sigma_MAD = 1.4826 * MAD с отсечением выбросов» | in-ticket | — | T04 |
 | R19 | «Экспоненциальное затухание (EWMA) с полураспадом 3.5 дня: w_i = exp(-lambda * delta_t)» | in-ticket | — | T04 |
 | R20 | «Таблица кэша item_market_metrics в src/database.py» | in-ticket | — | T04 |

@@ -27,6 +27,8 @@ from src.analytics import (
     reload_overrides,
     load_disenchant_tables,
     compute_liquidity_score,
+    compute_robust_market_metrics,
+    update_all_market_metrics,
     get_strong_buys,
     VENDOR_REAGENTS_WHITELIST,
     calculate_disenchant_value,
@@ -2786,6 +2788,198 @@ def test_get_disenchant_arbitrage_profitable_and_filtering(memory_db):
     razorfen_item_ids = {r["item_id"] for r in razorfen_results}
     assert 9101 not in razorfen_item_ids
     assert 9102 not in razorfen_item_ids
+
+
+# ---------------------------------------------------------------------------
+# Ticket 04: Robust Market Metrics (Median, MAD, Hampel filter, EWMA)
+# ---------------------------------------------------------------------------
+
+def test_compute_robust_market_metrics_hampel_and_ewma():
+    """Verify Hampel filter outlier rejection, uniform pricing (MAD=0), and EWMA recency weighting."""
+    # 1. Hampel filter outlier rejection:
+    # Price series with normal variation around 100 and a 50000 troll buyout outlier
+    prices_with_outlier = [100, 102, 98, 101, 100, 99, 50000]
+    res_outlier = compute_robust_market_metrics(prices_with_outlier)
+
+    assert res_outlier["sample_count"] == 7
+    # 50000 should be rejected by Hampel filter:
+    # Median = 100, deviations = [0, 2, 2, 1, 0, 1, 49900], MAD = 1
+    # Threshold = 3 * max(1.4826 * 1, 0.10 * 100) = 3 * 10 = 30
+    # |50000 - 100| = 49900 > 30 -> Rejected!
+    assert res_outlier["cleaned_count"] == 6
+    assert res_outlier["median_price"] == 100
+    assert res_outlier["mad"] == 1
+    assert res_outlier["sigma_mad"] == 1
+    # Without timestamps, ewma_price is arithmetic mean of cleaned prices: (100+102+98+101+100+99)/6 = 100
+    assert res_outlier["ewma_price"] == 100
+
+    # 2. Uniform prices test (MAD = 0):
+    # Prices [200, 200, 200, 200] has MAD = 0, threshold must floor to 0.10 * P~ to avoid false rejections
+    uniform_prices = [200, 200, 200, 200]
+    res_uniform = compute_robust_market_metrics(uniform_prices)
+
+    assert res_uniform["sample_count"] == 4
+    assert res_uniform["cleaned_count"] == 4
+    assert res_uniform["median_price"] == 200
+    assert res_uniform["mad"] == 0
+    assert res_uniform["sigma_mad"] == 0
+    assert res_uniform["ewma_price"] == 200
+
+    # Slight variation with MAD = 0 (e.g. 3 identical prices, 1 close price)
+    # Median = 200, deviations = [0, 0, 0, 10] -> MAD = 0
+    # Floor = 3 * (0.10 * 200) = 60, deviation 10 <= 60 -> point 210 is kept!
+    res_slight = compute_robust_market_metrics([200, 200, 200, 210])
+    assert res_slight["sample_count"] == 4
+    assert res_slight["cleaned_count"] == 4
+    assert res_slight["mad"] == 0
+
+    # 3. EWMA test: recent points have higher weight than points 1 week ago
+    t_now = 1_700_000_000
+    t_week_ago = t_now - 7 * 86400  # 7 days ago (2 half-lives for default half_life_days=3.5)
+
+    # Rising trend: 100 copper 7 days ago, 200 copper now
+    # lambda = ln(2)/(3.5*86400). w_now = 1.0, w_week_ago = exp(-2*ln(2)) = 0.25
+    # EWMA = (100 * 0.25 + 200 * 1.0) / 1.25 = 225 / 1.25 = 180
+    res_up = compute_robust_market_metrics(
+        [100, 200],
+        timestamps=[t_week_ago, t_now],
+        half_life_days=3.5,
+    )
+    assert res_up["sample_count"] == 2
+    assert res_up["cleaned_count"] == 2
+    assert res_up["ewma_price"] == 180
+    assert res_up["ewma_price"] > 150  # Significantly higher than unweighted mean 150
+
+    # Falling trend: 200 copper 7 days ago, 100 copper now
+    # EWMA = (200 * 0.25 + 100 * 1.0) / 1.25 = 150 / 1.25 = 120
+    res_down = compute_robust_market_metrics(
+        [200, 100],
+        timestamps=[t_week_ago, t_now],
+        half_life_days=3.5,
+    )
+    assert res_down["ewma_price"] == 120
+    assert res_down["ewma_price"] < 150  # Significantly lower than unweighted mean 150
+
+    # 4. Boundary cases
+    empty_res = compute_robust_market_metrics([])
+    assert empty_res["sample_count"] == 0
+    assert empty_res["cleaned_count"] == 0
+    assert empty_res["median_price"] == 0
+    assert empty_res["ewma_price"] == 0
+
+    single_res = compute_robust_market_metrics([350], timestamps=[t_now])
+    assert single_res["sample_count"] == 1
+    assert single_res["cleaned_count"] == 1
+    assert single_res["median_price"] == 350
+    assert single_res["mad"] == 0
+    assert single_res["ewma_price"] == 350
+
+
+def test_update_all_market_metrics_integration(memory_db):
+    """Verify integration of update_all_market_metrics with SQLite price_snapshots and item_market_metrics."""
+    now = int(time.time())
+    t_old = now - 7 * 86400
+
+    # 1. Populate items metadata
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, item_class, category, quality)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (6001, "Everlook Outlier Herb", "Trade Goods", "Herb", 1),
+                (6002, "Everlook Flat Stone", "Trade Goods", "Metal & Stone", 1),
+                (6003, "Razorfen Leather", "Trade Goods", "Leather", 1),
+            ]
+        )
+
+        # Snapshots for item 6001 on Everlook: [100, 102, 98, 101, 100, 99, 50000]
+        p_herb = [100, 102, 98, 101, 100, 99, 50000]
+        ts_herb = [t_old + i * 3600 for i in range(len(p_herb))]
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [(6001, "Everlook", p, t) for p, t in zip(p_herb, ts_herb)]
+        )
+
+        # Snapshots for item 6002 on Everlook: [200, 200, 200, 200]
+        p_stone = [200, 200, 200, 200]
+        ts_stone = [t_old + i * 3600 for i in range(len(p_stone))]
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [(6002, "Everlook", p, t) for p, t in zip(p_stone, ts_stone)]
+        )
+
+        # Snapshots for item 6003 on Razorfen: [350, 360]
+        p_razor = [350, 360]
+        ts_razor = [t_old, now]
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, ?, ?, ?)""",
+            [(6003, "Razorfen", p, t) for p, t in zip(p_razor, ts_razor)]
+        )
+
+    # 2. Run update_all_market_metrics for Everlook
+    updated_count = update_all_market_metrics(memory_db, realm="Everlook")
+    assert updated_count == 2
+
+    # Verify Everlook records exist in item_market_metrics
+    cursor = memory_db.cursor()
+    cursor.execute(
+        """SELECT item_id, realm, median_price, mad, sigma_mad, ewma_price, liquidity_score, sample_count
+           FROM item_market_metrics
+           WHERE realm = 'Everlook'
+           ORDER BY item_id ASC"""
+    )
+    rows = cursor.fetchall()
+    assert len(rows) == 2
+
+    # Item 6001: Hampel filter rejected 50000
+    m_herb = rows[0]
+    assert m_herb["item_id"] == 6001
+    assert m_herb["realm"] == "Everlook"
+    assert m_herb["median_price"] == 100
+    assert m_herb["mad"] == 1
+    assert m_herb["sample_count"] == 7
+    assert 95 <= m_herb["ewma_price"] <= 105
+    assert 0.01 <= m_herb["liquidity_score"] <= 1.0
+
+    # Item 6002: Uniform prices
+    m_stone = rows[1]
+    assert m_stone["item_id"] == 6002
+    assert m_stone["realm"] == "Everlook"
+    assert m_stone["median_price"] == 200
+    assert m_stone["mad"] == 0
+    assert m_stone["sigma_mad"] == 0
+    assert m_stone["ewma_price"] == 200
+    assert m_stone["sample_count"] == 4
+    assert 0.01 <= m_stone["liquidity_score"] <= 1.0
+
+    # 3. Verify realm filtering: Razorfen was not touched
+    cursor.execute("SELECT COUNT(*) FROM item_market_metrics WHERE realm = 'Razorfen'")
+    assert cursor.fetchone()[0] == 0
+
+    # 4. Now run for Razorfen
+    razor_count = update_all_market_metrics(memory_db, realm="Razorfen")
+    assert razor_count == 1
+    cursor.execute(
+        "SELECT median_price, sample_count FROM item_market_metrics WHERE item_id = 6003 AND realm = 'Razorfen'"
+    )
+    r_row = cursor.fetchone()
+    assert r_row is not None
+    assert r_row["median_price"] == 355
+    assert r_row["sample_count"] == 2
+
+    # 5. Idempotency check: running again updates existing records without duplication
+    second_run_count = update_all_market_metrics(memory_db, realm="Everlook")
+    assert second_run_count == 2
+    cursor.execute("SELECT COUNT(*) FROM item_market_metrics WHERE realm = 'Everlook'")
+    assert cursor.fetchone()[0] == 2
+
+    # 6. Check edge cases
+    assert update_all_market_metrics(None) == 0
+    assert update_all_market_metrics(memory_db, realm="NonExistentRealm") == 0
+
 
 
 

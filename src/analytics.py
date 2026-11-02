@@ -5,6 +5,7 @@ import json
 import math
 import os
 import sqlite3
+import statistics
 import time
 from typing import Optional, Any, Union
 
@@ -1051,6 +1052,179 @@ def _parse_intrinsic_liquidity(
     return 0.10
 
 
+def compute_robust_market_metrics(
+    prices_history: list[int],
+    timestamps: Optional[list[int]] = None,
+    half_life_days: float = 3.5,
+) -> dict:
+    """Calculate robust market metrics using Median, MAD, Hampel filter, and EWMA.
+
+    - Median price: P~ = median(P_i)
+    - MAD = median(|P_i - P~|)
+    - sigma_mad = 1.4826 * MAD
+    - Hampel Filter: cuts points with |P_i - P~| > 3 * max(sigma_mad, 0.10 * P~)
+    - EWMA on cleaned points with half_life_days (default 3.5 days):
+        lambda = ln(2) / (half_life_days * 86400)
+        w_i = exp(-lambda * (t_now - t_i))
+        EWMA = sum(w_i * P_i) / sum(w_i)
+      If timestamps not passed, uses average of cleaned prices.
+    Returns: {"median_price": int, "mad": int, "sigma_mad": int, "ewma_price": int, "sample_count": int, "cleaned_count": int}
+    """
+    if not prices_history:
+        return {
+            "median_price": 0,
+            "mad": 0,
+            "sigma_mad": 0,
+            "ewma_price": 0,
+            "sample_count": 0,
+            "cleaned_count": 0,
+        }
+
+    prices = [int(p) for p in prices_history]
+    n_samples = len(prices)
+
+    # 1. Median price
+    p_median = float(statistics.median(prices))
+
+    # 2. Median Absolute Deviation (MAD)
+    deviations = [abs(p - p_median) for p in prices]
+    mad = float(statistics.median(deviations))
+
+    # 3. Sigma MAD (normal distribution scale factor)
+    sigma_mad = 1.4826 * mad
+
+    # 4. Hampel Filter
+    # Cutoff threshold: 3 * max(sigma_mad, 0.10 * p_median)
+    threshold = 3.0 * max(sigma_mad, 0.10 * p_median)
+
+    has_valid_timestamps = (
+        timestamps is not None
+        and len(timestamps) == n_samples
+    )
+
+    if has_valid_timestamps:
+        paired = list(zip(prices, timestamps))
+        cleaned_paired = [
+            (p, t) for p, t in paired
+            if abs(p - p_median) <= threshold
+        ]
+        if not cleaned_paired:
+            cleaned_paired = paired
+        cleaned_prices = [p for p, t in cleaned_paired]
+        cleaned_timestamps = [t for p, t in cleaned_paired]
+    else:
+        cleaned_prices = [
+            p for p in prices
+            if abs(p - p_median) <= threshold
+        ]
+        if not cleaned_prices:
+            cleaned_prices = list(prices)
+        cleaned_timestamps = None
+
+    cleaned_count = len(cleaned_prices)
+
+    # 5. EWMA on cleaned points
+    if has_valid_timestamps and cleaned_timestamps and half_life_days > 0:
+        lambda_val = math.log(2) / (float(half_life_days) * 86400.0)
+        t_ref = max(cleaned_timestamps)
+        weights = [math.exp(-lambda_val * (t_ref - t)) for t in cleaned_timestamps]
+        sum_w = sum(weights)
+        if sum_w > 0:
+            ewma_val = sum(w * p for w, p in zip(weights, cleaned_prices)) / sum_w
+        else:
+            ewma_val = sum(cleaned_prices) / cleaned_count
+    else:
+        ewma_val = sum(cleaned_prices) / cleaned_count
+
+    return {
+        "median_price": int(round(p_median)),
+        "mad": int(round(mad)),
+        "sigma_mad": int(round(sigma_mad)),
+        "ewma_price": int(round(ewma_val)),
+        "sample_count": n_samples,
+        "cleaned_count": cleaned_count,
+    }
+
+
+def update_all_market_metrics(db_conn: sqlite3.Connection, realm: Optional[str] = None) -> int:
+    """Calculate and upsert robust market metrics and liquidity scores for all items in price_snapshots."""
+    if db_conn is None:
+        return 0
+
+    try:
+        from src.database import upsert_item_market_metrics
+    except ImportError:
+        try:
+            from database import upsert_item_market_metrics
+        except ImportError:
+            def upsert_item_market_metrics(conn, metrics_list):
+                return len(metrics_list)
+
+    cursor = db_conn.cursor()
+
+    # Pre-fetch items metadata (item_class, category, quality)
+    items_meta = {}
+    try:
+        cursor.execute("SELECT item_id, item_class, category, quality FROM items")
+        for r in cursor.fetchall():
+            items_meta[r[0]] = {
+                "item_class": r[1],
+                "category": r[2],
+                "quality": r[3],
+            }
+    except Exception:
+        pass
+
+    query = """
+        SELECT item_id, realm, price, timestamp
+        FROM price_snapshots
+        WHERE (? IS NULL OR realm = ?) AND price > 0
+        ORDER BY item_id, realm, timestamp ASC
+    """
+    try:
+        cursor.execute(query, (realm, realm))
+        rows = cursor.fetchall()
+    except Exception:
+        return 0
+
+    if not rows:
+        return 0
+
+    grouped = defaultdict(list)
+    for r in rows:
+        grouped[(r[0], r[1])].append((r[2], r[3]))
+
+    metrics_to_upsert = []
+    for (item_id, item_realm), entries in grouped.items():
+        prices = [p for p, t in entries]
+        timestamps = [t for p, t in entries]
+        metrics = compute_robust_market_metrics(prices, timestamps=timestamps)
+
+        item_m = items_meta.get(item_id, {})
+        item_class = item_m.get("item_class") or item_m.get("category")
+        history = [{"price": p, "timestamp": t} for p, t in entries]
+        l_score = compute_liquidity_score(
+            item_id,
+            history=history,
+            item_class=item_class,
+            quality=item_m.get("quality"),
+        )
+
+        metrics_to_upsert.append({
+            "item_id": item_id,
+            "realm": item_realm,
+            "median_price": metrics["median_price"],
+            "mad": metrics["mad"],
+            "sigma_mad": metrics["sigma_mad"],
+            "ewma_price": metrics["ewma_price"],
+            "liquidity_score": l_score,
+            "sample_count": metrics["sample_count"],
+        })
+
+    upsert_item_market_metrics(db_conn, metrics_to_upsert)
+    return len(metrics_to_upsert)
+
+
 def compute_liquidity_score(
     item_id: int,
     history: Optional[list[dict]] = None,
@@ -1161,6 +1335,22 @@ def get_strong_buys(
                         history_dict[i_id].append({"price": pr, "timestamp": ts})
             except Exception:
                 pass
+
+        robust_metrics = {}
+        try:
+            cursor.execute("""
+                SELECT item_id, ewma_price, median_price, liquidity_score
+                FROM item_market_metrics
+                WHERE (? IS NULL OR realm = ?)
+            """, (realm, realm))
+            for r in cursor.fetchall():
+                robust_metrics[r[0]] = {
+                    "ewma_price": r[1],
+                    "median_price": r[2],
+                    "liquidity_score": r[3],
+                }
+        except Exception:
+            pass
     elif "candidates" in kwargs:
         candidates = kwargs["candidates"]
     else:
@@ -1172,10 +1362,22 @@ def get_strong_buys(
         item_id = int(item.get("item_id", 0))
         item_meta = items_dict.get(item_id, {})
 
+        # Check robust metrics from item_market_metrics if available
+        robust = robust_metrics.get(item_id) if "robust_metrics" in locals() else None
+        if robust:
+            rob_price = robust["ewma_price"] if (robust.get("ewma_price") and robust["ewma_price"] > 0) else robust.get("median_price", 0)
+            if rob_price and rob_price > 0:
+                item["dbmarket"] = rob_price
+
         item_class = item.get("class") or item.get("item_class") or item_meta.get("category") or item_meta.get("class") or item_meta.get("item_class")
         history = history_dict.get(item_id, item.get("history"))
 
-        liquidity = compute_liquidity_score(item_id, history=history, item_class=item_class)
+        if "liquidity" in item:
+            liquidity = item["liquidity"]
+        elif robust and robust.get("liquidity_score") is not None and robust["liquidity_score"] > 0:
+            liquidity = robust["liquidity_score"]
+        else:
+            liquidity = compute_liquidity_score(item_id, history=history, item_class=item_class)
         item["liquidity"] = liquidity
         item["liquidity_score"] = liquidity
 
@@ -1192,7 +1394,11 @@ def get_strong_buys(
             v_sell = item_meta.get("vendor_sell_price") or item.get("vendor_sell_price") or 0
             deposit = max(15, int(v_sell * 0.05))
 
-        expected_net_revenue = item.get("expected_revenue", item.get("mean_price", buy_price) * 0.95)
+        if "dbmarket" in item and item["dbmarket"] > 0:
+            expected_net_revenue = item["dbmarket"] * 0.95
+            item["expected_revenue"] = round(expected_net_revenue, 2)
+        else:
+            expected_net_revenue = item.get("expected_revenue", item.get("mean_price", buy_price) * 0.95)
 
         eff_liq = max(0.01, liquidity)
         liquidity_penalty = int(deposit * ((1.0 - liquidity) / eff_liq) + (1.0 - liquidity) * 0.10 * buy_price)
@@ -1466,12 +1672,36 @@ def export_sniper_addon_config(
         except Exception:
             latest_prices = {}
 
-        # Forward compatibility with Stage 4 item_market_metrics
+        # Forward compatibility with Stage 4 item_market_metrics (EWMA / median)
         try:
-            cursor.execute("SELECT item_id, dbmarket FROM item_market_metrics WHERE (? IS NULL OR realm = ?)", (realm, realm))
+            cursor.execute("""
+                SELECT item_id, ewma_price, median_price
+                FROM item_market_metrics
+                WHERE (? IS NULL OR realm = ?)
+            """, (realm, realm))
             for r in cursor.fetchall():
-                if r[1] is not None and r[1] > 0:
-                    latest_prices[r[0]] = int(r[1])
+                val = r[1] if (r[1] and r[1] > 0) else r[2]
+                if val and val > 0:
+                    latest_prices[r[0]] = int(val)
+        except Exception:
+            try:
+                cursor.execute("SELECT item_id, dbmarket FROM item_market_metrics WHERE (? IS NULL OR realm = ?)", (realm, realm))
+                for r in cursor.fetchall():
+                    if r[1] is not None and r[1] > 0:
+                        latest_prices[r[0]] = int(r[1])
+            except Exception:
+                pass
+
+        metrics_liquidity = {}
+        try:
+            cursor.execute("""
+                SELECT item_id, liquidity_score
+                FROM item_market_metrics
+                WHERE (? IS NULL OR realm = ?)
+            """, (realm, realm))
+            for r in cursor.fetchall():
+                if r[1] is not None:
+                    metrics_liquidity[r[0]] = float(r[1])
         except Exception:
             pass
 
@@ -1571,7 +1801,9 @@ def export_sniper_addon_config(
         dbmarket = latest_prices.get(item_id, 0)
         term_market = 0
         if dbmarket and dbmarket > 0:
-            liquidity = compute_liquidity_score(item_id, item_class=item_class)
+            liquidity = metrics_liquidity.get(item_id) if "metrics_liquidity" in locals() else None
+            if liquidity is None:
+                liquidity = compute_liquidity_score(item_id, item_class=item_class)
             if liquidity >= 0.50:
                 term_market = math.floor(0.65 * dbmarket)
 

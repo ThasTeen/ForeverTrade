@@ -18,6 +18,7 @@ from src.database import (
     load_catalog,
     load_recipes,
     prune_snapshots,
+    upsert_item_market_metrics,
 )
 
 
@@ -981,6 +982,127 @@ def test_load_catalog_default_items_forever_path(memory_db, tmp_path):
     assert item["name_ru"] == "Предмет из data/items_forever.json"
     assert item["vendor_sell_copper"] == 345
     assert item["vendor_buy_copper"] == 678
+
+
+def test_item_market_metrics_table_and_upsert(memory_db):
+    """Verify item_market_metrics DDL, index idx_metrics_realm_item, and upsert logic (Ticket 04)."""
+    # 1. Verify table exists in SQLite catalog
+    cursor = memory_db.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = {row[0] for row in cursor.fetchall()}
+    assert "item_market_metrics" in tables
+
+    # Verify table schema columns
+    cursor.execute("PRAGMA table_info(item_market_metrics);")
+    cols = {row["name"] for row in cursor.fetchall()}
+    assert {
+        "item_id", "realm", "median_price", "mad", "sigma_mad",
+        "ewma_price", "liquidity_score", "sample_count", "updated_at"
+    }.issubset(cols)
+
+    # 2. Verify index exists and indexes (realm, item_id)
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='item_market_metrics';")
+    indexes = {row[0] for row in cursor.fetchall()}
+    assert "idx_metrics_realm_item" in indexes
+
+    cursor.execute("PRAGMA index_info(idx_metrics_realm_item);")
+    idx_cols = [row["name"] for row in cursor.fetchall()]
+    assert idx_cols == ["realm", "item_id"]
+
+    # 3. Test upsert with new metrics (including foreign key auto-handling when item_id not in items)
+    # Items 77701 and 77702 do NOT exist in items yet
+    test_metrics = [
+        {
+            "item_id": 77701,
+            "realm": "Everlook",
+            "median_price": 150,
+            "mad": 10,
+            "sigma_mad": 15,
+            "ewma_price": 155,
+            "liquidity_score": 0.75,
+            "sample_count": 20,
+        },
+        {
+            "item_id": 77702,
+            "realm": "Everlook",
+            "median_price": 300,
+            "mad": 25,
+            "sigma_mad": 37,
+            "ewma_price": 290,
+            "liquidity_score": 0.45,
+            "sample_count": 8,
+        },
+    ]
+
+    inserted_count = upsert_item_market_metrics(memory_db, test_metrics)
+    assert inserted_count == 2
+
+    # Verify items table was automatically populated to satisfy foreign keys
+    item_row = memory_db.execute("SELECT name FROM items WHERE item_id = 77701;").fetchone()
+    assert item_row is not None
+    assert item_row["name"] == "Item 77701"
+
+    # Verify rows in item_market_metrics
+    cursor.execute(
+        "SELECT item_id, realm, median_price, mad, sigma_mad, ewma_price, liquidity_score, sample_count "
+        "FROM item_market_metrics ORDER BY item_id ASC;"
+    )
+    rows = cursor.fetchall()
+    assert len(rows) == 2
+    assert rows[0]["item_id"] == 77701
+    assert rows[0]["realm"] == "Everlook"
+    assert rows[0]["median_price"] == 150
+    assert rows[0]["mad"] == 10
+    assert rows[0]["sigma_mad"] == 15
+    assert rows[0]["ewma_price"] == 155
+    assert rows[0]["liquidity_score"] == pytest.approx(0.75)
+    assert rows[0]["sample_count"] == 20
+
+    assert rows[1]["item_id"] == 77702
+    assert rows[1]["realm"] == "Everlook"
+    assert rows[1]["median_price"] == 300
+    assert rows[1]["mad"] == 25
+    assert rows[1]["sigma_mad"] == 37
+    assert rows[1]["ewma_price"] == 290
+    assert rows[1]["liquidity_score"] == pytest.approx(0.45)
+    assert rows[1]["sample_count"] == 8
+
+    # 4. Verify update on conflict (item_id, realm)
+    updated_metrics = [
+        {
+            "item_id": 77701,
+            "realm": "Everlook",
+            "median_price": 180,
+            "mad": 12,
+            "sigma_mad": 18,
+            "ewma_price": 178,
+            "liquidity_score": 0.80,
+            "sample_count": 25,
+        }
+    ]
+    upserted_count = upsert_item_market_metrics(memory_db, updated_metrics)
+    assert upserted_count == 1
+
+    # Check total rows count is still 2 (no duplicate rows)
+    total_count = memory_db.execute("SELECT COUNT(*) FROM item_market_metrics;").fetchone()[0]
+    assert total_count == 2
+
+    # Check updated values
+    cursor.execute(
+        "SELECT median_price, mad, sigma_mad, ewma_price, liquidity_score, sample_count "
+        "FROM item_market_metrics WHERE item_id = 77701 AND realm = 'Everlook';"
+    )
+    updated_row = cursor.fetchone()
+    assert updated_row["median_price"] == 180
+    assert updated_row["mad"] == 12
+    assert updated_row["sigma_mad"] == 18
+    assert updated_row["ewma_price"] == 178
+    assert updated_row["liquidity_score"] == pytest.approx(0.80)
+    assert updated_row["sample_count"] == 25
+
+    # 5. Verify empty list handling
+    assert upsert_item_market_metrics(memory_db, []) == 0
+
 
 
 

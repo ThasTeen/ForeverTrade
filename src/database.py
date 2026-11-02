@@ -326,6 +326,22 @@ def init_schema(conn: sqlite3.Connection) -> None:
                 quantity INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (recipe_id, reagent_item_id)
             );
+
+            CREATE TABLE IF NOT EXISTS item_market_metrics (
+                item_id INTEGER,
+                realm TEXT NOT NULL,
+                median_price INTEGER NOT NULL,
+                mad INTEGER NOT NULL,
+                sigma_mad INTEGER NOT NULL,
+                ewma_price INTEGER NOT NULL,
+                liquidity_score REAL NOT NULL,
+                sample_count INTEGER NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (item_id, realm),
+                FOREIGN KEY (item_id) REFERENCES items(item_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_metrics_realm_item ON item_market_metrics (realm, item_id);
         """)
         try:
             conn.execute("ALTER TABLE items ADD COLUMN name_ru TEXT;")
@@ -1221,4 +1237,52 @@ def clean_demo_data(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM price_snapshots WHERE item_id = 9999;")
         conn.execute("DELETE FROM items WHERE item_id = 9999;")
     conn.commit()
+
+
+def upsert_item_market_metrics(conn: sqlite3.Connection, metrics_list: list[dict]) -> int:
+    """Upsert robust market metrics for items into item_market_metrics table."""
+    if not metrics_list:
+        return 0
+
+    items_to_ensure = []
+    for m in metrics_list:
+        item_id = int(m["item_id"])
+        items_to_ensure.append((item_id, f"Item {item_id}"))
+
+    with conn:
+        conn.executemany("""
+            INSERT OR IGNORE INTO items (item_id, name)
+            VALUES (?, ?)
+        """, items_to_ensure)
+
+        rows = []
+        for m in metrics_list:
+            rows.append((
+                int(m["item_id"]),
+                str(m["realm"]),
+                int(round(m.get("median_price", 0))),
+                int(round(m.get("mad", 0))),
+                int(round(m.get("sigma_mad", 0))),
+                int(round(m.get("ewma_price", 0))),
+                float(m.get("liquidity_score", 0.0)),
+                int(m.get("sample_count", 0)),
+            ))
+
+        conn.executemany("""
+            INSERT INTO item_market_metrics (
+                item_id, realm, median_price, mad, sigma_mad, ewma_price,
+                liquidity_score, sample_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(item_id, realm) DO UPDATE SET
+                median_price = excluded.median_price,
+                mad = excluded.mad,
+                sigma_mad = excluded.sigma_mad,
+                ewma_price = excluded.ewma_price,
+                liquidity_score = excluded.liquidity_score,
+                sample_count = excluded.sample_count,
+                updated_at = CURRENT_TIMESTAMP
+        """, rows)
+
+    return len(rows)
+
 

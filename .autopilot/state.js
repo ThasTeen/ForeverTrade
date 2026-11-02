@@ -13,7 +13,7 @@ window.STATE =
   "skillDir": "C:/Users/thast/.gemini/config/skills/autopilot",
   "baseCommit": null,
   "startedAt": "2026-11-03T00:12:46+03:00",
-  "updatedAt": "2026-11-03T00:55:13+03:00",
+  "updatedAt": "2026-11-03T01:23:22+03:00",
   "finishedAt": null,
   "stages": [
     {
@@ -63,8 +63,8 @@ window.STATE =
   ],
   "requirements": {
     "total": 27,
-    "done": 18,
-    "inTicket": 9,
+    "done": 20,
+    "inTicket": 7,
     "inSpec": 0,
     "placeholder": 0,
     "deferred": 0,
@@ -167,10 +167,16 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "in-progress",
+      "status": "done",
       "retries": 0,
       "repairs": 0,
-      "startedAt": "2026-11-03T00:55:13+03:00"
+      "startedAt": "2026-11-03T00:55:13+03:00",
+      "finishedAt": "2026-11-03T01:23:18+03:00",
+      "tests": {
+        "passed": 190,
+        "failed": 0
+      },
+      "commit": "066f2c5"
     },
     {
       "id": "04",
@@ -194,9 +200,10 @@ window.STATE =
       ],
       "review": "да",
       "model": "сильная",
-      "status": "pending",
+      "status": "in-progress",
       "retries": 0,
-      "repairs": 0
+      "repairs": 0,
+      "startedAt": "2026-11-03T01:23:22+03:00"
     },
     {
       "id": "05",
@@ -225,7 +232,7 @@ window.STATE =
     }
   ],
   "tests": {
-    "passed": 188,
+    "passed": 190,
     "failed": 0
   },
   "debt": {
@@ -255,9 +262,11 @@ window.STATE =
     "2026-11-03T00:33:13+03:00",
     "2026-11-03T00:33:17+03:00",
     "2026-11-03T00:55:08+03:00",
-    "2026-11-03T00:55:13+03:00"
+    "2026-11-03T00:55:13+03:00",
+    "2026-11-03T01:23:18+03:00",
+    "2026-11-03T01:23:22+03:00"
   ],
-  "rev": 19,
+  "rev": 21,
   "waiting": null,
   "waits": [],
   "log": [
@@ -387,6 +396,26 @@ window.STATE =
         "03"
       ],
       "act": "start"
+    },
+    {
+      "t": "2026-11-03T01:23:18+03:00",
+      "k": "ticket",
+      "ids": [
+        "03"
+      ],
+      "act": "done",
+      "tests": {
+        "passed": 190,
+        "failed": 0
+      }
+    },
+    {
+      "t": "2026-11-03T01:23:22+03:00",
+      "k": "ticket",
+      "ids": [
+        "04"
+      ],
+      "act": "start"
     }
   ],
   "reqList": [
@@ -468,12 +497,12 @@ window.STATE =
     {
       "id": "R16",
       "text": "«Метод get_disenchant_arbitrage() находит на аукционе экипировку, выставленную дешевле стоимости распыла минус 5% комиссии»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R17",
       "text": "«Новый таб в Goblin Terminal: ✨ Дизэнчант и раскладка дропа в инспекторе»",
-      "status": "in-ticket"
+      "status": "done"
     },
     {
       "id": "R18",
