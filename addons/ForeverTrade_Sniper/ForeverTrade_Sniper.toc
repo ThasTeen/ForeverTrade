@@ -2,6 +2,8 @@
 ## Title: ForeverTrade_Sniper
 ## Notes: Lightweight standalone AH sniper with hardware-protected buying
 ## Version: 2.1
-## SavedVariables: FT_SNIPER_SAVED
+## SavedVariables: FT_CustomTargets
+## LoadOnDemand: 0
+## OptionalDeps: Blizzard_AuctionHouseUI, Blizzard_AuctionUI, Auctionator
 config.lua
 ForeverTrade_Sniper.lua
