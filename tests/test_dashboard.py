@@ -25,10 +25,18 @@ import pytest
 
 from src.database import init_db
 from src.analytics import _CATALOG_CACHE
+import src.dashboard as dashboard_mod
 from src.dashboard import (
     format_currency,
     notify_high_value_arbitrage,
     build_standalone_dashboard,
+    _build_price_history_chart,
+)
+
+_build_market_inspector_data = getattr(
+    dashboard_mod,
+    "_build_market_inspector_data",
+    getattr(dashboard_mod, "_get_all_items_market_data", None),
 )
 
 generate_dashboard_html = build_standalone_dashboard
@@ -1015,74 +1023,103 @@ def test_dashboard_max_age_hours_functional_filtering(memory_db, tmp_path):
 # 6. Ticket 20 Goblin Terminal UI & Integration Tests
 # ===========================================================================
 
-def test_goblin_terminal_ui_layout(populated_dashboard_db, tmp_path):
-    """Verify Goblin Terminal 100vh single-screen layout with two main panels (R20).
+def test_defillama_terminal_shell(populated_dashboard_db, tmp_path):
+    out_file = tmp_path / "defillama_terminal_portal.html"
+    html = build_standalone_dashboard(
+        populated_dashboard_db, output_path=str(out_file), realm="Everlook"
+    )
 
-    Verifies:
-    - 100vh single-screen non-scrolling viewport CSS rules
-    - .terminal-layout container structure
-    - Two main panels: .terminal-left (65% signals table with tabs) and .terminal-right (35% inspector panel)
-    - Inspector panel elements: header, lazy chart container, deal calculator with margin & breakeven rows
-    """
-    out_file = tmp_path / "goblin_terminal_portal.html"
-    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+    assert '<div class="terminal-layout app-shell">' in html
+    assert '<aside class="terminal-sidebar">' in html
+    assert '<div class="terminal-content">' in html
+    assert '<header class="terminal-header">' in html
+    assert '<nav class="terminal-nav" aria-label="Разделы рынка">' in html
+    assert '<div class="summary-cards-row">' in html
+    assert '<main class="terminal-main">' in html
+    assert '<section class="terminal-left">' in html
+    assert '<aside class="terminal-right">' in html
 
-    # 1. 100vh single-screen layout CSS rules
-    assert "height: 100vh;" in html_content
-    assert "max-height: 100vh;" in html_content
-    assert "overflow: hidden;" in html_content
+    for token in (
+        "--ft-bg: #0b0e14;",
+        "--ft-surface: #11161f;",
+        "--ft-accent: #6b9dff;",
+        "--ft-sidebar-w: 224px;",
+    ):
+        assert token in html
 
-    # .terminal-layout must be flex-column filling 100vh
-    layout_match = re.search(r"\.terminal-layout\s*\{([^}]+)\}", html_content)
-    assert layout_match is not None, ".terminal-layout CSS rule not found"
-    layout_css = layout_match.group(1)
-    assert "height: 100vh;" in layout_css
-    assert "display: flex;" in layout_css
-    assert "flex-direction: column;" in layout_css
+    layout_match = re.search(r"\.terminal-layout\s*\{([^}]+)\}", html)
+    assert layout_match is not None
+    assert "height: 100vh;" in layout_match.group(1)
+    assert "display: grid;" in layout_match.group(1)
+    assert "grid-template-columns: var(--ft-sidebar-w) minmax(0, 1fr);" in layout_match.group(1)
 
-    # 2. Workspace container .terminal-main must be flex with min-height: 0
-    main_match = re.search(r"\.terminal-main\s*\{([^}]+)\}", html_content)
-    assert main_match is not None, ".terminal-main CSS rule not found"
+    main_match = re.search(r"\.terminal-main\s*\{([^}]+)\}", html)
+    assert main_match is not None
     main_css = main_match.group(1)
-    assert "display: flex;" in main_css
+    assert "display: grid;" in main_css
+    assert "grid-template-columns: minmax(0, 1.65fr) minmax(320px, 0.85fr);" in main_css
     assert "min-height: 0;" in main_css
     assert "overflow: hidden;" in main_css
 
-    # 3. Two main panels: Left (65%) and Right (35%)
-    left_match = re.search(r"\.terminal-left\s*\{([^}]+)\}", html_content)
-    assert left_match is not None, ".terminal-left CSS rule not found"
-    left_css = left_match.group(1)
-    assert "65%" in left_css
+    # Inspector panel elements inside .terminal-right
+    assert 'class="inspector-panel"' in html
+    assert 'class="inspector-header"' in html
+    assert 'id="inspector-item-name"' in html
+    assert 'id="inspector-copy-btn"' in html
+    assert 'id="inspector-wowhead-link"' in html
+    assert 'id="inspector-chart"' in html
+    assert 'class="inspector-chart-container"' in html
 
-    right_match = re.search(r"\.terminal-right\s*\{([^}]+)\}", html_content)
-    assert right_match is not None, ".terminal-right CSS rule not found"
-    right_css = right_match.group(1)
-    assert "35%" in right_css
+    # Deal calculator elements inside inspector
+    assert 'id="deal-calculator"' in html
+    assert 'id="calc-cost"' in html
+    assert 'id="calc-breakeven"' in html
+    assert 'id="calc-ah-cut"' in html
+    assert 'id="calc-profit"' in html
+    assert 'id="calc-roi"' in html
 
-    # 4. DOM hierarchy: terminal-layout > terminal-header, summary-cards-row, terminal-main
-    assert '<div class="terminal-layout">' in html_content
-    assert '<header class="terminal-header">' in html_content
-    assert '<div class="summary-cards-row">' in html_content
-    assert '<main class="terminal-main">' in html_content
-    assert '<section class="terminal-left">' in html_content
-    assert '<aside class="terminal-right">' in html_content
 
-    # 5. Inspector panel elements inside .terminal-right
-    assert 'class="inspector-panel"' in html_content
-    assert 'class="inspector-header"' in html_content
-    assert 'id="inspector-item-name"' in html_content
-    assert 'id="inspector-copy-btn"' in html_content
-    assert 'id="inspector-wowhead-link"' in html_content
-    assert 'id="inspector-chart"' in html_content
-    assert 'class="inspector-chart-container"' in html_content
+def test_defillama_navigation_and_controls(populated_dashboard_db):
+    html = build_standalone_dashboard(populated_dashboard_db, output_path=None, realm="Everlook")
 
-    # 6. Deal calculator elements inside inspector
-    assert 'id="deal-calculator"' in html_content
-    assert 'id="calc-cost"' in html_content
-    assert 'id="calc-breakeven"' in html_content
-    assert 'id="calc-ah-cut"' in html_content
-    assert 'id="calc-profit"' in html_content
-    assert 'id="calc-roi"' in html_content
+    assert html.count('class="tab-btn') >= 7
+    assert 'class="terminal-nav"' in html
+    assert 'class="sidebar-brand"' in html
+    assert 'aria-hidden="true"' in html
+    assert 'id="item-search-input"' in html
+    assert 'id="btn-export-shopping-list"' in html
+    assert 'onclick="copyAuctionatorShoppingList()"' in html
+    assert 'id="lang-ru"' in html
+    assert 'id="lang-en"' in html
+    assert ".tab-btn:focus-visible" in html
+    assert ".tab-btn.active" in html
+    assert "btnRu.setAttribute('aria-pressed'" in html
+    assert "btnEn.setAttribute('aria-pressed'" in html
+
+
+def test_defillama_component_styles(populated_dashboard_db):
+    html = build_standalone_dashboard(populated_dashboard_db, output_path=None, realm="Everlook")
+
+    for selector in (
+        ".summary-card",
+        ".terminal-left",
+        ".terminal-right",
+        ".data-table",
+        ".data-table thead",
+        ".sortable th",
+        ".selected-row",
+        ".inspector-panel",
+        ".deal-calculator",
+        ".empty-state",
+        ".toast",
+    ):
+        assert selector in html
+
+    assert "position: sticky;" in html
+    assert "font-variant-numeric: tabular-nums;" in html
+    assert "background: var(--ft-accent-soft);" in html
+    assert "border: 1px solid var(--ft-border);" in html
+
 
 
 def test_wowhead_tooltips_integration(populated_dashboard_db, tmp_path):
@@ -1799,6 +1836,157 @@ def test_dashboard_crafting_dag_tree_integration(memory_db, tmp_path):
     assert "badge-vendor" in html_content
     assert "badge-ah" in html_content
     assert "treeContainer.innerHTML = renderCraftingTree(" in html_content
+
+
+def test_defillama_plotly_palette(populated_dashboard_db):
+    html = build_standalone_dashboard(populated_dashboard_db, output_path=None, realm="Everlook")
+
+    assert "paper_bgcolor: '#11161f'" in html
+    assert "plot_bgcolor: '#11161f'" in html
+    assert "font: { color: '#8b98a9'" in html
+    assert "line: { color: '#6b9dff', width: 2 }" in html
+    assert "line: { color: '#f85149', width: 1.5, dash: 'dot' }" in html
+    assert "line: { color: '#d29922', width: 1.5, dash: 'dash' }" in html
+
+
+def test_defillama_responsive_and_accessibility(populated_dashboard_db):
+    html = build_standalone_dashboard(populated_dashboard_db, output_path=None, realm="Everlook")
+
+    assert "@media (max-width: 1279px)" in html
+    assert "@media (max-width: 1023px)" in html
+    assert "@media (max-width: 767px)" in html
+    assert "@media (prefers-reduced-motion: reduce)" in html
+    assert "grid-template-columns: 72px minmax(0, 1fr);" in html
+    assert "grid-template-columns: 1fr;" in html
+    assert "overflow-x: auto;" in html
+    assert "outline: 2px solid var(--ft-focus);" in html
+    assert 'header.setAttribute("tabindex", "0")' in html
+    assert 'header.addEventListener("keydown"' in html
+    assert 'header.click();' in html
+
+
+def test_dashboard_stock_exchange_chart_controls_and_layout(populated_dashboard_db):
+    """Verify build_standalone_dashboard generates stock exchange controls, timeframe buttons, yaxis2, and Russian labels."""
+    html = build_standalone_dashboard(populated_dashboard_db, output_path=None, realm="Everlook")
+
+    # 1. Chart controls container and mode toggle buttons (candles vs line)
+    assert 'class="chart-controls"' in html
+    assert ('class="chart-control-group chart-mode-group"' in html or 'ft-chart-mode-btn' in html)
+    assert 'data-mode="candles"' in html
+    assert 'data-mode="line"' in html
+
+    # 2. Timeframe buttons (24h, 3d, 7d, all)
+    assert ('class="chart-control-group chart-tf-group"' in html or 'ft-tf-btn' in html)
+    assert 'data-tf="24h"' in html
+    assert 'data-tf="3d"' in html
+    assert 'data-tf="7d"' in html
+    assert 'data-tf="all"' in html
+
+    # 3. Secondary volume axis (yaxis2)
+    assert "yaxis2:" in html
+    assert "overlaying: 'y'" in html
+    assert "side: 'right'" in html
+
+    # 4. Localized Russian labels for chart controls
+    assert 'data-ru="Свечи"' in html
+    assert 'data-ru="Линия"' in html
+    assert 'data-ru="24ч"' in html
+    assert 'data-ru="3д"' in html
+    assert 'data-ru="7д"' in html
+    assert 'data-ru="Все"' in html
+
+    # 5. Client JavaScript functions for chart interaction
+    assert "function setChartMode(mode)" in html
+    assert "function setChartTimeframe(tf)" in html
+    assert "function updateChartControlsUI()" in html
+
+
+def test_build_price_history_chart_and_inspector_data_points(memory_db):
+    """Verify _build_price_history_chart and _build_market_inspector_data function cleanly with 0, 1, and multiple points."""
+    assert _build_market_inspector_data is not None, "_build_market_inspector_data function must exist"
+
+    # -------------------------------------------------------------
+    # Case A: 0 points (empty database)
+    # -------------------------------------------------------------
+    chart_0 = _build_price_history_chart(memory_db, realm="Everlook")
+    assert isinstance(chart_0, str)
+    assert len(chart_0) > 0
+    # Empty chart renders localized fallback annotation
+    assert ("Нет данных снимков цен" in chart_0 or "Waiting for first" in chart_0)
+
+    data_0 = _build_market_inspector_data(memory_db, realm="Everlook")
+    assert isinstance(data_0, dict)
+    for it in data_0.values():
+        assert it["sample_count"] == 0
+        assert it["points"] == []
+        assert it["mean_price"] == 0
+        assert it["z_score"] == 0.0
+
+    # -------------------------------------------------------------
+    # Case B: 1 point (single price snapshot)
+    # -------------------------------------------------------------
+    with memory_db:
+        memory_db.execute(
+            """INSERT INTO items (item_id, name, name_ru, quality, item_class, category, vendor_sell_price)
+               VALUES (2447, 'Peacebloom', 'Мироцвет', 1, 7, 'herb', 10)"""
+        )
+        memory_db.execute(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (2447, 'Everlook', 150, 1000)"""
+        )
+
+    chart_1 = _build_price_history_chart(memory_db, realm="Everlook")
+    assert isinstance(chart_1, str)
+    assert "plotly" in chart_1.lower()
+    assert "Peacebloom" in chart_1
+
+    data_1 = _build_market_inspector_data(memory_db, realm="Everlook")
+    assert 2447 in data_1
+    it_1 = data_1[2447]
+    assert it_1["sample_count"] == 1
+    assert len(it_1["points"]) == 1
+    assert it_1["points"][0] == [1000, 150]
+    assert it_1["current_price"] == 150
+    assert it_1["mean_price"] == 150.0
+    assert it_1["min_price"] == 150
+    assert it_1["max_price"] == 150
+    assert it_1["z_score"] == 0.0  # single point -> no variance -> z_score 0.0
+
+    # -------------------------------------------------------------
+    # Case C: Multiple points (5 price snapshots with variance)
+    # -------------------------------------------------------------
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (2447, 'Everlook', ?, ?)""",
+            [
+                (160, 2000),
+                (140, 3000),
+                (180, 4000),
+                (200, 5000),
+            ]
+        )
+
+    chart_multi = _build_price_history_chart(memory_db, realm="Everlook")
+    assert isinstance(chart_multi, str)
+    assert "Peacebloom" in chart_multi
+    assert "plotly" in chart_multi.lower()
+
+    data_multi = _build_market_inspector_data(memory_db, realm="Everlook")
+    assert 2447 in data_multi
+    it_multi = data_multi[2447]
+    assert it_multi["sample_count"] == 5
+    assert len(it_multi["points"]) == 5
+    assert it_multi["current_price"] == 200
+    assert it_multi["min_price"] == 140
+    assert it_multi["max_price"] == 200
+    expected_mean = round((150 + 160 + 140 + 180 + 200) / 5, 2)
+    assert it_multi["mean_price"] == expected_mean
+    assert isinstance(it_multi["z_score"], float)
+    assert it_multi["z_score"] > 0.0  # current price (200) > mean (166) -> positive z-score
+
+
+
 
 
 

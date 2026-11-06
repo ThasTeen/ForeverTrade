@@ -24,6 +24,7 @@ from src.database import init_db
 from src.etl import (
     AuctionatorEventHandler,
     ingest_price_snapshot,
+    load_profitcrafter_data,
     normalize_item_id,
     parse_auctionator_data,
     start_watcher,
@@ -1814,3 +1815,179 @@ def test_ap_is_ours_identifies_own_server():
 
     assert ap_mod.is_ours("python /other/project/serve_permanent.py") is False
     assert ap_mod.is_ours(f"python {ap_mod._norm(ap_mod.A)}/serve_permanent.py") is True
+
+
+def test_cbor_encoded_auctionator_price_database_ingestion(tmp_path, memory_db):
+    """Verify Auctionator dbversion 8 CBOR-serialized price string is correctly decoded and ingested."""
+    # Lua table containing dbversion 8 and CBOR-encoded realm data
+    # b'\xa1d2835\xa1am\x11' -> {'2835': {'m': 17}}
+    lua_content = (
+        'AUCTIONATOR_PRICE_DATABASE = {\n'
+        '  ["__dbversion"] = 8,\n'
+        '  ["PvP"] = "\\161d2835\\161am\\17"\n'
+        '}\n'
+    )
+    lua_file = tmp_path / "Auctionator.lua"
+    lua_file.write_text(lua_content, encoding="utf-8")
+
+    from run_watcher import initial_ingest
+    count = initial_ingest(memory_db, str(tmp_path), "PvP")
+    assert count == 1
+
+    cur = memory_db.cursor()
+    cur.execute("SELECT item_id, realm, price FROM price_snapshots WHERE item_id = 2835")
+    row = cur.fetchone()
+    assert row is not None
+    assert row[0] == 2835
+    assert row[1] == "PvP"
+    assert row[2] == 17
+
+
+def test_initial_ingest_selects_account_wide_over_character_savedvariables(tmp_path, memory_db):
+    """Verify initial_ingest prefers account-wide SavedVariables over tiny per-character files."""
+    # Character file:
+    char_dir = tmp_path / "Account" / "123#1" / "PvP" / "MyChar" / "SavedVariables"
+    char_dir.mkdir(parents=True)
+    char_file = char_dir / "Auctionator.lua"
+    char_file.write_text("AUCTIONATOR_CHARACTER_CONFIG = nil\n", encoding="utf-8")
+
+    # Account-wide file:
+    acct_dir = tmp_path / "Account" / "123#1" / "SavedVariables"
+    acct_dir.mkdir(parents=True)
+    acct_file = acct_dir / "Auctionator.lua"
+    acct_file.write_text(
+        'AUCTIONATOR_PRICE_DATABASE = {\n'
+        '  ["PvP"] = {\n'
+        '    ["2835"] = { ["m"] = 50 }\n'
+        '  }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    from run_watcher import initial_ingest
+    count = initial_ingest(memory_db, str(tmp_path), "PvP")
+    assert count == 1
+
+    cur = memory_db.cursor()
+    cur.execute("SELECT item_id, price FROM price_snapshots WHERE item_id = 2835")
+    assert cur.fetchone()[1] == 50
+
+
+def test_load_profitcrafter_data_mock_fixture(tmp_path):
+    """Verify load_profitcrafter_data parses character, professions, recipes with reagents and floats."""
+    char_sv_dir = tmp_path / "Account" / "123#1" / "Everlook" / "TestChar" / "SavedVariables"
+    char_sv_dir.mkdir(parents=True)
+    pc_file = char_sv_dir / "ProfitCrafterForever.lua"
+    pc_file.write_text(
+        'ProfitCrafterCharDB = {\n'
+        '  ["professions"] = {\n'
+        '    [171] = {\n'
+        '      ["name"] = "Alchemy",\n'
+        '      ["rank"] = 150,\n'
+        '      ["max"] = 225,\n'
+        '    },\n'
+        '    [185] = {\n'
+        '      ["name"] = "Cooking",\n'
+        '      ["rank"] = 75,\n'
+        '      ["max"] = 150,\n'
+        '    },\n'
+        '  },\n'
+        '  ["recipes"] = {\n'
+        '    [2331] = {\n'
+        '      ["name"] = "Elixir of Minor Defense",\n'
+        '      ["output"] = 2454,\n'
+        '      ["qty"] = 1,\n'
+        '      ["prof"] = "Alchemy",\n'
+        '      ["cost"] = 14.75,\n'
+        '      ["reagents"] = {\n'
+        '        { ["id"] = 2447, ["n"] = 2 },\n'
+        '        { ["id"] = 2449, ["n"] = 1 },\n'
+        '      },\n'
+        '    },\n'
+        '    [2540] = {\n'
+        '      ["name"] = "Herb Baked Egg",\n'
+        '      ["output"] = 6888,\n'
+        '      ["qty"] = 1,\n'
+        '      ["prof"] = "Cooking",\n'
+        '      ["profit_margin"] = 0.35,\n'
+        '      ["reagents"] = {\n'
+        '        { ["id"] = 6889, ["n"] = 1 },\n'
+        '        { ["id"] = 769, ["n"] = 1 },\n'
+        '      },\n'
+        '    },\n'
+        '  },\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    data = load_profitcrafter_data(str(tmp_path))
+    assert isinstance(data, dict)
+    assert data.get("character") == "TestChar"
+
+    professions = data.get("professions", {})
+    assert 171 in professions
+    assert professions[171]["name"] == "Alchemy"
+    assert professions[171]["rank"] == 150
+    assert professions[171]["max"] == 225
+
+    assert 185 in professions
+    assert professions[185]["name"] == "Cooking"
+    assert professions[185]["rank"] == 75
+    assert professions[185]["max"] == 150
+
+    recipes = data.get("recipes", {})
+    assert 2331 in recipes
+    r_elixir = recipes[2331]
+    assert r_elixir["name"] == "Elixir of Minor Defense"
+    assert r_elixir["output"] == 2454
+    assert r_elixir["qty"] == 1
+    assert r_elixir["prof"] == "Alchemy"
+    assert len(r_elixir["reagents"]) == 2
+    assert r_elixir["reagents"][0] == {"id": 2447, "n": 2}
+    assert r_elixir["reagents"][1] == {"id": 2449, "n": 1}
+
+    assert 2540 in recipes
+    r_egg = recipes[2540]
+    assert r_egg["name"] == "Herb Baked Egg"
+    assert r_egg["output"] == 6888
+    assert r_egg["qty"] == 1
+    assert r_egg["prof"] == "Cooking"
+    assert len(r_egg["reagents"]) == 2
+    assert r_egg["reagents"][0] == {"id": 6889, "n": 1}
+    assert r_egg["reagents"][1] == {"id": 769, "n": 1}
+
+
+def test_load_profitcrafter_data_nonexistent_path(tmp_path):
+    """Verify load_profitcrafter_data returns empty dict for nonexistent paths."""
+    with unittest.mock.patch.dict(os.environ, {"WOW_WTF_PATH": ""}):
+        orig_exists = os.path.exists
+
+        def fake_exists(p):
+            if str(p) == ".env":
+                return False
+            return orig_exists(p)
+
+        with unittest.mock.patch("os.path.exists", side_effect=fake_exists):
+            res_dir = load_profitcrafter_data(str(tmp_path / "nonexistent_directory_12345"))
+            assert res_dir == {}
+
+            res_file = load_profitcrafter_data(str(tmp_path / "nonexistent_file.lua"))
+            assert res_file == {}
+
+
+def test_load_profitcrafter_data_live_wow_wtf_path():
+    """Verify load_profitcrafter_data functions cleanly against live WOW_WTF_PATH if configured."""
+    env_wtf = os.getenv("WOW_WTF_PATH")
+    if env_wtf and os.path.isdir(env_wtf):
+        res = load_profitcrafter_data(env_wtf)
+        assert isinstance(res, dict)
+        if res:
+            assert "character" in res
+            assert "professions" in res
+            assert "recipes" in res
+
+    # Calling with None or default searches data/ or fallback without crashing
+    default_res = load_profitcrafter_data(None)
+    assert isinstance(default_res, dict)
+
+

@@ -2531,19 +2531,48 @@ def test_export_sniper_addon_config_content_and_branches(tmp_path, memory_db):
     assert isinstance(targets, dict)
 
     # 3. Direct flip branch: floor(0.65 * 10000) = 6500
-    assert targets[8001] == 6500
+    target_8001 = targets[8001]["target"] if isinstance(targets[8001], dict) else targets[8001]
+    assert target_8001 == 6500
 
     # 4. Illiquid shield: item 8002 has L < 0.50, so market stream is 0, MaxBuyout <= 0 -> omitted
     assert 8002 not in targets
 
     # 5. Disenchant branch: Green armor level 10 -> DE Value = 210.0 -> floor(0.80 * 210) = 168
-    assert targets[8003] == 168
+    target_8003 = targets[8003]["target"] if isinstance(targets[8003], dict) else targets[8003]
+    assert target_8003 == 168
 
     # 6. Vendor branch: vendor_sell 5000, max_stack 20 -> delta_vendor = max(50, 75) = 75 -> 5000 - 75 = 4925
-    assert targets[8004] == 4925
+    target_8004 = targets[8004]["target"] if isinstance(targets[8004], dict) else targets[8004]
+    assert target_8004 == 4925
 
     # 7. MaxBuyout <= 0 cutoff: item 8005 has 10 - 75 = -65 <= 0 -> omitted
     assert 8005 not in targets
+
+
+def test_export_sniper_addon_config_default_min_profit_and_atomic_write(tmp_path, memory_db):
+    """Verify export_sniper_addon_config defaults min_profit_copper to 0 and writes atomically."""
+    out_file = str(tmp_path / "test_addon" / "config.lua")
+
+    with memory_db:
+        memory_db.execute(
+            "INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price) VALUES (9991, 'Atomic Test Item', 1, 7, 'Trade Goods', 50)"
+        )
+        memory_db.execute(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (9991, 'Everlook', 1000, 1000)"
+        )
+
+    res = export_sniper_addon_config(db_conn=memory_db, realm="Everlook", output_path=out_file)
+
+    assert res["min_profit_copper"] == 0
+    assert os.path.isfile(out_file)
+    assert not os.path.exists(out_file + ".tmp")
+
+    cfg = luadata.read(out_file)
+    assert cfg["version"] == 2
+    assert cfg["min_profit_copper"] == 0
+    assert 9991 in cfg["targets"]
+    target_9991 = cfg["targets"][9991]["target"] if isinstance(cfg["targets"][9991], dict) else cfg["targets"][9991]
+    assert target_9991 == 650
 
 
 def test_sniper_addon_lua_and_toc_structure():
@@ -2566,7 +2595,7 @@ def test_sniper_addon_lua_and_toc_structure():
         toc_content = f.read()
     assert "## Title: ForeverTrade_Sniper" in toc_content
     assert "## Version: 2.1" in toc_content
-    assert "## SavedVariables: FT_SNIPER_SAVED" in toc_content
+    assert "## SavedVariables: FT_CustomTargets" in toc_content
     assert "config.lua" in toc_content
     assert "ForeverTrade_Sniper.lua" in toc_content
 
@@ -2581,6 +2610,10 @@ def test_sniper_addon_lua_and_toc_structure():
     assert "PlaceAuctionBid" in lua_content
     assert "QueryAuctionItems" in lua_content
     assert "FT_ExecuteVerifiedBuy" in lua_content
+    assert "FT_IsEnabled = false" in lua_content
+    assert "FTSniperToggleBtn" in lua_content
+    assert "SLASH_FOREVERTRADESNIPER1" in lua_content
+    assert "FT_SetEnabled" in lua_content
 
     # 4. Parse config.lua via luadata
     config = luadata.read(cfg_file)
@@ -2595,8 +2628,9 @@ def test_sniper_addon_lua_and_toc_structure():
     # Ensure all targets are integer keys with positive integer buyouts
     for item_id, max_buyout in targets.items():
         assert isinstance(item_id, int)
-        assert isinstance(max_buyout, int)
-        assert max_buyout > 0
+        val = max_buyout["target"] if isinstance(max_buyout, dict) else max_buyout
+        assert isinstance(val, int)
+        assert val > 0
 
 
 # ---------------------------------------------------------------------------
@@ -3229,6 +3263,113 @@ def test_get_profitable_crafts_with_dag_subcrafts(memory_db):
     assert bag_no_dag["cost_copper"] == 160
     assert bag_no_dag["has_subcraft"] is False
     assert bag_no_dag["profit"] == 15.0
+
+
+def test_export_sniper_addon_config_craft_targets_integration(tmp_path, memory_db):
+    """Verify export_sniper_addon_config integrates ProfitCrafter recipes into craft_targets with metadata and character/professions headers."""
+    # 1. Setup mock ProfitCrafterForever.lua in WTF tree
+    char_sv_dir = tmp_path / "WTF" / "Account" / "12345#1" / "Everlook" / "TestAlchemist" / "SavedVariables"
+    char_sv_dir.mkdir(parents=True)
+    pc_file = char_sv_dir / "ProfitCrafterForever.lua"
+    pc_file.write_text(
+        'ProfitCrafterCharDB = {\n'
+        '  ["professions"] = {\n'
+        '    [171] = {\n'
+        '      ["name"] = "Алхимия",\n'
+        '      ["rank"] = 150,\n'
+        '      ["max"] = 225,\n'
+        '    },\n'
+        '    [185] = {\n'
+        '      ["name"] = "Кулинария",\n'
+        '      ["rank"] = 75,\n'
+        '      ["max"] = 150,\n'
+        '    },\n'
+        '  },\n'
+        '  ["recipes"] = {\n'
+        '    [2331] = {\n'
+        '      ["name"] = "Зелье здоровья",\n'
+        '      ["output"] = 929,\n'
+        '      ["qty"] = 1,\n'
+        '      ["prof"] = "Алхимия",\n'
+        '      ["reagents"] = {\n'
+        '        { ["id"] = 2447, ["n"] = 2 },\n'
+        '        { ["id"] = 2449, ["n"] = 1 },\n'
+        '      },\n'
+        '    },\n'
+        '  },\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    # 2. Setup DB with output item and reagents
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (929, "Healing Potion", 1, 0, "Consumable", 50, 0),
+                (2447, "Peacebloom", 1, 7, "Trade Goods", 10, 0),
+                (2449, "Silverleaf", 1, 7, "Trade Goods", 10, 0),
+            ]
+        )
+        memory_db.executemany(
+            "INSERT INTO price_snapshots (item_id, realm, price, timestamp) VALUES (?, 'Everlook', ?, 1000)",
+            [
+                (929, 10000),   # Output price 100s
+                (2447, 500),    # Reagent AH price 5s
+                (2449, 500),    # Reagent AH price 5s
+            ]
+        )
+
+    out_file = str(tmp_path / "addons" / "ForeverTrade_Sniper" / "config.lua")
+
+    # 3. Export config with wtf_path pointing to tmp_path / "WTF"
+    res = export_sniper_addon_config(
+        db_conn=memory_db,
+        realm="Everlook",
+        output_path=out_file,
+        min_profit_copper=500,
+        wtf_path=str(tmp_path / "WTF"),
+    )
+
+    assert os.path.isfile(out_file)
+    assert res["character"] == "TestAlchemist"
+    assert "professions" in res
+    assert 171 in res["professions"]
+
+    # 4. Check file text directly
+    with open(out_file, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert 'character = "TestAlchemist"' in content
+    assert "professions = {" in content
+    assert 'name = "Алхимия"' in content
+    assert 'name = "Кулинария"' in content
+
+    # 5. Parse using luadata and check craft targets
+    cfg = luadata.read(out_file)
+    assert cfg["version"] == 2
+    assert cfg["character"] == "TestAlchemist"
+    assert 171 in cfg["professions"]
+    assert cfg["professions"][171]["name"] == "Алхимия"
+
+    targets = cfg["targets"]
+    assert 2447 in targets
+    assert 2449 in targets
+
+    t2447 = targets[2447]
+    assert isinstance(t2447, dict)
+    assert t2447.get("craft_target") is True
+    assert t2447.get("target") > 0
+    assert t2447.get("recipe_name") == "Зелье здоровья"
+    assert t2447.get("output_id") == 929
+
+    t2449 = targets[2449]
+    assert isinstance(t2449, dict)
+    assert t2449.get("craft_target") is True
+    assert t2449.get("target") > 0
+    assert t2449.get("recipe_name") == "Зелье здоровья"
+    assert t2449.get("output_id") == 929
+
 
 
 
