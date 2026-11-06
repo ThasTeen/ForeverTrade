@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -13,6 +14,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from src.database import init_db
+from src.cbor import decode_cbor, unescape_lua_string, normalize_cbor_dict
 
 SQLITE_MAX_INT = 9223372036854775807
 
@@ -136,13 +138,42 @@ def _extract_lua_table(content: str, var_name: str = "AUCTIONATOR_PRICE_DATABASE
     return None
 
 
+def _unpack_cbor_realms(data: dict) -> dict:
+    """Unpack CBOR-encoded realm price strings if present (Auctionator dbversion 7/8+)."""
+    if not isinstance(data, dict):
+        return data
+
+    target_dict = data
+    if "AUCTIONATOR_PRICE_DATABASE" in data and isinstance(
+        data["AUCTIONATOR_PRICE_DATABASE"], dict
+    ):
+        target_dict = data["AUCTIONATOR_PRICE_DATABASE"]
+
+    for realm_key, val in list(target_dict.items()):
+        if isinstance(val, (str, bytes)):
+            try:
+                raw_bytes = unescape_lua_string(val) if isinstance(val, str) else val
+                if len(raw_bytes) > 1 and (raw_bytes[0] >> 5) == 5:
+                    decoded = decode_cbor(raw_bytes)
+                    if isinstance(decoded, dict):
+                        target_dict[realm_key] = normalize_cbor_dict(decoded)
+            except Exception as e:
+                logger.debug("Could not decode CBOR for realm %s: %s", realm_key, e)
+
+    return data
+
+
 def _parse_single_lua_file(path: str) -> dict:
     """Read and safely unserialize Lua table without eval()."""
     if not os.path.isfile(path):
         raise FileNotFoundError(f"File not found: {path}")
 
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except UnicodeDecodeError:
+        with open(path, "r", encoding="latin1") as f:
+            content = f.read()
 
     if not content.strip():
         raise ValueError(f"Lua data file '{path}' is empty")
@@ -151,6 +182,7 @@ def _parse_single_lua_file(path: str) -> dict:
     try:
         data = luadata.read(path)
         if isinstance(data, dict):
+            _unpack_cbor_realms(data)
             if "AUCTIONATOR_PRICE_DATABASE" in data and isinstance(
                 data["AUCTIONATOR_PRICE_DATABASE"], dict
             ):
@@ -162,18 +194,26 @@ def _parse_single_lua_file(path: str) -> dict:
     # 2. Extract AUCTIONATOR_PRICE_DATABASE table if embedded
     extracted = _extract_lua_table(content, "AUCTIONATOR_PRICE_DATABASE")
     if extracted:
-        data = luadata.unserialize(extracted)
-        if isinstance(data, dict):
-            return data
+        try:
+            data = luadata.unserialize(extracted)
+            if isinstance(data, dict):
+                _unpack_cbor_realms(data)
+                return data
+        except Exception:
+            pass
 
     # 3. Fallback to luadata.unserialize on full content
-    data = luadata.unserialize(content)
-    if isinstance(data, dict):
-        if "AUCTIONATOR_PRICE_DATABASE" in data and isinstance(
-            data["AUCTIONATOR_PRICE_DATABASE"], dict
-        ):
-            return data["AUCTIONATOR_PRICE_DATABASE"]
-        return data
+    try:
+        data = luadata.unserialize(content)
+        if isinstance(data, dict):
+            _unpack_cbor_realms(data)
+            if "AUCTIONATOR_PRICE_DATABASE" in data and isinstance(
+                data["AUCTIONATOR_PRICE_DATABASE"], dict
+            ):
+                return data["AUCTIONATOR_PRICE_DATABASE"]
+            return data
+    except Exception:
+        pass
 
     raise ValueError(f"Unserialized data from '{path}' is not a valid dictionary")
 
@@ -397,6 +437,8 @@ def ingest_price_snapshot(
 
     target_realm = realm
     realm_data: Optional[dict] = None
+    if isinstance(raw_data, dict):
+        _unpack_cbor_realms(raw_data)
     db_dict = raw_data
     if isinstance(raw_data, dict):
         if (
@@ -912,3 +954,231 @@ def start_watcher(
             observer.join()
 
     return observer
+
+
+def _parse_pc_professions(text: str) -> Dict[int, Dict[str, Any]]:
+    professions: Dict[int, Dict[str, Any]] = {}
+    m = re.search(r'\[\x22professions\x22\]\s*=\s*\{', text)
+    if not m:
+        return professions
+    start = m.end() - 1
+    depth = 0
+    end = len(text)
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    block = text[start + 1:end]
+    for entry_m in re.finditer(r'\[(\d+)\]\s*=\s*\{([^}]+)\}', block):
+        pid = int(entry_m.group(1))
+        ebody = entry_m.group(2)
+        pname_m = re.search(r'\[\x22name\x22\]\s*=\s*\x22([^\x22]*)\x22', ebody)
+        prank_m = re.search(r'\[\x22rank\x22\]\s*=\s*(\d+)', ebody)
+        pmax_m = re.search(r'\[\x22max\x22\]\s*=\s*(\d+)', ebody)
+        professions[pid] = {
+            "name": pname_m.group(1) if pname_m else f"Prof {pid}",
+            "rank": int(prank_m.group(1)) if prank_m else 0,
+            "max": int(pmax_m.group(1)) if pmax_m else 0,
+        }
+    return professions
+
+
+def _parse_pc_recipes(text: str) -> Dict[int, Dict[str, Any]]:
+    recipes: Dict[int, Dict[str, Any]] = {}
+    m = re.search(r'\[\x22recipes\x22\]\s*=\s*\{', text)
+    if not m:
+        return recipes
+    start = m.end() - 1
+    depth = 0
+    end = len(text)
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    block = text[start + 1:end]
+
+    i = 0
+    n = len(block)
+    while i < n:
+        rec_start_m = re.search(r'\[(\d+)\]\s*=\s*\{', block[i:])
+        if not rec_start_m:
+            break
+        recipe_id = int(rec_start_m.group(1))
+        rec_body_start = i + rec_start_m.end() - 1
+        r_depth = 0
+        r_end = rec_body_start
+        for j in range(rec_body_start, n):
+            if block[j] == '{':
+                r_depth += 1
+            elif block[j] == '}':
+                r_depth -= 1
+                if r_depth == 0:
+                    r_end = j + 1
+                    break
+        rec_body = block[rec_body_start:r_end]
+        i = r_end
+
+        name_m = re.search(r'\[\x22name\x22\]\s*=\s*\x22([^\x22]*)\x22', rec_body)
+        output_m = re.search(r'\[\x22output\x22\]\s*=\s*(\d+)', rec_body)
+        qty_m = re.search(r'\[\x22qty\x22\]\s*=\s*(\d+)', rec_body)
+        prof_m = re.search(r'\[\x22prof\x22\]\s*=\s*\x22([^\x22]*)\x22', rec_body)
+
+        reagents: List[Dict[str, int]] = []
+        reag_block_m = re.search(r'\[\x22reagents\x22\]\s*=\s*\{', rec_body)
+        if reag_block_m:
+            rg_start = reag_block_m.end() - 1
+            rg_depth = 0
+            rg_end = len(rec_body)
+            for k in range(rg_start, len(rec_body)):
+                if rec_body[k] == '{':
+                    rg_depth += 1
+                elif rec_body[k] == '}':
+                    rg_depth -= 1
+                    if rg_depth == 0:
+                        rg_end = k + 1
+                        break
+            rg_text = rec_body[rg_start:rg_end]
+            k = 1
+            rg_len = len(rg_text)
+            while k < rg_len - 1:
+                if rg_text[k] == '{':
+                    child_start = k
+                    c_depth = 0
+                    child_end = k
+                    for m_idx in range(child_start, rg_len):
+                        if rg_text[m_idx] == '{':
+                            c_depth += 1
+                        elif rg_text[m_idx] == '}':
+                            c_depth -= 1
+                            if c_depth == 0:
+                                child_end = m_idx + 1
+                                break
+                    child_text = rg_text[child_start:child_end]
+                    k = child_end
+                    r_id_m = re.search(r'\[\x22id\x22\]\s*=\s*(\d+)', child_text)
+                    r_n_m = re.search(r'\[\x22n\x22\]\s*=\s*(\d+)', child_text)
+                    if r_id_m:
+                        reagents.append({
+                            "id": int(r_id_m.group(1)),
+                            "n": int(r_n_m.group(1)) if r_n_m else 1,
+                        })
+                else:
+                    k += 1
+
+        recipes[recipe_id] = {
+            "name": name_m.group(1) if name_m else f"Recipe {recipe_id}",
+            "output": int(output_m.group(1)) if output_m else 0,
+            "qty": int(qty_m.group(1)) if qty_m else 1,
+            "prof": prof_m.group(1) if prof_m else "",
+            "reagents": reagents,
+        }
+
+    return recipes
+
+
+def load_profitcrafter_data(wtf_path: Optional[str] = None) -> dict:
+    """Load professions and recipes from the most recent ProfitCrafterSavedVariables file."""
+    if wtf_path and os.path.isfile(wtf_path):
+        candidates = [os.path.abspath(wtf_path)]
+    else:
+        search_dirs: List[str] = []
+        if wtf_path and os.path.isdir(wtf_path):
+            search_dirs.append(os.path.abspath(wtf_path))
+        env_wtf = os.getenv("WOW_WTF_PATH")
+        if not env_wtf and os.path.exists(".env"):
+            try:
+                with open(".env", "r", encoding="utf-8") as env_f:
+                    for line in env_f:
+                        if line.startswith("WOW_WTF_PATH="):
+                            env_wtf = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+            except Exception:
+                pass
+        if env_wtf and os.path.isdir(env_wtf):
+            abs_env = os.path.abspath(env_wtf)
+            if abs_env not in search_dirs:
+                search_dirs.append(abs_env)
+        for fallback in ["data", "."]:
+            if os.path.isdir(fallback):
+                abs_fb = os.path.abspath(fallback)
+                if abs_fb not in search_dirs:
+                    search_dirs.append(abs_fb)
+
+        candidates = []
+        for sdir in search_dirs:
+            for root, dirs, files in os.walk(sdir):
+                dirs[:] = [
+                    d for d in dirs
+                    if d.lower() not in ("tests", ".git", ".venv", "venv", "__pycache__", ".pytest_cache")
+                ]
+                for f in files:
+                    if f.lower() == "profitcrafterforever.lua":
+                        candidates.append(os.path.abspath(os.path.join(root, f)))
+
+    if not candidates:
+        return {}
+
+    # Distinguish character-level from account-level SavedVariables
+    char_candidates: List[Tuple[str, float, str]] = []
+    account_candidates: List[Tuple[str, float, str]] = []
+    for cand in set(candidates):
+        parts = os.path.normpath(cand).split(os.sep)
+        char_name = ""
+        if len(parts) >= 3 and parts[-2].lower() == "savedvariables":
+            char_candidate = parts[-3]
+            if char_candidate.lower() not in ("account", "savedvariables") and not char_candidate.isdigit():
+                char_name = char_candidate
+
+        is_char_file = bool(char_name)
+        if not is_char_file:
+            try:
+                with open(cand, "r", encoding="utf-8", errors="ignore") as f:
+                    head = f.read(2048)
+                    if "ProfitCrafterCharDB" in head:
+                        is_char_file = True
+            except Exception:
+                pass
+
+        try:
+            mtime = os.path.getmtime(cand)
+        except OSError:
+            mtime = 0.0
+
+        if is_char_file:
+            char_candidates.append((cand, mtime, char_name))
+        else:
+            account_candidates.append((cand, mtime, ""))
+
+    if char_candidates:
+        best_file, _, char_name = max(char_candidates, key=lambda x: x[1])
+    elif account_candidates:
+        best_file, _, char_name = max(account_candidates, key=lambda x: x[1])
+    else:
+        return {}
+
+    try:
+        with open(best_file, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+    except Exception:
+        return {}
+
+    professions = _parse_pc_professions(content)
+    recipes = _parse_pc_recipes(content)
+
+    return {
+        "character": char_name,
+        "professions": professions,
+        "recipes": recipes,
+    }
+
+
+load_profitcrafter_recipes = load_profitcrafter_data
+

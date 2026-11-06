@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import queue
+import shutil
 import signal
 import sqlite3
 import threading
@@ -88,12 +89,44 @@ def _build_dashboard(
             )
 
 
-def initial_ingest(conn: sqlite3.Connection, watch_dir: str, realm: str) -> int:
+def initial_ingest(
+    conn: sqlite3.Connection,
+    watch_dir: str,
+    realm: str,
+    discovered_realm_out: Optional[List[str]] = None,
+) -> int:
     """Perform initial import from existing Auctionator.lua if present on disk."""
     if watch_dir.lower().endswith(".lua"):
         lua_path = watch_dir
     else:
         lua_path = os.path.join(watch_dir, "Auctionator.lua")
+        if not os.path.exists(lua_path) and os.path.isdir(watch_dir):
+            candidates: List[str] = []
+            for root, _, files in os.walk(watch_dir):
+                for f in files:
+                    if f.lower() == "auctionator.lua":
+                        candidates.append(os.path.join(root, f))
+            if candidates:
+                candidates.sort(
+                    key=lambda p: os.path.getsize(p) if os.path.isfile(p) else 0,
+                    reverse=True,
+                )
+                lua_path = candidates[0]
+                for cand in candidates:
+                    try:
+                        test_raw = parse_auctionator_data(cand, conn=conn, realm=realm)
+                        if isinstance(test_raw, dict) and (
+                            "AUCTIONATOR_PRICE_DATABASE" in test_raw
+                            or any(
+                                normalize_item_id(k) is None and isinstance(v, (dict, str, bytes))
+                                for k, v in test_raw.items()
+                                if not str(k).startswith("_")
+                            )
+                        ):
+                            lua_path = cand
+                            break
+                    except Exception:
+                        continue
 
     if not os.path.exists(lua_path):
         return 0
@@ -136,6 +169,9 @@ def initial_ingest(conn: sqlite3.Connection, watch_dir: str, realm: str) -> int:
         logger.warning(warning_msg)
         effective_realm = discovered_realm
 
+    if discovered_realm_out is not None:
+        discovered_realm_out.append(effective_realm)
+
     source_mtime = raw_data.get("_source_mtime") if isinstance(raw_data, dict) else None
     count = ingest_price_snapshot(conn, raw_data, effective_realm, source_mtime=source_mtime)
     print(f"[*] Initial ingest from existing '{lua_path}': {count} snapshots for realm '{effective_realm}'.")
@@ -170,7 +206,10 @@ def main(argv=None):
         load_recipes(conn)
         prune_snapshots(conn, max_days=30)
 
-        initial_ingest(conn, args.watch_dir, args.realm)
+        discovered_realms: List[str] = []
+        initial_ingest(conn, args.watch_dir, args.realm, discovered_realm_out=discovered_realms)
+        if discovered_realms and discovered_realms[0] != args.realm:
+            args.realm = discovered_realms[0]
 
         print("[*] Generating baseline AI market advice...")
         arb = get_vendor_arbitrage(conn, realm=args.realm, max_age_hours=args.max_age_hours)
@@ -208,15 +247,11 @@ def main(argv=None):
 
         # Export sniper addon config locally and to WoW AddOns directory if provided
         try:
-            export_sniper_addon_config(conn, realm=args.realm)
+            local_config = export_sniper_addon_config(conn, realm=args.realm, wtf_path=os.getenv("WOW_WTF_PATH"))
             if args.wow_addon_path and os.path.isdir(args.wow_addon_path):
                 wow_addon_dir = os.path.join(args.wow_addon_path, "ForeverTrade_Sniper")
                 os.makedirs(wow_addon_dir, exist_ok=True)
-                export_sniper_addon_config(
-                    conn,
-                    realm=args.realm,
-                    output_path=os.path.join(wow_addon_dir, "config.lua"),
-                )
+                shutil.copyfile(local_config["output_path"], os.path.join(wow_addon_dir, "config.lua"))
         except Exception as e:
             logger.warning("Failed to export sniper addon config: %s", e)
     finally:
@@ -273,15 +308,11 @@ def main(argv=None):
 
                     # Export sniper addon config on each new data ingestion
                     try:
-                        export_sniper_addon_config(cb_conn, realm=args.realm)
+                        local_config = export_sniper_addon_config(cb_conn, realm=args.realm, wtf_path=os.getenv("WOW_WTF_PATH"))
                         if args.wow_addon_path and os.path.isdir(args.wow_addon_path):
                             wow_addon_dir = os.path.join(args.wow_addon_path, "ForeverTrade_Sniper")
                             os.makedirs(wow_addon_dir, exist_ok=True)
-                            export_sniper_addon_config(
-                                cb_conn,
-                                realm=args.realm,
-                                output_path=os.path.join(wow_addon_dir, "config.lua"),
-                            )
+                            shutil.copyfile(local_config["output_path"], os.path.join(wow_addon_dir, "config.lua"))
                     except Exception as ex:
                         logger.warning("Failed to auto-export sniper addon config: %s", ex)
 

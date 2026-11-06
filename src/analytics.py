@@ -1908,11 +1908,47 @@ def calculate_disenchant_value(
     return DisenchantResult(rounded_val, reagents)
 
 
+class TargetDict(dict):
+    """Target item specification with numerical comparison support for backwards compatibility."""
+
+    def __eq__(self, other):
+        if isinstance(other, (int, float)):
+            return self.get("target") == other
+        return super().__eq__(other)
+
+    def __lt__(self, other):
+        if isinstance(other, (int, float)):
+            return self.get("target", 0) < other
+        return NotImplemented
+
+    def __le__(self, other):
+        if isinstance(other, (int, float)):
+            return self.get("target", 0) <= other
+        return NotImplemented
+
+    def __gt__(self, other):
+        if isinstance(other, (int, float)):
+            return self.get("target", 0) > other
+        return NotImplemented
+
+    def __ge__(self, other):
+        if isinstance(other, (int, float)):
+            return self.get("target", 0) >= other
+        return NotImplemented
+
+    def __int__(self):
+        return int(self.get("target", 0))
+
+    def __float__(self):
+        return float(self.get("target", 0))
+
+
 def export_sniper_addon_config(
     db_conn: Optional[sqlite3.Connection] = None,
     realm: Optional[str] = None,
     output_path: Optional[str] = None,
-    min_profit_copper: int = 1000,
+    min_profit_copper: int = 0,
+    wtf_path: Optional[str] = None,
 ) -> dict:
     """Export unit-price buyout targets for ForeverTrade_Sniper WoW addon.
 
@@ -2101,7 +2137,128 @@ def export_sniper_addon_config(
         # Unified ceiling
         max_buyout = max(term_market, term_de, term_vendor)
         if max_buyout > 0:
-            targets[int(item_id)] = int(max_buyout)
+            item_name = item_data.get("name") or cat_it.get("name") or f"Item {item_id}"
+            targets[int(item_id)] = TargetDict({
+                "target": int(max_buyout),
+                "min_profit": int(min_profit_copper),
+                "name": item_name,
+            })
+
+    # 4. Crafting Reagent stream from ProfitCrafterForever
+    try:
+        from src.etl import load_profitcrafter_data
+    except ImportError:
+        try:
+            from etl import load_profitcrafter_data
+        except ImportError:
+            def load_profitcrafter_data(w_path=None):
+                return {}
+
+    pc_data = load_profitcrafter_data(wtf_path)
+    char_name = pc_data.get("character", "") if isinstance(pc_data, dict) else ""
+    pc_professions = pc_data.get("professions", {}) if isinstance(pc_data, dict) else {}
+    pc_recipes = pc_data.get("recipes", {}) if isinstance(pc_data, dict) else {}
+
+    for recipe_id, recipe in pc_recipes.items():
+        if not isinstance(recipe, dict):
+            continue
+        output_id = recipe.get("output", 0)
+        if not output_id or int(output_id) <= 0:
+            continue
+        output_id = int(output_id)
+        qty = int(recipe.get("qty", 1) or 1)
+        if qty <= 0:
+            qty = 1
+
+        output_price = latest_prices.get(output_id, 0)
+        if not output_price or output_price <= 0:
+            continue
+
+        net_rev = int(output_price * qty * 0.95)
+        if net_rev <= 0:
+            continue
+
+        max_total_craft_cost = max(0, int(net_rev * 0.85))
+        if min_profit_copper > 0:
+            max_total_craft_cost = min(max_total_craft_cost, max(0, net_rev - int(min_profit_copper)))
+
+        if max_total_craft_cost <= 0:
+            continue
+
+        reagents = recipe.get("reagents", [])
+        if not reagents or not isinstance(reagents, list):
+            continue
+
+        vendor_mats = []
+        craft_mats = []
+        for rg in reagents:
+            if not isinstance(rg, dict):
+                continue
+            r_id = int(rg.get("id", 0))
+            if r_id <= 0:
+                continue
+            r_n = int(rg.get("n", 1) or 1)
+            if r_n <= 0:
+                r_n = 1
+            cat_it = _get_catalog_item(r_id)
+            v_buy = int(items_dict.get(r_id, {}).get("vendor_buy") or cat_it.get("vendor_buy_copper") or cat_it.get("vendor_buy_price") or 0)
+            if v_buy > 0 and (r_id in VENDOR_REAGENTS_WHITELIST or items_dict.get(r_id, {}).get("vendor_buy", 0) > 0 or cat_it.get("vendor_buy_copper", 0) > 0):
+                vendor_mats.append((r_id, r_n, v_buy))
+            else:
+                craft_mats.append((r_id, r_n))
+
+        if not craft_mats:
+            craft_mats = [(r_id, r_n) for r_id, r_n, _ in vendor_mats]
+            remaining_budget = max_total_craft_cost
+        else:
+            vendor_cost = sum(r_n * vb for _, r_n, vb in vendor_mats)
+            remaining_budget = max_total_craft_cost - vendor_cost
+
+        if remaining_budget <= 0:
+            continue
+
+        output_cat = _get_catalog_item(output_id)
+        output_name = items_dict.get(output_id, {}).get("name") or output_cat.get("name") or f"Item {output_id}"
+        recipe_name = recipe.get("name") or f"Recipe {recipe_id}"
+
+        if len(craft_mats) == 1:
+            r_id, r_n = craft_mats[0]
+            unit_ceiling = max(1, int(remaining_budget // r_n))
+            reagent_ceilings = [(r_id, unit_ceiling)]
+        else:
+            total_ah = sum(latest_prices.get(r_id, 0) * r_n for r_id, r_n in craft_mats)
+            reagent_ceilings = []
+            if total_ah > 0:
+                for r_id, r_n in craft_mats:
+                    ah_p = latest_prices.get(r_id, 0)
+                    share = (ah_p * r_n) / total_ah if ah_p > 0 else (1.0 / len(craft_mats))
+                    unit_ceiling = max(1, int((remaining_budget * share) // r_n))
+                    reagent_ceilings.append((r_id, unit_ceiling))
+            else:
+                total_cnt = sum(r_n for _, r_n in craft_mats)
+                for r_id, r_n in craft_mats:
+                    unit_ceiling = max(1, int(remaining_budget // total_cnt))
+                    reagent_ceilings.append((r_id, unit_ceiling))
+
+        for r_id, unit_ceiling in reagent_ceilings:
+            if unit_ceiling <= 0:
+                continue
+            r_cat = _get_catalog_item(r_id)
+            reagent_name = items_dict.get(r_id, {}).get("name") or r_cat.get("name") or f"Item {r_id}"
+
+            existing = targets.get(r_id)
+            existing_target = int(existing.get("target", 0)) if existing else 0
+            final_target = max(existing_target, unit_ceiling)
+
+            targets[r_id] = TargetDict({
+                "target": final_target,
+                "min_profit": int(min_profit_copper),
+                "name": reagent_name,
+                "craft_target": True,
+                "recipe_name": recipe_name,
+                "output_id": output_id,
+                "output_name": output_name,
+            })
 
     # Output file handling
     if output_path is None:
@@ -2119,16 +2276,50 @@ def export_sniper_addon_config(
         "    version = 2,",
         f"    generated_at = {gen_ts},",
         f"    min_profit_copper = {int(min_profit_copper)},",
-        "    targets = {",
+        f'    character = "{char_name}",',
+        "    professions = {",
     ]
+    for pid in sorted(pc_professions.keys()):
+        pinfo = pc_professions[pid]
+        pname = str(pinfo.get("name", "")).replace("\\", "\\\\").replace('"', '\\"')
+        prank = int(pinfo.get("rank", 0))
+        pmax = int(pinfo.get("max", 0))
+        lines.append(f"        [{pid}] = {{")
+        lines.append(f'            name = "{pname}",')
+        lines.append(f"            rank = {prank},")
+        lines.append(f"            max = {pmax},")
+        lines.append("        },")
+    lines.append("    },")
+    lines.append("    targets = {")
     for tid in sorted(targets.keys()):
-        lines.append(f"        [{tid}] = {targets[tid]},")
+        tinfo = targets[tid]
+        safe_name = str(tinfo.get("name", f"Item {tid}")).replace("\\", "\\\\").replace('"', '\\"')
+        ceiling_val = int(tinfo.get("target", 0))
+        p_copper = int(tinfo.get("min_profit", min_profit_copper))
+        if tinfo.get("craft_target"):
+            safe_rec_name = str(tinfo.get("recipe_name", "")).replace("\\", "\\\\").replace('"', '\\"')
+            out_id = int(tinfo.get("output_id", 0))
+            lines.append(
+                f'        [{tid}] = {{ target = {ceiling_val}, min_profit = {p_copper}, name = "{safe_name}", craft_target = true, recipe_name = "{safe_rec_name}", output_id = {out_id} }},'
+            )
+        else:
+            lines.append(
+                f'        [{tid}] = {{ target = {ceiling_val}, min_profit = {p_copper}, name = "{safe_name}" }},'
+            )
+    lines.append("    },")
+    lines.append("    names = {")
+    for tid in sorted(targets.keys()):
+        tinfo = targets[tid]
+        safe_name = str(tinfo.get("name", f"Item {tid}")).replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'        [{tid}] = "{safe_name}",')
     lines.append("    }")
     lines.append("}")
     lines.append("")
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    tmp_path = str(output_path) + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+    os.replace(tmp_path, output_path)
 
     return {
         "total_targets": len(targets),
@@ -2136,6 +2327,8 @@ def export_sniper_addon_config(
         "generated_at": gen_ts,
         "min_profit_copper": min_profit_copper,
         "targets": targets,
+        "character": char_name,
+        "professions": pc_professions,
     }
 
 
