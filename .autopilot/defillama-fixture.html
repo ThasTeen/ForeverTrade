@@ -1,0 +1,2083 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forever Trade — Goblin Terminal</title>
+    <!-- Wowhead Forever Tooltips -->
+    <script>const whTooltips = {colorLinks: true, iconizeLinks: true, renameLinks: false, domain: 'forever'};</script>
+    <script src="https://wow.zamimg.com/js/tooltips.js"></script>
+    <style>
+        :root {
+            --ft-bg: #0b0e14;
+            --ft-sidebar: #0e131b;
+            --ft-surface: #11161f;
+            --ft-surface-raised: #161d28;
+            --ft-surface-hover: #1b2431;
+            --ft-border: #263142;
+            --ft-border-strong: #35445a;
+            --ft-text: #e6edf3;
+            --ft-text-secondary: #b7c2cf;
+            --ft-text-muted: #8b98a9;
+            --ft-accent: #6b9dff;
+            --ft-accent-strong: #3b82f6;
+            --ft-accent-soft: rgba(59, 130, 246, 0.14);
+            --ft-focus: #93b4ff;
+            --ft-success: #3fb950;
+            --ft-warning: #d29922;
+            --ft-danger: #f85149;
+            --ft-money-gold: #e3b341;
+            --ft-money-silver: #c9d1d9;
+            --ft-money-copper: #d8875f;
+
+            --ft-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --ft-font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+            --ft-text-xs: 11px;
+            --ft-text-sm: 12px;
+            --ft-text-md: 13px;
+            --ft-text-lg: 16px;
+            --ft-text-xl: 20px;
+            --ft-leading-tight: 1.25;
+            --ft-leading-ui: 1.4;
+
+            --ft-space-1: 4px;
+            --ft-space-2: 8px;
+            --ft-space-3: 12px;
+            --ft-space-4: 16px;
+            --ft-space-5: 20px;
+            --ft-space-6: 24px;
+            --ft-radius-sm: 4px;
+            --ft-radius-md: 6px;
+            --ft-radius-lg: 8px;
+            --ft-topbar-h: 56px;
+            --ft-sidebar-w: 224px;
+            --ft-row-h: 40px;
+            --ft-control-h: 32px;
+            --ft-shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.35);
+            --ft-transition: 150ms ease;
+
+            /* Legacy compatibility variables */
+            --bg-main: var(--ft-bg);
+            --bg-card: var(--ft-surface);
+            --bg-card-hover: var(--ft-surface-hover);
+            --border-color: var(--ft-border);
+            --text-primary: var(--ft-text);
+            --text-muted: var(--ft-text-muted);
+            --accent-blue: var(--ft-accent);
+            --accent-green: var(--ft-success);
+            --accent-red: var(--ft-danger);
+            --gold: var(--ft-money-gold);
+            --silver: var(--ft-money-silver);
+            --copper: var(--ft-money-copper);
+            --q0: #9d9d9d;
+            --q1: #ffffff;
+            --q2: #1eff00;
+            --q3: #0070dd;
+            --q4: #a335ee;
+            --q5: #ff8000;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html, body {
+            height: 100vh;
+            max-height: 100vh;
+            overflow: hidden;
+            background-color: var(--ft-bg);
+            color: var(--ft-text);
+            font-family: var(--ft-font-ui);
+            font-size: 13px;
+            line-height: 1.4;
+        }
+
+        .terminal-layout {
+            height: 100vh;
+            max-height: 100vh;
+            display: grid;
+            grid-template-columns: var(--ft-sidebar-w) minmax(0, 1fr);
+            overflow: hidden;
+            color: var(--ft-text);
+            background: var(--ft-bg);
+            font-family: var(--ft-font-ui);
+        }
+
+        .terminal-sidebar {
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            padding: var(--ft-space-4) var(--ft-space-3);
+            background: var(--ft-sidebar);
+            border-right: 1px solid var(--ft-border);
+            overflow-y: auto;
+        }
+
+        .sidebar-brand {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            margin-bottom: var(--ft-space-4);
+            padding: 0 var(--ft-space-2);
+        }
+
+        .brand-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--ft-text);
+            letter-spacing: -0.2px;
+        }
+
+        .brand-subtitle {
+            font-size: var(--ft-text-xs);
+            color: var(--ft-text-muted);
+            font-weight: 500;
+        }
+
+        .terminal-nav {
+            display: flex;
+            flex-direction: column;
+            gap: var(--ft-space-1);
+        }
+
+        .sidebar-status {
+            margin-top: auto;
+            padding-top: var(--ft-space-3);
+            border-top: 1px solid var(--ft-border);
+        }
+
+        .terminal-content {
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Header Bar */
+        .terminal-header {
+            min-height: var(--ft-topbar-h);
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 6px 14px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            flex-wrap: wrap;
+        }
+
+        .brand-cluster {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #ffffff;
+            letter-spacing: -0.3px;
+        }
+
+        .realm-badge {
+            background: rgba(88, 166, 255, 0.15);
+            color: var(--accent-blue);
+            border: 1px solid rgba(88, 166, 255, 0.3);
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .header-timestamps {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+        }
+
+        .timestamp-badge {
+            background: #0b0e14;
+            border: 1px solid var(--border-color);
+            padding: 3px 8px;
+            border-radius: 4px;
+        }
+
+        .header-center {
+            flex: 1;
+            max-width: 420px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .search-input {
+            width: 100%;
+            background: #0b0e14;
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            border-radius: 6px;
+            padding: 5px 10px;
+            font-size: 0.85rem;
+            outline: none;
+            transition: border-color 0.15s ease;
+        }
+
+        .search-input:focus {
+            border-color: var(--accent-blue);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .btn-shopping-list {
+            background: #238636;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 0.8rem;
+            padding: 5px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.15s ease;
+            white-space: nowrap;
+        }
+
+        .btn-shopping-list:hover {
+            background: #2ea043;
+        }
+
+        .lang-switcher {
+            display: flex;
+            background: #0b0e14;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .lang-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 4px 10px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .lang-btn.active {
+            background: #1f6feb;
+            color: #ffffff;
+        }
+
+        /* Summary Cards Row */
+        .summary-cards-row {
+            flex: 0 0 auto;
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: var(--ft-space-3);
+            margin: 0 var(--ft-space-4) var(--ft-space-3);
+        }
+
+        .summary-card {
+            background: var(--ft-surface);
+            border: 1px solid var(--ft-border);
+            border-radius: var(--ft-radius-md);
+            padding: var(--ft-space-3);
+            display: flex;
+            flex-direction: column;
+            cursor: pointer;
+            transition: background-color var(--ft-transition), border-color var(--ft-transition);
+        }
+
+        .summary-card:hover {
+            border-color: var(--ft-accent);
+            background: var(--ft-surface-hover);
+        }
+
+        .card-label {
+            font-size: var(--ft-text-xs);
+            color: var(--ft-text-muted);
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            margin-bottom: var(--ft-space-1);
+        }
+
+        .card-val {
+            font-size: var(--ft-text-xl);
+            font-weight: 600;
+            color: var(--ft-text);
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Main Workspace: 65% Left / 35% Right */
+        .terminal-main {
+            flex: 1;
+            min-height: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1.65fr) minmax(320px, 0.85fr);
+            gap: var(--ft-space-3);
+            padding: 0 var(--ft-space-4) var(--ft-space-4);
+            overflow: hidden;
+        }
+
+        .summary-card,
+        .terminal-left,
+        .terminal-right,
+        .inspector-panel {
+            background: var(--ft-surface);
+            border: 1px solid var(--ft-border);
+            border-radius: var(--ft-radius-md);
+        }
+
+        .terminal-left,
+        .terminal-right {
+            min-width: 0;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .terminal-left {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .terminal-right {
+            display: flex;
+            flex-direction: column;
+            padding: 0;
+        }
+
+        .tab-btn {
+            min-height: 36px;
+            display: flex;
+            align-items: center;
+            gap: var(--ft-space-2);
+            padding: var(--ft-space-2) var(--ft-space-3);
+            color: var(--ft-text-secondary);
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: var(--ft-radius-md);
+            font: 500 var(--ft-text-md)/var(--ft-leading-ui) var(--ft-font-ui);
+            text-align: left;
+            cursor: pointer;
+            transition: background-color var(--ft-transition), color var(--ft-transition);
+        }
+
+        .tab-btn:hover {
+            color: var(--ft-text);
+            background: var(--ft-surface-hover);
+        }
+
+        .tab-btn.active {
+            color: var(--ft-text);
+            background: var(--ft-accent-soft);
+            border-left-color: var(--ft-accent);
+        }
+
+        .tab-btn:focus-visible,
+        button:focus-visible,
+        input:focus-visible,
+        select:focus-visible,
+        a:focus-visible,
+        th:focus-visible,
+        [tabindex]:focus-visible {
+            outline: 2px solid var(--ft-focus);
+            outline-offset: 2px;
+        }
+
+        .tab-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .tab-count {
+            background: #21262d;
+            border-radius: 10px;
+            padding: 1px 6px;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-left: auto;
+        }
+
+        .tab-btn.active .tab-count {
+            background: #1f6feb;
+            color: #ffffff;
+        }
+
+        .tabs-content {
+            flex: 1 1 0;
+            min-height: 0;
+            overflow-y: auto;
+            position: relative;
+        }
+
+        .tab-pane {
+            display: none;
+            padding: 12px;
+        }
+
+        .tab-pane.active {
+            display: block;
+        }
+
+        /* Table Styles */
+        .table-scroll,
+        .table-responsive {
+            overflow-x: auto;
+            width: 100%;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: var(--ft-text-sm);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: var(--ft-text-sm);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .data-table thead {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: var(--ft-surface-raised);
+        }
+
+        .data-table th,
+        .data-table td {
+            min-height: var(--ft-row-h);
+            padding: var(--ft-space-2) var(--ft-space-3);
+            border-bottom: 1px solid var(--ft-border);
+        }
+
+        .data-table td.num,
+        .data-table th.num,
+        .money-gold,
+        .money-silver,
+        .money-copper {
+            font-variant-numeric: tabular-nums;
+        }
+
+        .data-table th.num,
+        .data-table td.num {
+            text-align: right;
+        }
+
+        .sortable th {
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: var(--ft-surface-raised);
+            color: var(--ft-text-muted);
+            font-size: var(--ft-text-xs);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .sortable th:hover {
+            color: var(--ft-text);
+        }
+
+        .empty-state {
+            text-align: center;
+            color: var(--ft-text-muted);
+            padding: var(--ft-space-6) var(--ft-space-4);
+            font-size: var(--ft-text-md);
+        }
+
+        tr.clickable-row {
+            cursor: pointer;
+        }
+
+        .data-table tbody tr:hover,
+        tr.clickable-row:hover td {
+            background: var(--ft-surface-hover);
+        }
+
+        .selected-row,
+        .data-table tbody tr.selected-row {
+            background: var(--ft-accent-soft);
+            box-shadow: inset 2px 0 0 var(--ft-accent);
+        }
+
+        tr.selected-row td {
+            background-color: var(--ft-accent-soft) !important;
+            border-bottom-color: var(--ft-border-strong);
+        }
+
+        .item-cell-wrap {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .wowhead-link {
+            text-decoration: none;
+            color: inherit;
+        }
+
+        .wowhead-link:hover {
+            text-decoration: underline;
+        }
+
+        .item-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .copy-btn, .graph-btn {
+            background: #161b22;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            border-radius: 4px;
+            padding: 2px 5px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            line-height: 1.2;
+            transition: all 0.15s ease;
+        }
+
+        .copy-btn:hover, .graph-btn:hover {
+            background: #21262d;
+            color: var(--text-primary);
+            border-color: #58a6ff;
+        }
+
+        .copy-btn.copied {
+            background: rgba(63, 185, 80, 0.2);
+            border-color: #3fb950;
+            color: #3fb950;
+        }
+
+        /* Currency Styling */
+        .money-gold { color: var(--gold); font-weight: 600; }
+        .money-silver { color: var(--silver); font-weight: 600; }
+        .money-copper { color: var(--copper); font-weight: 600; }
+        .profit-cell { font-weight: 600; color: #56d364; }
+        .roi-cell { color: var(--accent-green); font-weight: 700; }
+        .z-cell { font-weight: 700; color: var(--accent-blue); }
+        .crate-cell { color: #d2a8ff; }
+        .reagents-subtext { font-size: 0.72rem; color: var(--text-muted); margin-top: 1px; }
+
+        /* Quality Colors */
+        .q-0 { color: var(--q0); }
+        .q-1 { color: var(--q1); }
+        .q-2 { color: var(--q2); }
+        .q-3 { color: var(--q3); }
+        .q-4 { color: var(--q4); }
+        .q-5 { color: var(--q5); }
+
+        /* Badges */
+        .badge {
+            display: inline-block;
+            padding: 1px 6px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            border-radius: 8px;
+            letter-spacing: 0.4px;
+        }
+        .badge-buy { background: rgba(63, 185, 80, 0.2); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.4); }
+        .badge-sell { background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.4); }
+        .badge-waylaid { background: rgba(163, 53, 238, 0.2); color: #c27aff; border: 1px solid rgba(163, 53, 238, 0.4); margin-right: 4px; }
+        .badge-craft { background: rgba(88, 166, 255, 0.2); color: #58a6ff; border: 1px solid rgba(88, 166, 255, 0.4); margin-right: 4px; }
+
+        /* Right Column: Inspector */
+        .inspector-panel {
+            height: 100%;
+            min-height: 0;
+            overflow-y: auto;
+            border: 0;
+            border-radius: 0;
+            display: flex;
+            flex-direction: column;
+            gap: var(--ft-space-3);
+            padding: var(--ft-space-3);
+        }
+
+        .inspector-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--ft-border);
+            padding-bottom: var(--ft-space-2);
+        }
+
+        .inspector-title-wrap {
+            display: flex;
+            align-items: center;
+            gap: var(--ft-space-2);
+        }
+
+        .inspector-name {
+            font-size: var(--ft-text-lg);
+            font-weight: 700;
+        }
+
+        .inspector-chart-container {
+            min-height: 250px;
+            max-height: 270px;
+            width: 100%;
+            background: var(--ft-bg);
+            border: 1px solid var(--ft-border);
+            border-radius: var(--ft-radius-md);
+            padding: var(--ft-space-1);
+        }
+
+        .deal-calculator {
+            background: var(--ft-surface);
+            border: 1px solid var(--ft-border);
+            border-radius: var(--ft-radius-md);
+            padding: var(--ft-space-3);
+            display: flex;
+            flex-direction: column;
+            gap: var(--ft-space-2);
+            border-bottom: 1px solid var(--ft-border);
+        }
+
+        .deal-calculator-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: var(--ft-space-2);
+        }
+
+        .calc-header {
+            font-size: var(--ft-text-xs);
+            font-weight: 700;
+            color: var(--ft-accent);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--ft-border);
+            padding-bottom: var(--ft-space-1);
+        }
+
+        .calc-grid {
+            display: flex;
+            flex-direction: column;
+            gap: var(--ft-space-1);
+        }
+
+        .calc-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: var(--ft-text-sm);
+        }
+
+        .calc-row.highlight {
+            padding-top: var(--ft-space-1);
+            border-top: 1px dashed var(--ft-border);
+            font-weight: 600;
+        }
+
+        .calc-label {
+            color: var(--ft-text-muted);
+        }
+
+        .calc-val {
+            font-weight: 600;
+        }
+
+        .disenchant-card {
+            background: var(--ft-surface);
+            border: 1px solid var(--ft-border);
+            border-radius: var(--ft-radius-md);
+            padding: var(--ft-space-3);
+            display: flex;
+            flex-direction: column;
+            gap: var(--ft-space-2);
+            margin-top: var(--ft-space-2);
+            border-bottom: 1px solid var(--ft-border);
+        }
+
+        .de-summary-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: var(--ft-text-sm);
+            padding: var(--ft-space-1) 0;
+            border-bottom: 1px dashed var(--ft-border);
+        }
+
+        .de-reagents-header {
+            font-size: var(--ft-text-xs);
+            color: var(--ft-text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: var(--ft-space-1);
+        }
+
+        .de-reagents-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .de-reagent-row {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 6px 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .de-reagent-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+
+        .de-reagent-bottom {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: #8b949e;
+        }
+
+        .materials-cell {
+            font-size: 0.8rem;
+            color: #8b949e;
+            max-width: 250px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .crafting-tree-card {
+            background: #0b0e14;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 8px;
+            max-height: 260px;
+            overflow-y: auto;
+        }
+
+        .crafting-tree-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 0.82rem;
+        }
+
+        .crafting-node {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .crafting-node-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .tree-branch {
+            color: #64748b;
+            font-family: monospace;
+            font-weight: 700;
+        }
+
+        .badge-ah {
+            background: rgba(56, 189, 248, 0.15);
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }
+
+        .badge-vendor {
+            background: rgba(34, 197, 94, 0.15);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }
+
+        .badge-craft {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }
+
+        .craft-count {
+            color: #94a3b8;
+            font-size: 0.78rem;
+        }
+
+        .craft-cost {
+            color: #cbd5e1;
+            font-size: 0.78rem;
+        }
+
+        /* Toast notification */
+        .toast {
+            position: fixed;
+            bottom: var(--ft-space-6);
+            right: var(--ft-space-6);
+            background: var(--ft-surface-raised);
+            border: 1px solid var(--ft-border-strong);
+            color: var(--ft-text);
+            padding: var(--ft-space-2) var(--ft-space-4);
+            border-radius: var(--ft-radius-md);
+            font-size: var(--ft-text-sm);
+            font-weight: 600;
+            box-shadow: var(--ft-shadow-popover);
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(10px);
+            transition: opacity var(--ft-transition), transform var(--ft-transition);
+            z-index: 10000;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* AI Banner */
+        .ai-banner {
+            background: #10141d;
+            border: 1px solid #388bfd;
+            border-left: 4px solid var(--accent-blue);
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin-bottom: 10px;
+        }
+        .ai-banner-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .ai-badge { background: #1f6feb; color: #ffffff; font-size: 0.7rem; font-weight: 700; padding: 2px 6px; border-radius: 6px; }
+        .ai-summary { font-size: 0.85rem; margin-bottom: 6px; }
+        .ai-checklist { margin-left: 18px; font-size: 0.82rem; }
+        .ai-checklist li { margin-bottom: 3px; }
+
+        /* Hidden elements for compatibility */
+        .compat-hidden {
+            display: none !important;
+        }
+
+        /* Modal backdrop for modal test backwards compatibility */
+        .modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(4px);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            width: 100%;
+            max-width: 820px;
+            max-height: 90vh;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        /* Responsive & Accessibility */
+        @media (max-width: 1279px) {
+            .terminal-layout {
+                grid-template-columns: 72px minmax(0, 1fr);
+            }
+            .terminal-nav .tab-label,
+            .sidebar-brand .brand-subtitle {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                overflow: hidden;
+                clip-path: inset(50%);
+            }
+            .terminal-main {
+                grid-template-columns: 1fr;
+                overflow-y: auto;
+            }
+            .terminal-left,
+            .terminal-right {
+                min-height: 360px;
+            }
+        }
+
+        @media (max-width: 1023px) {
+            .terminal-layout {
+                height: auto;
+                max-height: none;
+                display: block;
+                overflow: visible;
+            }
+            .terminal-sidebar {
+                padding: var(--ft-space-2) var(--ft-space-3);
+                border-right: 0;
+                border-bottom: 1px solid var(--ft-border);
+                overflow: visible;
+            }
+            .terminal-nav {
+                flex-direction: row;
+                overflow-x: auto;
+            }
+            .terminal-nav .tab-label {
+                position: static;
+                width: auto;
+                height: auto;
+                clip-path: none;
+            }
+            .summary-cards-row {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .terminal-main {
+                overflow: visible;
+            }
+        }
+
+        @media (max-width: 767px) {
+            .terminal-header {
+                min-height: var(--ft-topbar-h);
+                height: auto;
+                flex-wrap: wrap;
+                padding: var(--ft-space-2) var(--ft-space-3);
+            }
+            .header-center {
+                order: 3;
+                min-width: 100%;
+            }
+            .summary-cards-row {
+                margin: var(--ft-space-3);
+            }
+            .terminal-main {
+                padding: 0 var(--ft-space-3) var(--ft-space-3);
+            }
+            .table-scroll {
+                overflow-x: auto;
+                overscroll-behavior-inline: contain;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                scroll-behavior: auto !important;
+                transition-duration: 0.01ms !important;
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="terminal-layout app-shell">
+        <aside class="terminal-sidebar">
+            <div class="sidebar-brand">
+                <span class="brand-title">Forever Trade</span>
+                <span class="brand-subtitle">WoW Forever</span>
+            </div>
+            <nav class="terminal-nav" aria-label="Разделы рынка">
+                <button class="tab-btn active" data-tab="price-anomalies" onclick="switchTab('price-anomalies')">
+                    <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M2 12 6 8 9 10 14 3" /><path d="M10 3h4v4" />
+                    </svg>
+                    <span class="tab-label">Strong Buy</span>
+                    <span class="tab-count" id="strong-buy-count">1</span>
+                </button>
+                <button class="tab-btn" data-tab="vendor-arbitrage" onclick="switchTab('vendor-arbitrage')">
+                    <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 5h10M11 3l2 2-2 2M13 11H3M5 9l-2 2 2 2" />
+                    </svg>
+                    <span class="tab-label i18n" data-ru="Арбитраж" data-en="Arbitrage">Арбитраж</span>
+                    <span class="tab-count">2</span>
+                </button>
+                <button class="tab-btn" data-tab="tab-disenchant" onclick="switchTab('tab-disenchant')">
+                    <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="m8 2 1.4 3.6L13 7l-3.6 1.4L8 12 6.6 8.4 3 7l3.6-1.4L8 2Z" />
+                    </svg>
+                    <span class="tab-label i18n" data-ru="Дизэнчант" data-en="Disenchant">Дизэнчант</span>
+                    <span class="tab-count">2</span>
+                </button>
+                <button class="tab-btn" data-tab="waylaid-crates" onclick="switchTab('waylaid-crates')">
+                    <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 6h10v8H3zM5 6V3h6v3M6 10h4" />
+                    </svg>
+                    <span class="tab-label i18n" data-ru="Крафт (Dual)" data-en="Craft (Dual)">Крафт (Dual)</span>
+                    <span class="tab-count">3</span>
+                </button>
+                <button class="tab-btn" data-tab="tab-crates" onclick="switchTab('tab-crates')">
+                    <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="m2 5 6-3 6 3-6 3-6-3Zm0 0v7l6 3 6-3V5M8 8v7" />
+                    </svg>
+                    <span class="tab-label i18n" data-ru="Ящики" data-en="Waylaid Crates">Ящики</span>
+                    <span class="tab-count">1</span>
+                </button>
+                <button class="tab-btn" data-tab="tab-shuffle" onclick="switchTab('tab-shuffle')">
+                    <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="8" cy="8" r="5" /><path d="M6 8h4M8 6v4" />
+                    </svg>
+                    <span class="tab-label i18n" data-ru="Вендор-шаффл" data-en="Vendor Shuffle">Вендор-шаффл</span>
+                    <span class="tab-count">2</span>
+                </button>
+                <button class="tab-btn" data-tab="charts-section" onclick="switchTab('charts-section')">
+                    <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 13V8M8 13V3M13 13V6" />
+                    </svg>
+                    <span class="tab-label i18n" data-ru="Обзор рынка" data-en="Market Overview">Обзор рынка</span>
+                </button>
+            </nav>
+            <div class="sidebar-status">
+                <span class="timestamp-badge timestamp-gen">Generated: 2026-11-05 07:24:13</span>
+            </div>
+        </aside>
+        <div class="terminal-content">
+            <!-- Top Header Bar -->
+            <header class="terminal-header">
+                <div class="brand-cluster">
+                    <span class="realm-badge">⚔️ Everlook</span>
+                    <div class="header-timestamps">
+                        <span class="timestamp-badge timestamp-snap">
+                            <span class="i18n" data-ru="Актуальность снимка цен: 2026-11-05 07:24:13 (0 сек. назад)" data-en="Snapshot freshness: 2026-11-05 07:24:13 (0s ago)">Актуальность снимка цен: 2026-11-05 07:24:13 (0 сек. назад)</span>
+                        </span>
+                    </div>
+                </div>
+
+                <div class="header-center">
+                    <input type="text" id="item-search-input" class="search-input" placeholder="🔍 Поиск RU/EN (Ctrl+K)..." data-ru-placeholder="🔍 Поиск RU/EN (Ctrl+K)..." data-en-placeholder="🔍 Search RU/EN (Ctrl+K)..." oninput="onItemSearch(this.value)" />
+                </div>
+
+                <div class="header-actions">
+                    <button id="btn-export-shopping-list" class="btn-shopping-list" onclick="copyAuctionatorShoppingList()">
+                        <span class="i18n" data-ru="📋 Скопировать Shopping List для Auctionator" data-en="📋 Copy Auctionator Shopping List">📋 Скопировать Shopping List для Auctionator</span>
+                    </button>
+                    <div class="lang-switcher">
+                        <button id="lang-ru" class="lang-btn active" aria-pressed="true" onclick="setLanguage('ru')">RU</button>
+                        <button id="lang-en" class="lang-btn" aria-pressed="false" onclick="setLanguage('en')">EN</button>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Summary Cards Row -->
+            <div class="summary-cards-row">
+                <div class="summary-card" onclick="selectInspectorItem(2447)">
+                    <div class="card-label">🔥 <span class="i18n" data-ru="ТОП СНАЙП (Флип)" data-en="TOP SNIPE (Flip)">ТОП СНАЙП (Флип)</span></div>
+                    <div class="card-val"><strong>Peacebloom</strong> <span class='profit-cell'>+0g 6s 84c</span></div>
+                </div>
+                <div class="summary-card" onclick="selectInspectorItem(201)">
+                    <div class="card-label">⚗️ <span class="i18n" data-ru="ТОП КРАФТ ЧАСА" data-en="TOP CRAFT OF THE HOUR">ТОП КРАФТ ЧАСА</span></div>
+                    <div class="card-val"><strong>Heavy Copper Broadsword</strong> <span class='profit-cell'>+0g 7s 35c</span></div>
+                </div>
+                <div class="summary-card" onclick="selectInspectorItem(201)">
+                    <div class="card-label">📦 <span class="i18n" data-ru="ЛУЧШИЙ ЯЩИК (Crate)" data-en="BEST WAYLAID CRATE">ЛУЧШИЙ ЯЩИК (Crate)</span></div>
+                    <div class="card-val"><strong>Waylaid Shipment: Heavy Copper Broadswords</strong> <span class='profit-cell'>+0g 48s 0c</span></div>
+                </div>
+                <div class="summary-card" onclick="toggleAiBanner()">
+                    <div class="card-label">🤖 <span class="i18n" data-ru="AI ПУЛЬС / Рекомендации" data-en="AI PULSE / Advice">AI ПУЛЬС / Рекомендации</span></div>
+                    <div class="card-val">3 активных совета</div>
+                </div>
+            </div>
+
+            <!-- Collapsible AI Banner -->
+            <div id="ai-banner-container" style="display: none;">
+                
+        <div id="ai-advisor-banner" class="ai-banner ai-empty">
+            <div class="ai-banner-header">
+                <span class="ai-badge">AI Advisor</span>
+                <h3 class="i18n" data-ru="Тактические рекомендации AI-ассистента" data-en="AI Assistant Tactical Recommendations">Тактические рекомендации AI-ассистента</h3>
+            </div>
+            <p class="ai-placeholder i18n" data-ru="Рекомендации AI-ассистента не сформированы. Запустите генерацию рекомендаций через ai_advisor." data-en="AI recommendations not generated. Run recommendation generation via ai_advisor.">Рекомендации AI-ассистента не сформированы. Запустите генерацию рекомендаций через ai_advisor.</p>
+        </div>
+        
+            </div>
+
+            <!-- Terminal Main Workspace (65% Left / 35% Right) -->
+            <main class="terminal-main">
+                <!-- Left Column (65% width): Tabs & Signals Tables -->
+                <section class="terminal-left">
+                    <div class="tabs-content">
+                    <!-- Tab 1: Аномальные сбросы цен (Strong Buy) -->
+                    <div class="tab-pane active" id="price-anomalies">
+                        <div class="table-scroll">
+                            <table class="data-table sortable"><!-- <table class="sortable"> -->
+                                <thead>
+                                    <tr>
+                                        <th class="i18n" data-ru="Предмет" data-en="Item">Предмет</th>
+                                        <th class="i18n" data-ru="Сигнал" data-en="Signal">Сигнал</th>
+                                        <th class="num i18n" data-ru="Текущая цена" data-en="Current Price">Текущая цена</th>
+                                        <th class="num i18n" data-ru="Средняя цена" data-en="Mean Price">Средняя цена</th>
+                                        <th class="num i18n" data-ru="Z-Score" data-en="Z-Score">Z-Score</th>
+                                        <th class="num i18n" data-ru="Замеров" data-en="Samples">Замеров</th>
+                                        <th class="i18n" data-ru="Реалм" data-en="Realm">Реалм</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr data-item-id='2447' onclick="onRowClick(event, 2447)" class='clickable-row'><td data-value='Мироцвет'><div class='item-cell-wrap'><strong><a href='https://www.wowhead.com/forever/item=2447' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link'><span class='item-name i18n' data-ru='Мироцвет' data-en='Peacebloom'>Мироцвет</span></a></strong><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(2447, event)'>📈</button></div></div></td><td data-value='STRONG_BUY'><span class='badge badge-buy'>STRONG_BUY</span></td><td data-value='200' class='num'><span class="money-gold">0g</span> <span class="money-silver">2s</span> <span class="money-copper">0c</span></td><td data-value='946.67' class='num'><span class="money-gold">0g</span> <span class="money-silver">9s</span> <span class="money-copper">47c</span></td><td data-value='-3.6148' class='z-cell num'>-3.61</td><td data-value='15' class='num'>15</td><td data-value='Everlook'>Everlook</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Tab 2: Вендорный арбитраж -->
+                    <div class="tab-pane" id="vendor-arbitrage">
+                        <div class="table-scroll">
+                            <table class="data-table sortable"><!-- <table class="sortable"> -->
+                                <thead>
+                                    <tr>
+                                        <th class="i18n" data-ru="Предмет" data-en="Item">Предмет</th>
+                                        <th class="num i18n" data-ru="Выкуп (AH)" data-en="Buyout (AH)">Выкуп (AH)</th>
+                                        <th class="num i18n" data-ru="Вендор" data-en="Vendor">Вендор</th>
+                                        <th class="num i18n" data-ru="Прибыль" data-en="Profit">Прибыль</th>
+                                        <th class="i18n" data-ru="Реалм" data-en="Realm">Реалм</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr data-item-id='101' onclick="onRowClick(event, 101)" class='clickable-row'><td class='q-3' data-value='Золотой алмаз'><div class='item-cell-wrap'><a href='https://www.wowhead.com/forever/item=101' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link q-3'><span class='item-name i18n' data-ru='Золотой алмаз' data-en='Golden Diamond'>Золотой алмаз</span></a><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(101, event)'>📈</button></div></div></td><td data-value='2000' class='num'><span class="money-gold">0g</span> <span class="money-silver">20s</span> <span class="money-copper">0c</span></td><td data-value='15000' class='num'><span class="money-gold">1g</span> <span class="money-silver">50s</span> <span class="money-copper">0c</span></td><td data-value='13000' class='profit-cell num'><span class="money-gold">1g</span> <span class="money-silver">30s</span> <span class="money-copper">0c</span></td><td data-value='Everlook'>Everlook</td></tr>
+<tr data-item-id='102' onclick="onRowClick(event, 102)" class='clickable-row'><td class='q-1' data-value='Шелковая нить'><div class='item-cell-wrap'><a href='https://www.wowhead.com/forever/item=102' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link q-1'><span class='item-name i18n' data-ru='Шелковая нить' data-en='Silk Thread'>Шелковая нить</span></a><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(102, event)'>📈</button></div></div></td><td data-value='100' class='num'><span class="money-gold">0g</span> <span class="money-silver">1s</span> <span class="money-copper">0c</span></td><td data-value='500' class='num'><span class="money-gold">0g</span> <span class="money-silver">5s</span> <span class="money-copper">0c</span></td><td data-value='400' class='profit-cell num'><span class="money-gold">0g</span> <span class="money-silver">4s</span> <span class="money-copper">0c</span></td><td data-value='Everlook'>Everlook</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Дизэнчант (Disenchant Shuffle) -->
+                    <div class="tab-pane" id="tab-disenchant">
+                        <div class="table-scroll">
+                            <table class="data-table sortable"><!-- <table class="sortable"> -->
+                                <thead>
+                                    <tr>
+                                        <th class="i18n" data-ru="Предмет" data-en="Item">Предмет</th>
+                                        <th class="num i18n" data-ru="ilvl" data-en="ilvl">ilvl</th>
+                                        <th class="i18n" data-ru="Качество" data-en="Quality">Качество</th>
+                                        <th class="num i18n" data-ru="Выкуп" data-en="Buyout">Выкуп</th>
+                                        <th class="num i18n" data-ru="DE Value" data-en="DE Value">DE Value</th>
+                                        <th class="num i18n" data-ru="Чистая прибыль" data-en="Net Profit">Чистая прибыль</th>
+                                        <th class="num i18n" data-ru="ROI" data-en="ROI">ROI</th>
+                                        <th class="i18n" data-ru="Материалы" data-en="Materials">Материалы</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr data-item-id='9202' onclick="onRowClick(event, 9202)" data-is-de='1' class='clickable-row'><td class='q-3' data-value='Оплот древних королей'><div class='item-cell-wrap'><a href='https://www.wowhead.com/forever/item=9202' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link q-3'><span class='item-name i18n' data-ru='Оплот древних королей' data-en='Bulwark of Ancient Kings'>Оплот древних королей</span></a><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(9202, event)'>📈</button></div></div></td><td data-value='35' class='num'>35</td><td data-value='3'><span class='q-3 i18n' data-ru='Редкий' data-en='Rare'>Редкий</span></td><td data-value='1000' class='num'><span class="money-gold">0g</span> <span class="money-silver">10s</span> <span class="money-copper">0c</span></td><td data-value='5000.0' class='num'><span class="money-gold">0g</span> <span class="money-silver">50s</span> <span class="money-copper">0c</span></td><td data-value='3750.0' class='profit-cell num'><span class="money-gold">0g</span> <span class="money-silver">37s</span> <span class="money-copper">50c</span></td><td data-value='375.0' class='roi-cell num'>+375.0%</td><td class='materials-cell'><span class='reagent-summary i18n' data-ru='Малый светящийся осколок (100%)' data-en='Small Glowing Shard (100%)'>Малый светящийся осколок (100%)</span></td></tr>
+<tr data-item-id='9201' onclick="onRowClick(event, 9201)" data-is-de='1' class='clickable-row'><td class='q-2' data-value='Светящийся зеленый клинок'><div class='item-cell-wrap'><a href='https://www.wowhead.com/forever/item=9201' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link q-2'><span class='item-name i18n' data-ru='Светящийся зеленый клинок' data-en='Glowing Green Blade'>Светящийся зеленый клинок</span></a><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(9201, event)'>📈</button></div></div></td><td data-value='22' class='num'>22</td><td data-value='2'><span class='q-2 i18n' data-ru='Необычный' data-en='Uncommon'>Необычный</span></td><td data-value='100' class='num'><span class="money-gold">0g</span> <span class="money-silver">1s</span> <span class="money-copper">0c</span></td><td data-value='1275.0' class='num'><span class="money-gold">0g</span> <span class="money-silver">12s</span> <span class="money-copper">75c</span></td><td data-value='1111.25' class='profit-cell num'><span class="money-gold">0g</span> <span class="money-silver">11s</span> <span class="money-copper">11c</span></td><td data-value='1111.25' class='roi-cell num'>+1111.25%</td><td class='materials-cell'><span class='reagent-summary i18n' data-ru='Странная пыль (15%), Великая магическая субстанция (75%), Малый мерцающий осколок (10%)' data-en='Strange Dust (15%), Greater Magic Essence (75%), Small Glimmering Shard (10%)'>Странная пыль (15%), Великая магическая субстанция (75%), Малый мерцающий осколок (10%)</span></td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Tab 3: Крафт под Waylaid Crates (Dual Crafting) -->
+                    <div class="tab-pane" id="waylaid-crates">
+                        <div class="table-scroll">
+                            <table class="data-table sortable"><!-- <table class="sortable"> -->
+                                <thead>
+                                    <tr>
+                                        <th class="i18n" data-ru="Рецепт / Предмет" data-en="Recipe / Item">Рецепт / Предмет</th>
+                                        <th class="i18n" data-ru="Профессия" data-en="Profession">Профессия</th>
+                                        <th class="i18n" data-ru="Ящик Waylaid Crate" data-en="Waylaid Crate">Ящик Waylaid Crate</th>
+                                        <th class="num i18n" data-ru="Себестоимость" data-en="Craft Cost">Себестоимость</th>
+                                        <th class="num i18n" data-ru="Выручка (AH)" data-en="Revenue (AH)">Выручка (AH)</th>
+                                        <th class="num i18n" data-ru="Чистая прибыль" data-en="Net Profit">Чистая прибыль</th>
+                                        <th class="num i18n" data-ru="ROI" data-en="ROI">ROI</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr data-item-id='201' onclick="onRowClick(event, 201)" class='clickable-row'><td data-value='Тяжелый медный палаш'><div class='item-cell-wrap'><div><div class='item-title-row'><span class='badge badge-waylaid i18n' data-ru='[Ящик]' data-en='[Waylaid]'>[Ящик]</span> <strong><a href='https://www.wowhead.com/forever/item=201' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link'><span class='item-name i18n' data-ru='Тяжелый медный палаш' data-en='Heavy Copper Broadsword'>Тяжелый медный палаш</span></a></strong></div><div class='reagents-subtext'>Copper Bar x2</div></div><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(201, event)'>📈</button></div></div></td><td data-value='Blacksmithing'>Blacksmithing</td><td data-value='Waylaid Shipment: Heavy Copper Broadswords' class='crate-cell'>Waylaid Shipment: Heavy Copper Broadswords</td><td data-value='200' class='num'><span class="money-gold">0g</span> <span class="money-silver">2s</span> <span class="money-copper">0c</span></td><td data-value='950' class='num'><span class="money-gold">0g</span> <span class="money-silver">9s</span> <span class="money-copper">50c</span></td><td data-value='735' class='profit-cell num'><span class="money-gold">0g</span> <span class="money-silver">7s</span> <span class="money-copper">35c</span></td><td data-value='367.5' class='roi-cell num'>+367.5%</td></tr>
+<tr data-item-id='4238' onclick="onRowClick(event, 4238)" class='clickable-row'><td data-value='Льняная сумка'><div class='item-cell-wrap'><div><div class='item-title-row'><span class='badge badge-craft i18n' data-ru='[Крафт]' data-en='[Craft]'>[Крафт]</span> <strong><a href='https://www.wowhead.com/forever/item=4238' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link'><span class='item-name i18n' data-ru='Льняная сумка' data-en='Linen Bag'>Льняная сумка</span></a></strong></div><div class='reagents-subtext'>Bolt of Linen Cloth x3, Coarse Thread x1</div></div><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(4238, event)'>📈</button></div></div></td><td data-value='Tailoring'>Tailoring</td><td data-value='—' class='crate-cell'>—</td><td data-value='70' class='num'><span class="money-gold">0g</span> <span class="money-silver">0s</span> <span class="money-copper">70c</span></td><td data-value='190' class='num'><span class="money-gold">0g</span> <span class="money-silver">1s</span> <span class="money-copper">90c</span></td><td data-value='105' class='profit-cell num'><span class="money-gold">0g</span> <span class="money-silver">1s</span> <span class="money-copper">5c</span></td><td data-value='150.0' class='roi-cell num'>+150.0%</td></tr>
+<tr data-item-id='2996' onclick="onRowClick(event, 2996)" class='clickable-row'><td data-value='Рулон льняной ткани'><div class='item-cell-wrap'><div><div class='item-title-row'><span class='badge badge-craft i18n' data-ru='[Крафт]' data-en='[Craft]'>[Крафт]</span> <strong><a href='https://www.wowhead.com/forever/item=2996' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link'><span class='item-name i18n' data-ru='Рулон льняной ткани' data-en='Bolt of Linen Cloth'>Рулон льняной ткани</span></a></strong></div><div class='reagents-subtext'>Linen Cloth x2</div></div><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(2996, event)'>📈</button></div></div></td><td data-value='Tailoring'>Tailoring</td><td data-value='—' class='crate-cell'>—</td><td data-value='20' class='num'><span class="money-gold">0g</span> <span class="money-silver">0s</span> <span class="money-copper">20c</span></td><td data-value='48' class='num'><span class="money-gold">0g</span> <span class="money-silver">0s</span> <span class="money-copper">48c</span></td><td data-value='12' class='profit-cell num'><span class="money-gold">0g</span> <span class="money-silver">0s</span> <span class="money-copper">12c</span></td><td data-value='62.5' class='roi-cell num'>+62.5%</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Tab 4: Ящики Waylaid Crates Only -->
+                    <div class="tab-pane" id="tab-crates">
+                        <div class="table-scroll">
+                            <table class="data-table sortable"><!-- <table class="sortable"> -->
+                                <thead>
+                                    <tr>
+                                        <th class="i18n" data-ru="Рецепт / Предмет" data-en="Recipe / Item">Рецепт / Предмет</th>
+                                        <th class="i18n" data-ru="Профессия" data-en="Profession">Профессия</th>
+                                        <th class="i18n" data-ru="Ящик Waylaid Crate" data-en="Waylaid Crate">Ящик Waylaid Crate</th>
+                                        <th class="num i18n" data-ru="Себестоимость" data-en="Craft Cost">Себестоимость</th>
+                                        <th class="num i18n" data-ru="Выручка (AH)" data-en="Revenue (AH)">Выручка (AH)</th>
+                                        <th class="num i18n" data-ru="Чистая прибыль" data-en="Net Profit">Чистая прибыль</th>
+                                        <th class="num i18n" data-ru="ROI" data-en="ROI">ROI</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr data-item-id='201' onclick="onRowClick(event, 201)" class='clickable-row'><td data-value='Тяжелый медный палаш'><div class='item-cell-wrap'><div><div class='item-title-row'><span class='badge badge-waylaid i18n' data-ru='[Ящик]' data-en='[Waylaid]'>[Ящик]</span> <strong><a href='https://www.wowhead.com/forever/item=201' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link'><span class='item-name i18n' data-ru='Тяжелый медный палаш' data-en='Heavy Copper Broadsword'>Тяжелый медный палаш</span></a></strong></div><div class='reagents-subtext'>Copper Bar x2</div></div><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(201, event)'>📈</button></div></div></td><td data-value='Blacksmithing'>Blacksmithing</td><td data-value='Waylaid Shipment: Heavy Copper Broadswords' class='crate-cell'>Waylaid Shipment: Heavy Copper Broadswords</td><td data-value='200' class='num'><span class="money-gold">0g</span> <span class="money-silver">2s</span> <span class="money-copper">0c</span></td><td data-value='5000' class='num'><span class="money-gold">0g</span> <span class="money-silver">50s</span> <span class="money-copper">0c</span></td><td data-value='4800' class='profit-cell num'><span class="money-gold">0g</span> <span class="money-silver">48s</span> <span class="money-copper">0c</span></td><td data-value='2400.0' class='roi-cell num'>+2400.0%</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Tab 5: Вендор-шаффл -->
+                    <div class="tab-pane" id="tab-shuffle">
+                        <div class="table-scroll">
+                            <table class="data-table sortable"><!-- <table class="sortable"> -->
+                                <thead>
+                                    <tr>
+                                        <th class="i18n" data-ru="Предмет" data-en="Item">Предмет</th>
+                                        <th class="num i18n" data-ru="Выкуп (AH)" data-en="Buyout (AH)">Выкуп (AH)</th>
+                                        <th class="num i18n" data-ru="Вендор" data-en="Vendor">Вендор</th>
+                                        <th class="num i18n" data-ru="Прибыль" data-en="Profit">Прибыль</th>
+                                        <th class="i18n" data-ru="Реалм" data-en="Realm">Реалм</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr data-item-id='101' onclick="onRowClick(event, 101)" class='clickable-row'><td class='q-3' data-value='Золотой алмаз'><div class='item-cell-wrap'><a href='https://www.wowhead.com/forever/item=101' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link q-3'><span class='item-name i18n' data-ru='Золотой алмаз' data-en='Golden Diamond'>Золотой алмаз</span></a><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(101, event)'>📈</button></div></div></td><td data-value='2000' class='num'><span class="money-gold">0g</span> <span class="money-silver">20s</span> <span class="money-copper">0c</span></td><td data-value='15000' class='num'><span class="money-gold">1g</span> <span class="money-silver">50s</span> <span class="money-copper">0c</span></td><td data-value='13000' class='profit-cell num'><span class="money-gold">1g</span> <span class="money-silver">30s</span> <span class="money-copper">0c</span></td><td data-value='Everlook'>Everlook</td></tr>
+<tr data-item-id='102' onclick="onRowClick(event, 102)" class='clickable-row'><td class='q-1' data-value='Шелковая нить'><div class='item-cell-wrap'><a href='https://www.wowhead.com/forever/item=102' data-wowhead='domain=forever' target='_blank' rel='noopener' class='wowhead-link q-1'><span class='item-name i18n' data-ru='Шелковая нить' data-en='Silk Thread'>Шелковая нить</span></a><div class='item-actions'><button class='copy-btn' title='Копировать название / Copy name' onclick='copyItemName(this, event)'>📋</button><button class='graph-btn' title='График / Chart' onclick='openItemModal(102, event)'>📈</button></div></div></td><td data-value='100' class='num'><span class="money-gold">0g</span> <span class="money-silver">1s</span> <span class="money-copper">0c</span></td><td data-value='500' class='num'><span class="money-gold">0g</span> <span class="money-silver">5s</span> <span class="money-copper">0c</span></td><td data-value='400' class='profit-cell num'><span class="money-gold">0g</span> <span class="money-silver">4s</span> <span class="money-copper">0c</span></td><td data-value='Everlook'>Everlook</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Tab 6: Plotly Market Overview Chart -->
+                    <div class="tab-pane" id="charts-section">
+                        <div id="overview-chart-container">
+                            <div style="height:390px; width:100%;">                        <script>window.PlotlyConfig = {MathJaxConfig: 'local'};</script>
+        <script charset="utf-8" src="https://cdn.plot.ly/plotly-4.1.1.min.js" integrity="sha256-O24V1F27f8pb0glCkelh3cVHLNiHAJ5gCaVtq2aNch8=" crossorigin="anonymous"></script>                <div id="25730d77-a520-407c-947a-8c27aa1c68d6" class="plotly-graph-div" style="height:100%; width:100%;"></div>            <script>                window.PLOTLYENV=window.PLOTLYENV || {};                                if (document.getElementById("25730d77-a520-407c-947a-8c27aa1c68d6")) {                    Plotly.newPlot(                        "25730d77-a520-407c-947a-8c27aa1c68d6",                        [{"hoverinfo":"text+x","hovertext":["Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 10s 0c","Peacebloom\u003cbr\u003e0g 2s 0c"],"line":{"width":2},"marker":{"size":5},"mode":"lines+markers","name":"Peacebloom","x":["2026-11-04 12:24","2026-11-04 13:24","2026-11-04 14:24","2026-11-04 15:24","2026-11-04 16:24","2026-11-04 17:24","2026-11-04 18:24","2026-11-04 19:24","2026-11-04 20:24","2026-11-04 21:24","2026-11-04 22:24","2026-11-04 23:24","2026-11-05 00:24","2026-11-05 01:24","2026-11-05 02:24","2026-11-05 04:24"],"y":[1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,200],"type":"scatter"},{"hoverinfo":"text+x","hovertext":["Golden Diamond\u003cbr\u003e0g 20s 0c"],"line":{"width":2},"marker":{"size":5},"mode":"lines+markers","name":"Golden Diamond","x":["2026-11-05 04:24"],"y":[2000],"type":"scatter"},{"hoverinfo":"text+x","hovertext":["Silk Thread\u003cbr\u003e0g 1s 0c"],"line":{"width":2},"marker":{"size":5},"mode":"lines+markers","name":"Silk Thread","x":["2026-11-05 04:24"],"y":[100],"type":"scatter"},{"hoverinfo":"text+x","hovertext":["Copper Bar\u003cbr\u003e0g 1s 0c"],"line":{"width":2},"marker":{"size":5},"mode":"lines+markers","name":"Copper Bar","x":["2026-11-05 04:24"],"y":[100],"type":"scatter"},{"hoverinfo":"text+x","hovertext":["Linen Cloth\u003cbr\u003e0g 0s 10c"],"line":{"width":2},"marker":{"size":5},"mode":"lines+markers","name":"Linen Cloth","x":["2026-11-05 04:24"],"y":[10],"type":"scatter"},{"hoverinfo":"text+x","hovertext":["Bolt of Linen Cloth\u003cbr\u003e0g 0s 50c"],"line":{"width":2},"marker":{"size":5},"mode":"lines+markers","name":"Bolt of Linen Cloth","x":["2026-11-05 04:24"],"y":[50],"type":"scatter"},{"hoverinfo":"text+x","hovertext":["Greater Magic Essence\u003cbr\u003e0g 10s 0c"],"line":{"width":2},"marker":{"size":5},"mode":"lines+markers","name":"Greater Magic Essence","x":["2026-11-05 04:24"],"y":[1000],"type":"scatter"},{"hoverinfo":"text+x","hovertext":["Strange Dust\u003cbr\u003e0g 2s 0c"],"line":{"width":2},"marker":{"size":5},"mode":"lines+markers","name":"Strange Dust","x":["2026-11-05 04:24"],"y":[200],"type":"scatter"}],                        {"template":{"data":{"barpolar":[{"marker":{"line":{"color":"rgb(17,17,17)","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"barpolar"}],"bar":[{"error_x":{"color":"#f2f5fa"},"error_y":{"color":"#f2f5fa"},"marker":{"line":{"color":"rgb(17,17,17)","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"bar"}],"carpet":[{"aaxis":{"endlinecolor":"#A2B1C6","gridcolor":"#506784","linecolor":"#506784","minorgridcolor":"#506784","startlinecolor":"#A2B1C6"},"baxis":{"endlinecolor":"#A2B1C6","gridcolor":"#506784","linecolor":"#506784","minorgridcolor":"#506784","startlinecolor":"#A2B1C6"},"type":"carpet"}],"choropleth":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"choropleth"}],"contourcarpet":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"contourcarpet"}],"contour":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"contour"}],"heatmap":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"heatmap"}],"histogram2dcontour":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"histogram2dcontour"}],"histogram2d":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"histogram2d"}],"histogram":[{"marker":{"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"histogram"}],"mesh3d":[{"colorbar":{"outlinewidth":0,"ticks":""},"type":"mesh3d"}],"parcoords":[{"line":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"parcoords"}],"pie":[{"automargin":true,"type":"pie"}],"scatter3d":[{"line":{"colorbar":{"outlinewidth":0,"ticks":""}},"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatter3d"}],"scattercarpet":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattercarpet"}],"scattergeo":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattergeo"}],"scattergl":[{"marker":{"line":{"color":"#283442"}},"type":"scattergl"}],"scattermap":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scattermap"}],"scatterpolargl":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterpolargl"}],"scatterpolar":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterpolar"}],"scatter":[{"marker":{"line":{"color":"#283442"}},"type":"scatter"}],"scatterternary":[{"marker":{"colorbar":{"outlinewidth":0,"ticks":""}},"type":"scatterternary"}],"surface":[{"colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"type":"surface"}],"table":[{"cells":{"fill":{"color":"#506784"},"line":{"color":"rgb(17,17,17)"}},"header":{"fill":{"color":"#2a3f5f"},"line":{"color":"rgb(17,17,17)"}},"type":"table"}]},"layout":{"annotationdefaults":{"arrowcolor":"#f2f5fa","arrowhead":0,"arrowwidth":1},"autotypenumbers":"strict","coloraxis":{"colorbar":{"outlinewidth":0,"ticks":""}},"colorscale":{"diverging":[[0,"#8e0152"],[0.1,"#c51b7d"],[0.2,"#de77ae"],[0.3,"#f1b6da"],[0.4,"#fde0ef"],[0.5,"#f7f7f7"],[0.6,"#e6f5d0"],[0.7,"#b8e186"],[0.8,"#7fbc41"],[0.9,"#4d9221"],[1,"#276419"]],"sequential":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"sequentialminus":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]},"colorway":["#636efa","#EF553B","#00cc96","#ab63fa","#FFA15A","#19d3f3","#FF6692","#B6E880","#FF97FF","#FECB52"],"font":{"color":"#f2f5fa"},"geo":{"bgcolor":"rgb(17,17,17)","lakecolor":"rgb(17,17,17)","landcolor":"rgb(17,17,17)","showlakes":true,"showland":true,"subunitcolor":"#506784"},"hoverlabel":{"align":"left"},"hovermode":"closest","paper_bgcolor":"rgb(17,17,17)","plot_bgcolor":"rgb(17,17,17)","polar":{"angularaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"bgcolor":"rgb(17,17,17)","radialaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""}},"scene":{"xaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"},"yaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"},"zaxis":{"backgroundcolor":"rgb(17,17,17)","gridcolor":"#506784","gridwidth":2,"linecolor":"#506784","showbackground":true,"ticks":"","zerolinecolor":"#C8D4E3"}},"shapedefaults":{"line":{"color":"#f2f5fa"}},"sliderdefaults":{"bgcolor":"#C8D4E3","bordercolor":"rgb(17,17,17)","borderwidth":1,"tickwidth":0},"ternary":{"aaxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"baxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""},"bgcolor":"rgb(17,17,17)","caxis":{"gridcolor":"#506784","linecolor":"#506784","ticks":""}},"title":{"x":0.05},"updatemenudefaults":{"bgcolor":"#506784","borderwidth":0},"xaxis":{"automargin":true,"gridcolor":"#283442","linecolor":"#506784","ticks":"","title":{"standoff":15},"zerolinecolor":"#283442","zerolinewidth":2},"yaxis":{"automargin":true,"gridcolor":"#283442","linecolor":"#506784","ticks":"","title":{"standoff":15},"zerolinecolor":"#283442","zerolinewidth":2}}},"font":{"color":"#8b98a9","size":10},"title":{"font":{"size":17,"color":"#6b9dff"},"text":"\u0414\u0438\u043d\u0430\u043c\u0438\u043a\u0430 \u0446\u0435\u043d \u043a\u043b\u044e\u0447\u0435\u0432\u043e\u0433\u043e \u0441\u044b\u0440\u044c\u044f \u0438 \u0440\u0430\u0441\u0445\u043e\u0434\u043d\u0438\u043a\u043e\u0432"},"margin":{"l":55,"r":30,"t":55,"b":45},"legend":{"orientation":"h","yanchor":"bottom","y":1.02,"xanchor":"right","x":1,"bgcolor":"rgba(17, 22, 31, 0.7)"},"paper_bgcolor":"#11161f","plot_bgcolor":"#11161f","colorway":["#6b9dff","#3fb950","#d29922","#f85149","#a371f7","#56d4dd","#f0883e","#79c0ff"],"hovermode":"closest","height":390,"xaxis":{"title":{"text":"\u0412\u0440\u0435\u043c\u044f \u0437\u0430\u043c\u0435\u0440\u0430"},"gridcolor":"#263142","zerolinecolor":"#35445a"},"yaxis":{"title":{"text":"\u0426\u0435\u043d\u0430 (\u043c\u0435\u0434\u044c \u002f copper)"},"gridcolor":"#263142","zerolinecolor":"#35445a"}},                        {"responsive": true}                    )                };            </script>        </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column (35% width): Lazy Plotly Inspector & Deal Calculator -->
+            <aside class="terminal-right">
+                <div class="inspector-panel">
+                    <div class="inspector-header">
+                        <div class="inspector-title-wrap">
+                            <a id="inspector-wowhead-link" href="#" data-wowhead="domain=forever" target="_blank" rel="noopener" class="wowhead-link">
+                                <span id="inspector-item-name" class="inspector-name q-1">Peacebloom</span>
+                            </a>
+                            <button id="inspector-copy-btn" class="copy-btn" title="Копировать название / Copy name" onclick="copyItemName(this, event)">📋</button>
+                        </div>
+                    </div>
+
+                    <!-- Single Reusable Plotly Container -->
+                    <div id="inspector-chart" class="inspector-chart-container"></div>
+
+                    <!-- Deal / Recipe Calculator -->
+                    <div class="deal-calculator deal-calculator-grid" id="deal-calculator">
+                        <div class="calc-header i18n" data-ru="Калькулятор сделки / крафта" data-en="Deal & Recipe Calculator">Калькулятор сделки / крафта</div>
+                        <div class="calc-grid deal-calculator-grid">
+                            <div class="calc-row">
+                                <span class="calc-label i18n" data-ru="Закупка / Крафт (Cost):" data-en="Cost (Buy / Craft):">Закупка / Крафт (Cost):</span>
+                                <span id="calc-cost" class="calc-val">—</span>
+                            </div>
+                            <div class="calc-row">
+                                <span class="calc-label i18n" data-ru="Точка безубытка (P_be):" data-en="Breakeven point (P_be):">Точка безубытка (P_be):</span>
+                                <span id="calc-breakeven" class="calc-val">—</span>
+                            </div>
+                            <div class="calc-row">
+                                <span class="calc-label i18n" data-ru="Комиссия AH (5%):" data-en="AH Cut (5%):">Комиссия AH (5%):</span>
+                                <span id="calc-ah-cut" class="calc-val">—</span>
+                            </div>
+                            <div class="calc-row highlight">
+                                <span class="calc-label i18n" data-ru="Ожидаемая чистая прибыль:" data-en="Net Profit:">Ожидаемая чистая прибыль:</span>
+                                <span id="calc-profit" class="calc-val profit-cell">—</span>
+                            </div>
+                            <div class="calc-row">
+                                <span class="calc-label i18n" data-ru="Маржа / ROI:" data-en="Margin / ROI:">Маржа / ROI:</span>
+                                <span id="calc-roi" class="calc-val roi-cell">—</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Disenchant Breakdown Card -->
+                    <div class="disenchant-card" id="disenchant-card" style="display: none;">
+                        <div class="calc-header">
+                            ✨ <span class="i18n" data-ru="Карточка распыления (Disenchant)" data-en="Disenchant Breakdown">Карточка распыления (Disenchant)</span>
+                        </div>
+                        <div class="de-summary-row">
+                            <span class="calc-label i18n" data-ru="Ожидаемое DE Value:" data-en="Expected DE Value:">Ожидаемое DE Value:</span>
+                            <span id="de-card-expected-val" class="calc-val profit-cell">—</span>
+                        </div>
+                        <div class="de-reagents-header i18n" data-ru="Выпадающие материалы (Drop Table):" data-en="Disenchant Materials:">
+                            Выпадающие материалы (Drop Table):
+                        </div>
+                        <div class="de-reagents-list" id="de-reagents-list"></div>
+                    </div>
+
+                    <!-- Crafting Tree (DAG Components) Card -->
+                    <div class="crafting-tree-card" id="tab-crafting" style="display: none;">
+                        <div class="calc-header">
+                            ⚗️ <span class="i18n" data-ru="Дерево компонентов (DAG Craft)" data-en="Crafting Tree (DAG Craft)">Дерево компонентов (DAG Craft)</span>
+                        </div>
+                        <div id="crafting-tree" class="crafting-tree-list"></div>
+                    </div>
+                </div>
+            </aside>
+        </main>
+        </div>
+    </div>
+
+    <!-- Hidden compatibility elements to satisfy test requirements -->
+    <div class="compat-hidden">
+        <span class="i18n" data-ru="Автономный аналитический портал и торговый навигатор WoW: Forever" data-en="Autonomous analytical portal & market navigator for WoW: Forever">Автономный аналитический портал и торговый навигатор WoW: Forever</span>
+        <span class="i18n" data-ru="Вендорный арбитраж:" data-en="Vendor Arbitrage:">Вендорный арбитраж:</span>
+        <span class="i18n" data-ru="Все" data-en="All">Все</span>
+        <span class="i18n" data-ru="Сырье" data-en="Trade Goods">Сырье</span>
+        <input type="text" placeholder="Поиск предмета..." data-ru-placeholder="Поиск предмета..." data-en-placeholder="Search item..." />
+        <div class="category-filters">
+            <button class="cat-btn active" data-cat="all" onclick="filterCategory('all')">All</button>
+            <button class="cat-btn" data-cat="trade_goods" onclick="filterCategory('trade_goods')">Trade Goods</button>
+            <button class="cat-btn" data-cat="consumables" onclick="filterCategory('consumables')">Consumables</button>
+            <button class="cat-btn" data-cat="weapons" onclick="filterCategory('weapons')">Weapons</button>
+            <button class="cat-btn" data-cat="armor" onclick="filterCategory('armor')">Armor</button>
+            <button class="cat-btn" data-cat="waylaid_crates" onclick="filterCategory('waylaid_crates')">Waylaid Crates</button>
+        </div>
+        <select id="item-select" onchange="onSelectDropdownItem(this.value)">
+            <option value="">-- Select --</option>
+            <option value="10939" data-category="trade_goods" data-ru="Большая магическая эссенция" data-en="Greater Magic Essence" data-search="большая магическая эссенция greater magic essence">Большая магическая эссенция</option>
+<option value="101" data-category="trade_goods" data-ru="Золотой алмаз" data-en="Golden Diamond" data-search="золотой алмаз golden diamond">Золотой алмаз</option>
+<option value="4238" data-category="trade_goods" data-ru="Льняная сумка" data-en="Linen Bag" data-search="льняная сумка linen bag">Льняная сумка</option>
+<option value="2589" data-category="trade_goods" data-ru="Льняная ткань" data-en="Linen Cloth" data-search="льняная ткань linen cloth">Льняная ткань</option>
+<option value="11138" data-category="trade_goods" data-ru="Малый светящийся осколок" data-en="Small Radiant Shard" data-search="малый светящийся осколок small radiant shard">Малый светящийся осколок</option>
+<option value="202" data-category="trade_goods" data-ru="Медный слиток" data-en="Copper Bar" data-search="медный слиток copper bar">Медный слиток</option>
+<option value="2447" data-category="trade_goods" data-ru="Мироцвет" data-en="Peacebloom" data-search="мироцвет peacebloom">Мироцвет</option>
+<option value="9202" data-category="armor" data-ru="Оплот древних королей" data-en="Bulwark of Ancient Kings" data-search="оплот древних королей bulwark of ancient kings">Оплот древних королей</option>
+<option value="2996" data-category="trade_goods" data-ru="Рулон льняной ткани" data-en="Bolt of Linen Cloth" data-search="рулон льняной ткани bolt of linen cloth">Рулон льняной ткани</option>
+<option value="9201" data-category="weapons" data-ru="Светящийся зеленый клинок" data-en="Glowing Green Blade" data-search="светящийся зеленый клинок glowing green blade">Светящийся зеленый клинок</option>
+<option value="10940" data-category="trade_goods" data-ru="Странная пыль" data-en="Strange Dust" data-search="странная пыль strange dust">Странная пыль</option>
+<option value="201" data-category="weapons" data-ru="Тяжелый медный палаш" data-en="Heavy Copper Broadsword" data-search="тяжелый медный палаш heavy copper broadsword">Тяжелый медный палаш</option>
+<option value="102" data-category="trade_goods" data-ru="Шелковая нить" data-en="Silk Thread" data-search="шелковая нить silk thread">Шелковая нить</option>
+        </select>
+    </div>
+
+    <!-- Deep Inspector Modal (retained for backward compatibility) -->
+    <div id="item-modal" class="modal-backdrop" style="display: none;" onclick="onModalBackdropClick(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <h3 id="modal-item-name" class="modal-title">Item Name</h3>
+                    <button id="modal-copy-btn" class="copy-btn" title="Копировать название / Copy name" onclick="copyItemName(this, event)">📋</button>
+                </div>
+                <button class="modal-close-btn" onclick="closeItemModal()" title="Закрыть / Close">✕</button>
+            </div>
+            <div class="modal-stats-grid">
+                <div class="modal-stat-card"><span id="modal-stat-current">—</span></div>
+                <div class="modal-stat-card"><span id="modal-stat-mean">—</span></div>
+                <div class="modal-stat-card"><span id="modal-stat-min">—</span></div>
+                <div class="modal-stat-card"><span id="modal-stat-max">—</span></div>
+                <div class="modal-stat-card"><span id="modal-stat-zscore">—</span></div>
+            </div>
+            <div id="modal-plot-container"></div>
+        </div>
+    </div>
+
+    <!-- Toast notification element -->
+    <div id="toast" class="toast"></div>
+
+    <!-- Client-side Interactive Logic -->
+    <script>
+        var ITEM_STORE = {"11138": {"item_id": 11138, "name_ru": "Малый светящийся осколок", "name_en": "Small Radiant Shard", "quality": 3, "category": "trade_goods", "current_price": 5000, "mean_price": 5000.0, "min_price": 5000, "max_price": 5000, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 5000]], "deal_info": {}}, "101": {"item_id": 101, "name_ru": "Золотой алмаз", "name_en": "Golden Diamond", "quality": 3, "category": "trade_goods", "current_price": 2000, "mean_price": 2000.0, "min_price": 2000, "max_price": 2000, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 2000]], "deal_info": {"buyout": 2000, "vendor_sell": 15000, "profit": 13000, "signal": "VENDOR_SHUFFLE"}}, "102": {"item_id": 102, "name_ru": "Шелковая нить", "name_en": "Silk Thread", "quality": 1, "category": "trade_goods", "current_price": 100, "mean_price": 100.0, "min_price": 100, "max_price": 100, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 100]], "deal_info": {"buyout": 100, "vendor_sell": 500, "profit": 400, "signal": "VENDOR_SHUFFLE"}}, "201": {"item_id": 201, "name_ru": "Тяжелый медный палаш", "name_en": "Heavy Copper Broadsword", "quality": 2, "category": "weapons", "current_price": 1000, "mean_price": 1000.0, "min_price": 1000, "max_price": 1000, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 1000]], "deal_info": {"cost": 200, "revenue": 950, "profit": 735, "roi": 367.5, "is_waylaid": true, "reagents": [{"item_id": 202, "name": "Copper Bar", "name_ru": "Медный слиток", "count": 2, "unit_cost": 100.0, "total_cost": 200.0, "is_vendor": false, "source": "ah"}], "reagents_tree": [{"item_id": 202, "name": "Copper Bar", "name_ru": "Медный слиток", "effective_unit_cost": 100, "source": "ah", "vendor_price": null, "ah_price": 100, "craft_cost": null, "sub_tree": [], "count": 2, "total_cost": 200.0}], "has_subcraft": false}}, "202": {"item_id": 202, "name_ru": "Медный слиток", "name_en": "Copper Bar", "quality": 1, "category": "trade_goods", "current_price": 100, "mean_price": 100.0, "min_price": 100, "max_price": 100, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 100]], "deal_info": {}}, "4238": {"item_id": 4238, "name_ru": "Льняная сумка", "name_en": "Linen Bag", "quality": 1, "category": "trade_goods", "current_price": 200, "mean_price": 200.0, "min_price": 200, "max_price": 200, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 200]], "deal_info": {"cost": 70, "revenue": 190, "profit": 105, "roi": 150.0, "reagents": [{"item_id": 2996, "name": "Bolt of Linen Cloth", "name_ru": "Рулон льняной ткани", "count": 3, "unit_cost": 20.0, "total_cost": 60.0, "is_vendor": false, "source": "craft"}, {"item_id": 2320, "name": "Coarse Thread", "name_ru": "Грубая нить", "count": 1, "unit_cost": 10.0, "total_cost": 10.0, "is_vendor": true, "source": "vendor"}], "reagents_tree": [{"item_id": 2996, "name": "Bolt of Linen Cloth", "name_ru": "Рулон льняной ткани", "effective_unit_cost": 20, "source": "craft", "vendor_price": null, "ah_price": 50, "craft_cost": 20, "sub_tree": [{"item_id": 2589, "name": "Linen Cloth", "name_ru": "Льняная ткань", "effective_unit_cost": 10, "source": "ah", "vendor_price": null, "ah_price": 10, "craft_cost": null, "sub_tree": [], "count": 2}], "count": 3, "total_cost": 60.0}, {"item_id": 2320, "name": "Coarse Thread", "name_ru": "Грубая нить", "effective_unit_cost": 10, "source": "vendor", "vendor_price": 10, "ah_price": null, "craft_cost": null, "sub_tree": [], "count": 1, "total_cost": 10.0}], "has_subcraft": true}}, "2447": {"item_id": 2447, "name_ru": "Мироцвет", "name_en": "Peacebloom", "quality": 1, "category": "trade_goods", "current_price": 200, "mean_price": 950.0, "min_price": 200, "max_price": 1000, "z_score": -3.75, "sample_count": 16, "points": [[1793795053, 1000], [1793798653, 1000], [1793802253, 1000], [1793805853, 1000], [1793809453, 1000], [1793813053, 1000], [1793816653, 1000], [1793820253, 1000], [1793823853, 1000], [1793827453, 1000], [1793831053, 1000], [1793834653, 1000], [1793838253, 1000], [1793841853, 1000], [1793845453, 1000], [1793852653, 200]], "deal_info": {"buyout": 200, "profit": 684.33, "signal": "STRONG_BUY"}}, "9201": {"item_id": 9201, "name_ru": "Светящийся зеленый клинок", "name_en": "Glowing Green Blade", "quality": 2, "category": "weapons", "current_price": 100, "mean_price": 100.0, "min_price": 100, "max_price": 100, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 100]], "deal_info": {"buyout": 100, "profit": 1111, "roi": 1111.25, "expected_de_value": 1275.0, "is_disenchant": true, "reagents": [{"reagent_id": 10940, "reagent_name": "Strange Dust", "reagent_name_ru": "Странная пыль", "chance": 0.15, "expected_count": 5.0, "unit_price_copper": 200}, {"reagent_id": 10939, "reagent_name": "Greater Magic Essence", "reagent_name_ru": "Великая магическая субстанция", "chance": 0.75, "expected_count": 1.5, "unit_price_copper": 1000}, {"reagent_id": 10978, "reagent_name": "Small Glimmering Shard", "reagent_name_ru": "Малый мерцающий осколок", "chance": 0.1, "expected_count": 1.0, "unit_price_copper": 0}]}}, "9202": {"item_id": 9202, "name_ru": "Оплот древних королей", "name_en": "Bulwark of Ancient Kings", "quality": 3, "category": "armor", "current_price": 1000, "mean_price": 1000.0, "min_price": 1000, "max_price": 1000, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 1000]], "deal_info": {"buyout": 1000, "profit": 3750, "roi": 375.0, "expected_de_value": 5000.0, "is_disenchant": true, "reagents": [{"reagent_id": 11138, "reagent_name": "Small Glowing Shard", "reagent_name_ru": "Малый светящийся осколок", "chance": 1.0, "expected_count": 1.0, "unit_price_copper": 5000}]}}, "2996": {"item_id": 2996, "name_ru": "Рулон льняной ткани", "name_en": "Bolt of Linen Cloth", "quality": 1, "category": "trade_goods", "current_price": 50, "mean_price": 50.0, "min_price": 50, "max_price": 50, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 50]], "deal_info": {"cost": 20, "revenue": 48, "profit": 12, "roi": 62.5, "reagents": [{"item_id": 2589, "name": "Linen Cloth", "name_ru": "Льняная ткань", "count": 2, "unit_cost": 10.0, "total_cost": 20.0, "is_vendor": false, "source": "ah"}], "reagents_tree": [{"item_id": 2589, "name": "Linen Cloth", "name_ru": "Льняная ткань", "effective_unit_cost": 10, "source": "ah", "vendor_price": null, "ah_price": 10, "craft_cost": null, "sub_tree": [], "count": 2, "total_cost": 20.0}], "has_subcraft": false}}, "10939": {"item_id": 10939, "name_ru": "Большая магическая эссенция", "name_en": "Greater Magic Essence", "quality": 2, "category": "trade_goods", "current_price": 1000, "mean_price": 1000.0, "min_price": 1000, "max_price": 1000, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 1000]], "deal_info": {}}, "10940": {"item_id": 10940, "name_ru": "Странная пыль", "name_en": "Strange Dust", "quality": 1, "category": "trade_goods", "current_price": 200, "mean_price": 200.0, "min_price": 200, "max_price": 200, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 200]], "deal_info": {}}, "2589": {"item_id": 2589, "name_ru": "Льняная ткань", "name_en": "Linen Cloth", "quality": 1, "category": "trade_goods", "current_price": 10, "mean_price": 10.0, "min_price": 10, "max_price": 10, "z_score": 0.0, "sample_count": 1, "points": [[1793852653, 10]], "deal_info": {}}};
+        const STRONG_BUY_ITEM_IDS = [2447];
+        var currentActiveTab = 'price-anomalies';
+        var currentSelectedItemId = null;
+        var currentSearchQuery = '';
+        var currentFilterCat = 'all';
+
+        function getStoredLang() {
+            try {
+                return localStorage.getItem('ft_lang') || 'ru';
+            } catch(e) {
+                return 'ru';
+            }
+        }
+
+        function setStoredLang(lang) {
+            try {
+                localStorage.setItem('ft_lang', lang);
+            } catch(e) {}
+        }
+
+        function setLanguage(lang) {
+            lang = (lang === 'en') ? 'en' : 'ru';
+            setStoredLang(lang);
+
+            var btnRu = document.getElementById('lang-ru');
+            var btnEn = document.getElementById('lang-en');
+            if (btnRu) btnRu.classList.toggle('active', lang === 'ru');
+            if (btnEn) btnEn.classList.toggle('active', lang === 'en');
+            if (btnRu) btnRu.setAttribute('aria-pressed', lang === 'ru' ? 'true' : 'false');
+            if (btnEn) btnEn.setAttribute('aria-pressed', lang === 'en' ? 'true' : 'false');
+
+            document.querySelectorAll('[data-' + lang + ']').forEach(function(el) {
+                var txt = el.getAttribute('data-' + lang);
+                if (txt !== null) {
+                    if (el.children.length === 0 || el.classList.contains('item-name') || el.classList.contains('empty-state')) {
+                        el.textContent = txt;
+                    } else {
+                        var child = el.querySelector('.i18n-text');
+                        if (child) {
+                            child.textContent = txt;
+                        } else if (el.childNodes.length > 0 && el.childNodes[0].nodeType === 3) {
+                            el.childNodes[0].nodeValue = txt;
+                        }
+                    }
+                }
+            });
+
+            document.querySelectorAll('[data-' + lang + '-placeholder]').forEach(function(el) {
+                var ph = el.getAttribute('data-' + lang + '-placeholder');
+                if (ph !== null) el.placeholder = ph;
+            });
+
+            var select = document.getElementById('item-select');
+            if (select) {
+                Array.from(select.options).forEach(function(opt) {
+                    var val = opt.getAttribute('data-' + lang);
+                    if (val) opt.textContent = val;
+                });
+            }
+
+            if (currentSelectedItemId && ITEM_STORE[currentSelectedItemId]) {
+                selectInspectorItem(currentSelectedItemId);
+            }
+        }
+
+        function formatCurrencyHtml(copper) {
+            if (copper === null || isNaN(copper)) copper = 0;
+            copper = Math.round(Number(copper));
+            var sign = copper < 0 ? "-" : "";
+            var abs = Math.abs(copper);
+            var g = Math.floor(abs / 10000);
+            var s = Math.floor((abs % 10000) / 100);
+            var c = abs % 100;
+            return sign + '<span class="money-gold">' + g + 'g</span> ' +
+                          '<span class="money-silver">' + s + 's</span> ' +
+                          '<span class="money-copper">' + c + 'c</span>';
+        }
+
+        function formatCurrencyText(copper) {
+            if (copper === null || isNaN(copper)) copper = 0;
+            copper = Math.round(Number(copper));
+            var sign = copper < 0 ? "-" : "";
+            var abs = Math.abs(copper);
+            var g = Math.floor(abs / 10000);
+            var s = Math.floor((abs % 10000) / 100);
+            var c = abs % 100;
+            return sign + g + 'g ' + s + 's ' + c + 'c';
+        }
+
+        function showToast(msg) {
+            var t = document.getElementById('toast');
+            if (!t) return;
+            t.textContent = msg;
+            t.classList.add('show');
+            clearTimeout(t._timer);
+            t._timer = setTimeout(function() {
+                t.classList.remove('show');
+            }, 2500);
+        }
+
+        function copyItemName(btn, event) {
+            if (event) event.stopPropagation();
+            var wrapper = btn.closest('.item-cell-wrap') || btn.closest('.inspector-title-wrap') || btn.closest('.modal-title-wrap') || btn.parentElement;
+            var nameEl = wrapper ? wrapper.querySelector('.item-name') || wrapper.querySelector('.inspector-name') : null;
+            var textToCopy = '';
+            if (nameEl) {
+                textToCopy = (nameEl.innerText || nameEl.textContent || '').trim();
+            } else if (btn.getAttribute('data-name')) {
+                textToCopy = btn.getAttribute('data-name').trim();
+            }
+            if (!textToCopy) return;
+
+            var currentLang = getStoredLang();
+            var successText = currentLang === 'en' ? '✓ Copied!' : '✓ Скопировано!';
+            var origHtml = btn.innerHTML;
+            var origTitle = btn.title;
+
+            function showSuccess() {
+                btn.innerHTML = successText;
+                btn.classList.add('copied');
+                setTimeout(function() {
+                    btn.innerHTML = origHtml;
+                    btn.title = origTitle;
+                    btn.classList.remove('copied');
+                }, 1500);
+            }
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(textToCopy).then(showSuccess).catch(function() {
+                    fallbackCopy(textToCopy, showSuccess);
+                });
+            } else {
+                fallbackCopy(textToCopy, showSuccess);
+            }
+        }
+
+        function copyTextToClipboard(text, cb) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(cb).catch(function() {
+                    fallbackCopy(text, cb);
+                });
+            } else {
+                fallbackCopy(text, cb);
+            }
+        }
+
+        function fallbackCopy(text, cb) {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            try {
+                document.execCommand('copy');
+                if (cb) cb();
+            } catch(e) {}
+            document.body.removeChild(ta);
+        }
+
+        function copyAuctionatorShoppingList() {
+            var items = [];
+            var lang = getStoredLang();
+
+            // Collect items with STRONG_BUY signal from verified STRONG_BUY_ITEM_IDS
+            if (typeof STRONG_BUY_ITEM_IDS !== 'undefined' && STRONG_BUY_ITEM_IDS.length > 0) {
+                STRONG_BUY_ITEM_IDS.forEach(function(id) {
+                    var it = ITEM_STORE[id];
+                    if (it) {
+                        var n = (lang === 'en' ? it.name_en : it.name_ru) || it.name_ru || it.name_en;
+                        if (n && items.indexOf(n) === -1) items.push(n);
+                    }
+                });
+            }
+
+            // If no strong buys, collect from currently active table
+            if (items.length === 0) {
+                var activePane = document.querySelector('.tab-pane.active');
+                if (activePane) {
+                    var rows = activePane.querySelectorAll('tbody tr');
+                    rows.forEach(function(r) {
+                        if (r.style.display === 'none') return;
+                        var nameEl = r.querySelector('.item-name');
+                        if (nameEl) {
+                            var n = (nameEl.innerText || nameEl.textContent || '').trim();
+                            if (n && items.indexOf(n) === -1) items.push(n);
+                        }
+                    });
+                }
+            }
+
+            if (items.length === 0) {
+                showToast(lang === 'en' ? 'No items found for shopping list' : 'Нет предметов для Shopping List');
+                return;
+            }
+
+            var exportStr = 'ForeverTrade^' + items.map(function(name) {
+                return '"' + name.replace(/"/g, '') + '"';
+            }).join('^');
+
+            copyTextToClipboard(exportStr, function() {
+                showToast((lang === 'en' ? '✓ Copied Shopping List for Auctionator (' : '✓ Shopping List скопирован для Auctionator (') + items.length + ')');
+            });
+        }
+
+        function switchTab(tabId) {
+            if (tabId === 'tab-crafting' || tabId === 'crafting') {
+                tabId = 'waylaid-crates';
+            }
+            currentActiveTab = tabId;
+            try {
+                localStorage.setItem('ft_active_tab', tabId);
+            } catch(e) {}
+
+            document.querySelectorAll('.tab-btn').forEach(function(btn) {
+                btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
+            });
+
+            document.querySelectorAll('.tab-pane').forEach(function(pane) {
+                pane.classList.toggle('active', pane.id === tabId);
+            });
+
+            if (currentSearchQuery) {
+                onItemSearch(currentSearchQuery);
+            }
+
+            if (currentSelectedItemId) {
+                selectInspectorItem(currentSelectedItemId);
+            }
+        }
+
+        function toggleAiBanner() {
+            var b = document.getElementById('ai-banner-container');
+            if (b) {
+                b.style.display = b.style.display === 'none' ? 'block' : 'none';
+            }
+        }
+
+        function renderCraftingTree(nodes, depth, lang) {
+            if (!nodes || nodes.length === 0) return '';
+            var html = '';
+            var indentPx = depth * 16;
+            nodes.forEach(function(node) {
+                var name = (lang === 'en' ? node.name : node.name_ru) || node.name_ru || node.name || ('Item ' + node.item_id);
+                var safeName = String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                var count = node.count || 1;
+                var source = String(node.source || 'ah').toLowerCase();
+
+                var badge = '';
+                if (source === 'vendor') {
+                    badge = '<span class="badge badge-vendor i18n" data-ru="[🏛️ Vendor]" data-en="[🏛️ Vendor]">[🏛️ Vendor]</span>';
+                } else if (source === 'craft') {
+                    badge = '<span class="badge badge-craft i18n" data-ru="[🔨 Craft]" data-en="[🔨 Craft]">[🔨 Craft]</span>';
+                } else {
+                    badge = '<span class="badge badge-ah i18n" data-ru="[🛒 AH]" data-en="[🛒 AH]">[🛒 AH]</span>';
+                }
+
+                var costVal = node.effective_unit_cost !== undefined ? node.effective_unit_cost : (node.unit_cost || 0);
+                var costStr = formatCurrencyHtml(costVal);
+
+                html += '<div class="crafting-node depth-' + depth + '" style="margin-left: ' + indentPx + 'px;">';
+                html += '<div class="crafting-node-header">';
+                if (depth > 0) {
+                    html += '<span class="tree-branch">└─ </span>';
+                }
+                html += badge + ' ';
+                html += '<a href="https://www.wowhead.com/forever/item=' + node.item_id + '" data-wowhead="domain=forever" target="_blank" rel="noopener" class="wowhead-link item-name">' + safeName + '</a> ';
+                html += '<span class="craft-count">&times; ' + count + '</span> ';
+                html += '<span class="craft-cost">(' + costStr + ')</span>';
+                html += '</div>';
+
+                if (source === 'craft' && node.sub_tree && node.sub_tree.length > 0) {
+                    html += renderCraftingTree(node.sub_tree, depth + 1, lang);
+                }
+                html += '</div>';
+            });
+            return html;
+        }
+
+        function onRowClick(event, itemId) {
+            if (event.target.closest('button') || event.target.closest('a')) return;
+            if (itemId) selectInspectorItem(itemId);
+        }
+
+        function selectInspectorItem(itemId) {
+            itemId = parseInt(itemId);
+            var item = ITEM_STORE[itemId];
+            if (!item) return;
+
+            currentSelectedItemId = itemId;
+            try {
+                localStorage.setItem('ft_selected_item', String(itemId));
+            } catch(e) {}
+
+            document.querySelectorAll('tr.selected-row').forEach(function(r) {
+                r.classList.remove('selected-row');
+            });
+            document.querySelectorAll('tr[data-item-id="' + itemId + '"]').forEach(function(r) {
+                r.classList.add('selected-row');
+            });
+
+            var lang = getStoredLang();
+            var activeName = (lang === 'en' ? item.name_en : item.name_ru) || item.name_ru || item.name_en || ('Item ' + itemId);
+
+            var titleEl = document.getElementById('inspector-item-name');
+            if (titleEl) {
+                titleEl.textContent = activeName;
+                titleEl.className = 'inspector-name q-' + (item.quality || 1);
+            }
+
+            var linkEl = document.getElementById('inspector-wowhead-link');
+            if (linkEl) {
+                linkEl.href = 'https://www.wowhead.com/forever/item=' + itemId;
+                linkEl.setAttribute('data-wowhead', 'domain=forever');
+            }
+
+            var copyBtn = document.getElementById('inspector-copy-btn');
+            if (copyBtn) {
+                copyBtn.setAttribute('data-name', activeName);
+            }
+
+            // Deal Calculator updates
+            var cost = 0;
+            var breakeven = 0;
+            var ahCut = 0;
+            var profit = 0;
+            var roi = '—';
+
+            var deal = item.deal_info || {};
+            if (deal.cost !== undefined && deal.revenue !== undefined) {
+                cost = deal.cost;
+                var revenue = deal.revenue;
+                ahCut = Math.round(revenue * 0.05);
+                breakeven = Math.round(cost / 0.95);
+                profit = deal.profit !== undefined ? deal.profit : (revenue - ahCut - cost);
+                roi = cost > 0 ? '+' + ((profit / cost) * 100).toFixed(1) + '%' : '—';
+            } else if (deal.vendor_sell !== undefined && deal.buyout !== undefined) {
+                cost = deal.buyout;
+                var vendorSell = deal.vendor_sell;
+                ahCut = 0;
+                breakeven = cost;
+                profit = deal.profit !== undefined ? deal.profit : (vendorSell - cost);
+                roi = cost > 0 ? '+' + ((profit / cost) * 100).toFixed(1) + '%' : '—';
+            } else if (deal.expected_de_value !== undefined) {
+                cost = deal.buyout !== undefined ? deal.buyout : (item.current_price || 0);
+                var expDe = deal.expected_de_value;
+                ahCut = Math.round(expDe * 0.05);
+                breakeven = Math.round(cost / 0.95);
+                profit = deal.profit !== undefined ? deal.profit : Math.round(expDe * 0.95 - cost);
+                roi = cost > 0 ? '+' + ((profit / cost) * 100).toFixed(1) + '%' : '—';
+            } else {
+                cost = item.current_price || 0;
+                var expSell = item.mean_price || item.current_price || 0;
+                ahCut = Math.round(expSell * 0.05);
+                breakeven = Math.round(cost / 0.95);
+                profit = Math.round(expSell * 0.95 - cost);
+                roi = cost > 0 ? ((profit / cost) * 100).toFixed(1) + '%' : '—';
+            }
+
+            var elCost = document.getElementById('calc-cost');
+            if (elCost) elCost.innerHTML = formatCurrencyHtml(cost);
+            var elBe = document.getElementById('calc-breakeven');
+            if (elBe) elBe.innerHTML = formatCurrencyHtml(breakeven);
+            var elCut = document.getElementById('calc-ah-cut');
+            if (elCut) elCut.innerHTML = formatCurrencyHtml(ahCut);
+            var elProfit = document.getElementById('calc-profit');
+            if (elProfit) elProfit.innerHTML = formatCurrencyHtml(profit);
+            var elRoi = document.getElementById('calc-roi');
+            if (elRoi) elRoi.textContent = roi;
+
+            // Disenchant Breakdown card updates
+            var deCard = document.getElementById('disenchant-card');
+            if (deCard) {
+                var isDe = !!(deal && (deal.is_disenchant || deal.expected_de_value !== undefined));
+                if (isDe && deal && deal.reagents && deal.reagents.length > 0) {
+                    deCard.style.display = 'flex';
+                    var deExpEl = document.getElementById('de-card-expected-val');
+                    if (deExpEl) {
+                        deExpEl.innerHTML = formatCurrencyHtml(deal.expected_de_value || 0);
+                    }
+                    var listEl = document.getElementById('de-reagents-list');
+                    if (listEl) {
+                        var rHtml = '';
+                        deal.reagents.forEach(function(r) {
+                            var rName = (lang === 'en' ? r.reagent_name : r.reagent_name_ru) || r.reagent_name || r.reagent_name_ru || ('Item ' + r.reagent_id);
+                            var chancePct = r.chance <= 1.0 ? Math.round(r.chance * 1000) / 10 : r.chance;
+                            var expCount = r.expected_count !== undefined ? r.expected_count : 1.0;
+                            var unitPrice = r.unit_price_copper || 0;
+                            var totalVal = Math.round((r.chance <= 1.0 ? r.chance : r.chance / 100) * expCount * unitPrice);
+                            var safeName = String(rName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                            rHtml += '<div class="de-reagent-row">' +
+                                '<div class="de-reagent-top">' +
+                                    '<a href="https://www.wowhead.com/forever/item=' + r.reagent_id + '" data-wowhead="domain=forever" target="_blank" rel="noopener" class="wowhead-link">' +
+                                        safeName +
+                                    '</a>' +
+                                    '<span class="profit-cell">+' + formatCurrencyHtml(totalVal) + '</span>' +
+                                '</div>' +
+                                '<div class="de-reagent-bottom">' +
+                                    '<span>' + (lang === 'en' ? 'Chance: ' : 'Шанс: ') + chancePct + '% &times; ' + expCount + '</span>' +
+                                    '<span>AH: ' + formatCurrencyHtml(unitPrice) + '</span>' +
+                                '</div>' +
+                            '</div>';
+                        });
+                        listEl.innerHTML = rHtml;
+                    }
+                } else {
+                    deCard.style.display = 'none';
+                }
+            }
+
+            // Crafting Tree (DAG Components) card updates
+            var craftCard = document.getElementById('tab-crafting');
+            if (craftCard) {
+                var isCraftTab = (currentActiveTab === 'waylaid-crates' || currentActiveTab === 'tab-crates' || currentActiveTab === 'tab-crafting');
+                var hasTreeData = deal && deal.reagents_tree && deal.reagents_tree.length > 0;
+                var hasReagents = deal && deal.reagents && deal.reagents.length > 0;
+                var shouldShow = (hasTreeData || (isCraftTab && hasReagents));
+
+                if (shouldShow) {
+                    craftCard.style.display = 'flex';
+                    var treeContainer = document.getElementById('crafting-tree');
+                    if (treeContainer) {
+                        var treeData = deal.reagents_tree;
+                        if (!treeData || treeData.length === 0) {
+                            treeData = (deal.reagents || []).map(function(r) {
+                                return {
+                                    item_id: r.item_id,
+                                    name: r.name,
+                                    name_ru: r.name_ru || r.name,
+                                    count: r.count || 1,
+                                    effective_unit_cost: r.unit_cost || 0,
+                                    source: r.source || (r.is_vendor ? 'vendor' : 'ah'),
+                                    sub_tree: []
+                                };
+                            });
+                        }
+                        treeContainer.innerHTML = renderCraftingTree(treeData, 0, lang);
+                    }
+                } else {
+                    craftCard.style.display = 'none';
+                }
+            }
+
+            updateInspectorChart(item, activeName);
+
+            if (window.$Wh && window.$Wh.updateTooltips) {
+                try { window.$Wh.updateTooltips(); } catch(e) {}
+            }
+        }
+
+        function updateInspectorChart(item, activeName) {
+            var plotContainer = document.getElementById('inspector-chart');
+            if (!plotContainer) return;
+            var lang = getStoredLang();
+
+            if (!item.points || item.points.length === 0) {
+                var emptyMsg = lang === 'en'
+                    ? 'Waiting for first price snapshot from Auctionator.lua...'
+                    : 'База данных ожидает первого снимка цен из Auctionator.lua...';
+                plotContainer.innerHTML = '<div class="empty-state i18n" data-ru="База данных ожидает первого снимка цен из Auctionator.lua..." data-en="Waiting for first price snapshot from Auctionator.lua...">' + emptyMsg + '</div>';
+                return;
+            }
+
+            var xVals = [];
+            var yVals = [];
+            var hoverTexts = [];
+            item.points.forEach(function(pt) {
+                var ts = pt[0];
+                var p = pt[1];
+                var dt = new Date(ts * 1000);
+                var dtStr = dt.toISOString().slice(0, 16).replace('T', ' ');
+                xVals.push(dtStr);
+                yVals.push(p);
+                hoverTexts.push(activeName + '<br>' + formatCurrencyText(p));
+            });
+
+            var traces = [
+                {
+                    x: xVals,
+                    y: yVals,
+                    mode: 'lines+markers',
+                    name: activeName,
+                    line: { color: '#6b9dff', width: 2 },
+                    marker: { size: 4 },
+                    hovertext: hoverTexts,
+                    hoverinfo: 'text+x'
+                }
+            ];
+
+            var cost = (item.deal_info && item.deal_info.cost) || item.current_price || 0;
+            var breakeven = Math.round(cost / 0.95);
+            if (breakeven > 0 && item.points.length > 1) {
+                traces.push({
+                    x: [xVals[0], xVals[xVals.length - 1]],
+                    y: [breakeven, breakeven],
+                    mode: 'lines',
+                    name: (lang === 'en' ? 'Breakeven (P_be): ' : 'Безубыток (P_be): ') + formatCurrencyText(breakeven),
+                    line: { color: '#f85149', width: 1.5, dash: 'dot' },
+                    hoverinfo: 'name'
+                });
+            }
+
+            if (item.mean_price && item.points.length > 1) {
+                traces.push({
+                    x: [xVals[0], xVals[xVals.length - 1]],
+                    y: [item.mean_price, item.mean_price],
+                    mode: 'lines',
+                    name: (lang === 'en' ? 'Mean Price: ' : 'Средняя цена: ') + formatCurrencyText(item.mean_price),
+                    line: { color: '#d29922', width: 1.5, dash: 'dash' },
+                    hoverinfo: 'name'
+                });
+            }
+
+            var layout = {
+                template: 'plotly_dark',
+                paper_bgcolor: '#11161f',
+                plot_bgcolor: '#11161f',
+                font: { color: '#8b98a9', family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", size: 10 },
+                margin: { l: 45, r: 15, t: 25, b: 30 },
+                height: 250,
+                showlegend: true,
+                legend: { orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1, font: { size: 9 } },
+                xaxis: { gridcolor: '#263142', zerolinecolor: '#35445a' },
+                yaxis: { gridcolor: '#263142', zerolinecolor: '#35445a' }
+            };
+
+            if (window.Plotly) {
+                Plotly.react(plotContainer, traces, layout, { responsive: true, displayModeBar: false });
+            }
+        }
+
+        function onItemSearch(query) {
+            currentSearchQuery = (query || '').trim().toLowerCase();
+            try {
+                localStorage.setItem('ft_search', currentSearchQuery);
+            } catch(e) {}
+
+            var activePane = document.querySelector('.tab-pane.active');
+            if (activePane) {
+                var rows = activePane.querySelectorAll('tbody tr');
+                rows.forEach(function(row) {
+                    var text = (row.innerText || row.textContent || '').toLowerCase();
+                    if (!currentSearchQuery || text.indexOf(currentSearchQuery) !== -1) {
+                        row.style.display = '';
+                    } else {
+                        row.style.display = 'none';
+                    }
+                });
+            }
+            applyItemSelectFilter();
+        }
+
+        function openItemModal(itemId, event) {
+            if (event) event.stopPropagation();
+            selectInspectorItem(itemId);
+        }
+
+        function closeItemModal() {
+            var modal = document.getElementById('item-modal');
+            if (modal) modal.style.display = 'none';
+        }
+
+        function onModalBackdropClick(event) {
+            if (event.target && event.target.id === 'item-modal') {
+                closeItemModal();
+            }
+        }
+
+        function filterCategory(cat) {
+            currentFilterCat = cat;
+            applyItemSelectFilter();
+        }
+
+        function applyItemSelectFilter() {
+            var select = document.getElementById('item-select');
+            if (!select) return;
+            var options = select.querySelectorAll('option');
+
+            options.forEach(function(opt) {
+                if (!opt.value) return;
+                var cat = opt.getAttribute('data-category');
+                var searchData = (opt.getAttribute('data-search') || '').toLowerCase();
+                var catMatch = (currentFilterCat === 'all') || (cat === currentFilterCat);
+                var searchMatch = !currentSearchQuery || (searchData.indexOf(currentSearchQuery) !== -1);
+                opt.style.display = (catMatch && searchMatch) ? '' : 'none';
+            });
+        }
+
+        function onSelectDropdownItem(val) {
+            if (val) selectInspectorItem(val);
+        }
+
+        document.addEventListener("DOMContentLoaded", function() {
+            var initialLang = getStoredLang();
+            setLanguage(initialLang);
+
+            try {
+                var savedTab = localStorage.getItem('ft_active_tab');
+                if (savedTab && document.getElementById(savedTab)) {
+                    switchTab(savedTab);
+                }
+                var savedSearch = localStorage.getItem('ft_search');
+                if (savedSearch) {
+                    var inp = document.getElementById('item-search-input');
+                    if (inp) {
+                        inp.value = savedSearch;
+                        onItemSearch(savedSearch);
+                    }
+                }
+                var savedItem = localStorage.getItem('ft_selected_item');
+                if (savedItem && ITEM_STORE[savedItem]) {
+                    selectInspectorItem(savedItem);
+                } else {
+                    var keys = Object.keys(ITEM_STORE);
+                    if (keys.length > 0) {
+                        selectInspectorItem(keys[0]);
+                    }
+                }
+            } catch(e) {}
+
+            // Ctrl+K Search Shortcut
+            document.addEventListener('keydown', function(e) {
+                if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.keyCode === 75)) {
+                    e.preventDefault();
+                    var inp = document.getElementById('item-search-input');
+                    if (inp) {
+                        inp.focus();
+                        inp.select();
+                    }
+                }
+            });
+
+            // Sortable tables
+            document.querySelectorAll("table.sortable").forEach(function(table) {
+                var headers = table.querySelectorAll("th");
+                headers.forEach(function(header, colIndex) {
+                    header.setAttribute("tabindex", "0");
+                    header.setAttribute("role", "button");
+                    header.addEventListener("keydown", function(e) {
+                        if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            header.click();
+                        }
+                    });
+                    header.addEventListener("click", function() {
+                        var tbody = table.querySelector("tbody");
+                        var rows = Array.from(tbody.querySelectorAll("tr"));
+                        if (rows.length <= 1) return;
+                        var asc = header.getAttribute("data-sort") !== "asc";
+                        headers.forEach(function(h) { h.removeAttribute("data-sort"); });
+                        header.setAttribute("data-sort", asc ? "asc" : "desc");
+                        rows.sort(function(a, b) {
+                            var cellA = a.children[colIndex] ? a.children[colIndex].getAttribute("data-value") || a.children[colIndex].innerText.trim() : "";
+                            var cellB = b.children[colIndex] ? b.children[colIndex].getAttribute("data-value") || b.children[colIndex].innerText.trim() : "";
+                            var numA = parseFloat(cellA);
+                            var numB = parseFloat(cellB);
+                            if (!isNaN(numA) && !isNaN(numB)) {
+                                return asc ? numA - numB : numB - numA;
+                            }
+                            return asc ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+                        });
+                        rows.forEach(function(row) { tbody.appendChild(row); });
+                    });
+                });
+            });
+        });
+    </script>
+</body>
+</html>

@@ -15,3 +15,4 @@ market.db
 *.db-shm
 data/cache/
 portal.html
+tmp/
