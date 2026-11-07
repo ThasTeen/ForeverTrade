@@ -55,10 +55,15 @@ function FT_HasCustomSelection()
     return false
 end
 
-function FT_IsItemActive(itemId)
-    if not itemId then return false end
+function FT_IsItemActive(itemId, fallbackName)
+    if not itemId and not fallbackName then return false end
     local numId = tonumber(itemId)
-    local cfg = FT_CustomTargets and (FT_CustomTargets[itemId] or (numId and FT_CustomTargets[numId]))
+    local cfg = FT_CustomTargets and (
+        (itemId and FT_CustomTargets[itemId]) or
+        (numId and FT_CustomTargets[numId]) or
+        (fallbackName and FT_CustomTargets[fallbackName]) or
+        (fallbackName and FT_CustomTargets[fallbackName:lower()])
+    )
     if cfg and cfg.enabled ~= nil then
         return cfg.enabled and true or false
     end
@@ -68,13 +73,18 @@ function FT_IsItemActive(itemId)
     return true
 end
 
-function FT_GetEffectiveTargetPrice(itemId, defaultTarget)
+function FT_GetEffectiveTargetPrice(itemId, defaultTarget, fallbackName)
     if type(defaultTarget) == "table" then
         defaultTarget = defaultTarget.target or 0
     end
-    if not itemId then return defaultTarget end
+    defaultTarget = defaultTarget or 0
     local numId = tonumber(itemId)
-    local cfg = FT_CustomTargets and (FT_CustomTargets[itemId] or (numId and FT_CustomTargets[numId]))
+    local cfg = FT_CustomTargets and (
+        (itemId and FT_CustomTargets[itemId]) or
+        (numId and FT_CustomTargets[numId]) or
+        (fallbackName and FT_CustomTargets[fallbackName]) or
+        (fallbackName and FT_CustomTargets[fallbackName:lower()])
+    )
     if cfg and cfg.customPrice and type(cfg.customPrice) == "number" and cfg.customPrice > 0 then
         return cfg.customPrice
     end
@@ -556,25 +566,33 @@ function FT_RebuildItemList()
             end
         end
 
-        local seenIds = {}
+        local seenKeys = {}
         for _, rawIt in ipairs(rawItemsToProcess) do
             local clean = FT_CleanItemString(rawIt)
             if clean and clean ~= "" then
                 local itemId = FT_GetItemIdByName(clean)
-                if itemId and not seenIds[itemId] then
-                    seenIds[itemId] = true
-                    FT_ActiveItemsMap[itemId] = true
+                local key = itemId or clean:lower()
+                if not seenKeys[key] then
+                    seenKeys[key] = true
+                    if itemId then FT_ActiveItemsMap[itemId] = true end
+                    FT_ActiveItemsMap[clean:lower()] = true
 
-                    local rawTarget = targets[itemId]
+                    local rawTarget = itemId and targets[itemId]
                     local defTarget = type(rawTarget) == "table" and (rawTarget.target or 0) or tonumber(rawTarget) or 0
-                    local name = (type(rawTarget) == "table" and rawTarget.name) or (FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.names and FT_SNIPER_CONFIG.names[itemId]) or clean
+                    local name = (type(rawTarget) == "table" and rawTarget.name) or (itemId and FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.names and FT_SNIPER_CONFIG.names[itemId]) or clean
+                    if (not name or name == clean) and itemId and type(GetItemInfo) == "function" then
+                        local giName = GetItemInfo(itemId)
+                        if giName and giName ~= "" then name = giName end
+                    end
                     local craftTarget = type(rawTarget) == "table" and rawTarget.craft_target
                     local recipeName = type(rawTarget) == "table" and rawTarget.recipe_name
 
                     table.insert(FT_CachedItemList, {
                         id = itemId,
-                        defaultTarget = defTarget,
+                        key = key,
                         name = name,
+                        cleanName = clean,
+                        defaultTarget = defTarget,
                         craftTarget = craftTarget,
                         recipeName = recipeName,
                     })
@@ -585,9 +603,9 @@ function FT_RebuildItemList()
 
     table.sort(FT_CachedItemList, function(a, b)
         if a.name == b.name then
-            return a.id < b.id
+            return tostring(a.id or a.key or "") < tostring(b.id or b.key or "")
         end
-        return a.name < b.name
+        return (a.name or "") < (b.name or "")
     end)
 
     FT_FilterItemList()
@@ -732,19 +750,27 @@ local function FT_ScanCurrentPage(addedResults)
             local link = (type(GetAuctionItemLink) == "function") and GetAuctionItemLink("list", i)
             local itemId = (rawItemId and rawItemId > 0 and rawItemId) or (link and tonumber(string.match(link, "item:(%d+)")))
 
-            if itemId and buyout > 0 and count > 0 then
+            if (itemId or name) and buyout > 0 and count > 0 then
                 local shouldCheck = false
                 if isListMode then
-                    shouldCheck = FT_ActiveItemsMap[itemId] and FT_IsItemActive(itemId)
+                    local nameLower = name and name:lower()
+                    if itemId and FT_ActiveItemsMap[itemId] and FT_IsItemActive(itemId, name) then
+                        shouldCheck = true
+                    elseif nameLower and FT_ActiveItemsMap[nameLower] and FT_IsItemActive(nameLower, name) then
+                        shouldCheck = true
+                    end
                 else
                     shouldCheck = true
                 end
 
                 if shouldCheck then
-                    local rawTarget = targets[itemId]
+                    local rawTarget = itemId and targets[itemId]
                     local defaultTarget = type(rawTarget) == "table" and rawTarget.target or rawTarget or 0
-                    local unitTarget = defaultTarget and FT_GetEffectiveTargetPrice(itemId, defaultTarget) or 0
-                    if unitTarget <= 0 and type(GetItemInfo) == "function" then
+                    local unitTarget = FT_GetEffectiveTargetPrice(itemId, defaultTarget, name)
+                    if unitTarget <= 0 and name then
+                        unitTarget = FT_GetEffectiveTargetPrice(name, 0, name)
+                    end
+                    if unitTarget <= 0 and itemId and type(GetItemInfo) == "function" then
                         local _, _, _, _, _, _, _, _, _, _, sp = GetItemInfo(itemId)
                         unitTarget = sp or 0
                     end
@@ -919,16 +945,22 @@ FT_RefreshUIPanel = function(lightOnly)
         if itemIdx <= totalItems then
             local data = FT_FilteredItemList[itemIdx]
             row.itemId = data.id
+            row.itemKey = data.key or data.id or data.name
+            row.itemName = data.name
             row.defaultTarget = data.defaultTarget
 
             -- Checkbox
-            row.cb:SetChecked(FT_IsItemActive(data.id))
+            row.cb:SetChecked(FT_IsItemActive(row.itemKey, row.itemName))
 
             -- Icon & Name
-            local itemIcon = (type(GetItemIcon) == "function" and GetItemIcon(data.id)) or "Interface\\Icons\\INV_Misc_QuestionMark"
-            row.icon:SetTexture(itemIcon)
+            local itemIcon = (data.id and type(GetItemIcon) == "function" and GetItemIcon(data.id))
+            if not itemIcon and type(GetItemInfo) == "function" then
+                local _, _, _, _, _, _, _, _, _, texture = GetItemInfo(data.id or data.name)
+                itemIcon = texture
+            end
+            row.icon:SetTexture(itemIcon or "Interface\\Icons\\INV_Misc_QuestionMark")
 
-            local itemDisplay = FT_GetItemDisplayName(data.id)
+            local itemDisplay = data.id and FT_GetItemDisplayName(data.id) or ("|cffffffff" .. (data.name or "?") .. "|r")
             if data.craftTarget and data.recipeName and data.recipeName ~= "" then
                 row.nameText:SetText(string.format("%s |cff888888(%s)|r", itemDisplay, data.recipeName))
             else
@@ -936,11 +968,19 @@ FT_RefreshUIPanel = function(lightOnly)
             end
 
             -- Default ceiling label: Дефолт: Xз Yс Zм
-            row.defLabel:SetText(string.format("Дефолт: %s", FT_FormatMoneyText(data.defaultTarget)))
+            if data.defaultTarget and data.defaultTarget > 0 then
+                row.defLabel:SetText(string.format("Дефолт: %s", FT_FormatMoneyText(data.defaultTarget)))
+            else
+                row.defLabel:SetText("|cff888888По рынку|r")
+            end
 
             -- Custom price EditBox
             if not row.eb:HasFocus() then
-                local cp = FT_CustomTargets and FT_CustomTargets[data.id] and FT_CustomTargets[data.id].customPrice
+                local cp = FT_CustomTargets and (
+                    (data.id and FT_CustomTargets[data.id] and FT_CustomTargets[data.id].customPrice) or
+                    (data.key and FT_CustomTargets[data.key] and FT_CustomTargets[data.key].customPrice) or
+                    (data.name and FT_CustomTargets[data.name] and FT_CustomTargets[data.name].customPrice)
+                )
                 if cp and cp > 0 then
                     row.eb:SetText(FT_FormatMoneyText(cp))
                 else
@@ -951,14 +991,14 @@ FT_RefreshUIPanel = function(lightOnly)
             row:Show()
         else
             row.itemId = nil
+            row.itemKey = nil
+            row.itemName = nil
             row:Hide()
         end
     end
 end
 
 local function FT_CreateMainUI()
-    if FTSniperMainFrame and FTSniperMainFrame.rows then return FTSniperMainFrame end
-
     local frame = _G["FTSniperMainFrame"]
     if not frame then
         frame = CreateFrame("Frame", "FTSniperMainFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
@@ -979,6 +1019,9 @@ local function FT_CreateMainUI()
         end)
     end
 
+    FTSniperMainFrame = frame
+    if frame.rows and #frame.rows > 0 then return frame end
+
     if frame.SetBackdrop then
         frame:SetBackdrop({
             bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -989,12 +1032,6 @@ local function FT_CreateMainUI()
         frame:SetBackdropColor(0.05, 0.05, 0.08, 0.95)
     end
 
-    -- Title bar with character & profession info from FT_SNIPER_CONFIG
-    local titleText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    titleText:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -14)
-    titleText:SetText(FT_GetTitleBarText())
-    frame.titleText = titleText
-
     -- Close button (for standalone mode)
     local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -4)
@@ -1003,15 +1040,26 @@ local function FT_CreateMainUI()
     end)
     frame.closeBtn = closeBtn
 
-    -- Status indicator badge
-    local statusBadge = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    statusBadge:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -36, -14)
-    frame.statusBadge = statusBadge
+    -- Container for top controls: start/stop, mode selector, min profit, list selector, quick buttons, search
+    local parentWrapper = (frame:GetParent() and frame:GetParent() ~= UIParent) and frame:GetParent() or nil
+    local topBar = CreateFrame("Frame", "FTSniperTopBar", frame)
+    topBar:SetFrameLevel(frame:GetFrameLevel() + 5)
+    if parentWrapper then
+        topBar:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", 0, 6)
+        topBar:SetPoint("BOTTOMRIGHT", frame, "TOPRIGHT", 0, 6)
+        topBar:SetHeight(70)
+    else
+        topBar:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -8)
+        topBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -8)
+        topBar:SetHeight(70)
+    end
+    frame.topBar = topBar
 
-    -- Top controls row 1: Start/Stop, Mode Selector, Min Profit
+    -- Top controls row 1: Start/Stop, Mode Selector, Min Profit, Status Badge
     local btnStartStop = CreateFrame("Button", "FTSniperBtnStartStop", frame, "UIPanelButtonTemplate")
-    btnStartStop:SetSize(130, 22)
-    btnStartStop:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -38)
+    btnStartStop:SetSize(135, 24)
+    btnStartStop:SetPoint("TOPLEFT", topBar, "TOPLEFT", 4, -4)
+    btnStartStop:SetFrameLevel(topBar:GetFrameLevel() + 2)
     btnStartStop:SetScript("OnClick", function()
         FT_Toggle()
         FT_UpdateSniperControlsUI()
@@ -1021,6 +1069,7 @@ local function FT_CreateMainUI()
     -- Mode selector radio buttons: [● Только список покупок]  [○ Снайпить всё]
     local modeListCB = CreateFrame("CheckButton", "FTSniperModeListCB", frame, "UIRadioButtonTemplate")
     modeListCB:SetPoint("LEFT", btnStartStop, "RIGHT", 14, 0)
+    modeListCB:SetFrameLevel(topBar:GetFrameLevel() + 2)
     local modeListText = modeListCB:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     modeListText:SetPoint("LEFT", modeListCB, "RIGHT", 4, 0)
     modeListText:SetText("Только список покупок")
@@ -1029,6 +1078,7 @@ local function FT_CreateMainUI()
 
     local modeAllCB = CreateFrame("CheckButton", "FTSniperModeAllCB", frame, "UIRadioButtonTemplate")
     modeAllCB:SetPoint("LEFT", modeListText, "RIGHT", 14, 0)
+    modeAllCB:SetFrameLevel(topBar:GetFrameLevel() + 2)
     local modeAllText = modeAllCB:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     modeAllText:SetPoint("LEFT", modeAllCB, "RIGHT", 4, 0)
     modeAllText:SetText("Снайпить всё")
@@ -1052,13 +1102,14 @@ local function FT_CreateMainUI()
     end)
 
     -- Min profit input box
-    local minProfitLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local minProfitLabel = topBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     minProfitLabel:SetPoint("LEFT", modeAllText, "RIGHT", 14, 0)
     minProfitLabel:SetText("Мин. профит:")
 
     local minProfitEB = CreateFrame("EditBox", "FTSniperMinProfitEB", frame, "InputBoxTemplate")
     minProfitEB:SetSize(75, 20)
     minProfitEB:SetPoint("LEFT", minProfitLabel, "RIGHT", 6, 0)
+    minProfitEB:SetFrameLevel(topBar:GetFrameLevel() + 2)
     minProfitEB:SetAutoFocus(false)
     minProfitEB:SetMaxLetters(20)
 
@@ -1086,10 +1137,16 @@ local function FT_CreateMainUI()
     end)
     frame.minProfitEB = minProfitEB
 
-    -- Controls row 2: List selector button, quick buttons, search box
+    -- Status indicator badge
+    local statusBadge = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    statusBadge:SetPoint("TOPRIGHT", topBar, "TOPRIGHT", -16, -6)
+    frame.statusBadge = statusBadge
+
+    -- Top controls row 2: List selector button, quick buttons, search box
     local listBtn = CreateFrame("Button", "FTSniperListSelectorBtn", frame, "UIPanelButtonTemplate")
-    listBtn:SetSize(180, 22)
-    listBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -66)
+    listBtn:SetSize(185, 22)
+    listBtn:SetPoint("TOPLEFT", topBar, "TOPLEFT", 4, -36)
+    listBtn:SetFrameLevel(topBar:GetFrameLevel() + 2)
     listBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     listBtn:SetScript("OnClick", function(self, button)
         if button == "RightButton" then
@@ -1114,15 +1171,25 @@ local function FT_CreateMainUI()
 
     -- Quick buttons: [ Включить все ] [ Отключить все ] [ Сброс цен ]
     local btnEnableAll = CreateFrame("Button", "FTSniperBtnEnableAll", frame, "UIPanelButtonTemplate")
-    btnEnableAll:SetSize(105, 22)
+    btnEnableAll:SetSize(95, 22)
     btnEnableAll:SetPoint("LEFT", listBtn, "RIGHT", 6, 0)
+    btnEnableAll:SetFrameLevel(topBar:GetFrameLevel() + 2)
     btnEnableAll:SetText("Включить все")
     btnEnableAll:SetScript("OnClick", function()
         FT_CustomTargets = FT_CustomTargets or {}
         for _, it in ipairs(FT_CachedItemList) do
+            local k = it.key or it.id or it.name
+            if k then
+                FT_CustomTargets[k] = FT_CustomTargets[k] or {}
+                FT_CustomTargets[k].enabled = true
+            end
             if it.id then
                 FT_CustomTargets[it.id] = FT_CustomTargets[it.id] or {}
                 FT_CustomTargets[it.id].enabled = true
+            end
+            if it.name then
+                FT_CustomTargets[it.name] = FT_CustomTargets[it.name] or {}
+                FT_CustomTargets[it.name].enabled = true
             end
         end
         FT_RefreshUIPanel(true)
@@ -1130,15 +1197,25 @@ local function FT_CreateMainUI()
     end)
 
     local btnDisableAll = CreateFrame("Button", "FTSniperBtnDisableAll", frame, "UIPanelButtonTemplate")
-    btnDisableAll:SetSize(105, 22)
+    btnDisableAll:SetSize(95, 22)
     btnDisableAll:SetPoint("LEFT", btnEnableAll, "RIGHT", 6, 0)
+    btnDisableAll:SetFrameLevel(topBar:GetFrameLevel() + 2)
     btnDisableAll:SetText("Отключить все")
     btnDisableAll:SetScript("OnClick", function()
         FT_CustomTargets = FT_CustomTargets or {}
         for _, it in ipairs(FT_CachedItemList) do
+            local k = it.key or it.id or it.name
+            if k then
+                FT_CustomTargets[k] = FT_CustomTargets[k] or {}
+                FT_CustomTargets[k].enabled = false
+            end
             if it.id then
                 FT_CustomTargets[it.id] = FT_CustomTargets[it.id] or {}
                 FT_CustomTargets[it.id].enabled = false
+            end
+            if it.name then
+                FT_CustomTargets[it.name] = FT_CustomTargets[it.name] or {}
+                FT_CustomTargets[it.name].enabled = false
             end
         end
         FT_RefreshUIPanel(true)
@@ -1146,14 +1223,22 @@ local function FT_CreateMainUI()
     end)
 
     local btnResetPrices = CreateFrame("Button", "FTSniperBtnResetDefault", frame, "UIPanelButtonTemplate")
-    btnResetPrices:SetSize(90, 22)
+    btnResetPrices:SetSize(80, 22)
     btnResetPrices:SetPoint("LEFT", btnDisableAll, "RIGHT", 6, 0)
+    btnResetPrices:SetFrameLevel(topBar:GetFrameLevel() + 2)
     btnResetPrices:SetText("Сброс цен")
     btnResetPrices:SetScript("OnClick", function()
         if FT_CustomTargets then
             for _, it in ipairs(FT_CachedItemList) do
+                local k = it.key or it.id or it.name
+                if k and FT_CustomTargets[k] then
+                    FT_CustomTargets[k].customPrice = nil
+                end
                 if it.id and FT_CustomTargets[it.id] then
                     FT_CustomTargets[it.id].customPrice = nil
+                end
+                if it.name and FT_CustomTargets[it.name] then
+                    FT_CustomTargets[it.name].customPrice = nil
                 end
             end
         end
@@ -1164,11 +1249,12 @@ local function FT_CreateMainUI()
     -- Search box
     local searchBox = CreateFrame("EditBox", "FTSniperSearchBox", frame, "InputBoxTemplate")
     searchBox:SetSize(130, 20)
-    searchBox:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -36, -66)
+    searchBox:SetPoint("TOPRIGHT", topBar, "TOPRIGHT", -16, -36)
+    searchBox:SetFrameLevel(topBar:GetFrameLevel() + 2)
     searchBox:SetAutoFocus(false)
     searchBox:SetMaxLetters(40)
 
-    local searchLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local searchLabel = topBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     searchLabel:SetPoint("RIGHT", searchBox, "LEFT", -6, 0)
     searchLabel:SetText("Поиск:")
 
@@ -1189,27 +1275,28 @@ local function FT_CreateMainUI()
         self:ClearFocus()
     end)
 
-    -- Column Headers (Y = -94)
+    -- Inset Table Column Headers inside frame (Y = -8)
     local headerEn = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    headerEn:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -94)
+    headerEn:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -8)
     headerEn:SetText("Вкл")
 
     local headerItem = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    headerItem:SetPoint("LEFT", headerEn, "LEFT", 30, 0)
+    headerItem:SetPoint("LEFT", headerEn, "LEFT", 32, 0)
     headerItem:SetText("Предмет")
 
     local headerDef = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    headerDef:SetPoint("TOPLEFT", frame, "TOPLEFT", 350, -94)
+    headerDef:SetPoint("TOPLEFT", frame, "TOPLEFT", 360, -8)
     headerDef:SetText("Дефолт. потолок")
 
     local headerCust = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    headerCust:SetPoint("TOPLEFT", frame, "TOPLEFT", 520, -94)
+    headerCust:SetPoint("TOPLEFT", frame, "TOPLEFT", 530, -8)
     headerCust:SetText("Своя цена (медь / 1з 20с)")
 
-    -- ScrollFrame (Y = -112)
+    -- ScrollFrame inside frame
     local scrollFrame = CreateFrame("ScrollFrame", "FTSniperScrollFrame", frame, "FauxScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -112)
-    scrollFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -34, 12)
+    scrollFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, -28)
+    scrollFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -32, 8)
+    scrollFrame:SetFrameLevel(frame:GetFrameLevel() + 2)
 
     scrollFrame:SetScript("OnVerticalScroll", function(self, offset)
         if FauxScrollFrame_OnVerticalScroll then
@@ -1235,17 +1322,23 @@ local function FT_CreateMainUI()
     local function Row_OnEnter(self)
         local parent = self:GetParent()
         local itemId = parent and parent.itemId
-        if not itemId or not GameTooltip then return end
+        local itemName = parent and (parent.itemName or parent.itemKey)
+        if not GameTooltip then return end
 
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        local _, link = GetItemInfo(itemId)
-        if link then
-            GameTooltip:SetHyperlink(link)
+        if itemId then
+            local _, link = GetItemInfo(itemId)
+            if link then
+                GameTooltip:SetHyperlink(link)
+            else
+                GameTooltip:SetHyperlink("item:" .. itemId)
+            end
         else
-            GameTooltip:SetHyperlink("item:" .. itemId)
+            GameTooltip:AddLine(itemName or "Предмет", 1, 1, 1)
+            GameTooltip:AddLine("Список покупок Auctionator", 0.7, 0.7, 0.7)
         end
 
-        local rawTarget = FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.targets and FT_SNIPER_CONFIG.targets[itemId]
+        local rawTarget = itemId and FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.targets and FT_SNIPER_CONFIG.targets[itemId]
         if type(rawTarget) == "table" and rawTarget.craft_target and rawTarget.recipe_name then
             GameTooltip:AddLine(" ")
             GameTooltip:AddLine("|cff00ff00Перекрафт:|r " .. rawTarget.recipe_name, 1, 1, 1)
@@ -1255,10 +1348,12 @@ local function FT_CreateMainUI()
         end
 
         local defaultTarget = type(rawTarget) == "table" and rawTarget.target or rawTarget or 0
-        local effective = FT_GetEffectiveTargetPrice(itemId, defaultTarget)
+        local effective = FT_GetEffectiveTargetPrice(itemId, defaultTarget, itemName)
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("Дефолтный потолок: " .. FT_FormatMoneyText(defaultTarget), 0.7, 0.7, 0.7)
-        if effective ~= defaultTarget then
+        if defaultTarget > 0 then
+            GameTooltip:AddLine("Дефолтный потолок: " .. FT_FormatMoneyText(defaultTarget), 0.7, 0.7, 0.7)
+        end
+        if effective ~= defaultTarget and effective > 0 then
             GameTooltip:AddLine("Кастомный потолок: " .. FT_FormatMoneyText(effective), 0.2, 1, 0.2)
         end
         GameTooltip:Show()
@@ -1272,21 +1367,33 @@ local function FT_CreateMainUI()
 
     local function SaveEditBoxPrice(eb)
         local row = eb:GetParent()
-        local itemId = row and row.itemId
-        if not itemId then return end
+        local itemKey = row and (row.itemKey or row.itemId or row.itemName)
+        if not itemKey then return end
 
         local text = eb:GetText()
         local val = FT_ParseMoneyInput(text)
         FT_CustomTargets = FT_CustomTargets or {}
-        FT_CustomTargets[itemId] = FT_CustomTargets[itemId] or {}
+        FT_CustomTargets[itemKey] = FT_CustomTargets[itemKey] or {}
+        if row.itemId then
+            FT_CustomTargets[row.itemId] = FT_CustomTargets[row.itemId] or {}
+        end
         if val and val > 0 then
-            FT_CustomTargets[itemId].customPrice = val
-            if FT_CustomTargets[itemId].enabled == nil then
-                FT_CustomTargets[itemId].enabled = true
+            FT_CustomTargets[itemKey].customPrice = val
+            if FT_CustomTargets[itemKey].enabled == nil then
+                FT_CustomTargets[itemKey].enabled = true
+            end
+            if row.itemId then
+                FT_CustomTargets[row.itemId].customPrice = val
+                if FT_CustomTargets[row.itemId].enabled == nil then
+                    FT_CustomTargets[row.itemId].enabled = true
+                end
             end
             eb:SetText(FT_FormatMoneyText(val))
         else
-            FT_CustomTargets[itemId].customPrice = nil
+            FT_CustomTargets[itemKey].customPrice = nil
+            if row.itemId and FT_CustomTargets[row.itemId] then
+                FT_CustomTargets[row.itemId].customPrice = nil
+            end
             eb:SetText("")
         end
     end
@@ -1294,8 +1401,9 @@ local function FT_CreateMainUI()
     for i = 1, NUM_ROWS do
         local row = CreateFrame("Frame", "FTSniperRow" .. i, frame)
         row:SetHeight(ROW_HEIGHT)
-        row:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -112 - (i - 1) * ROW_HEIGHT)
+        row:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -28 - (i - 1) * ROW_HEIGHT)
         row:SetPoint("RIGHT", frame, "RIGHT", -36, 0)
+        row:SetFrameLevel(frame:GetFrameLevel() + 3)
         row:EnableMouseWheel(true)
         row:SetScript("OnMouseWheel", function(_, delta)
             scrollFrame:GetScript("OnMouseWheel")(scrollFrame, delta)
@@ -1304,14 +1412,19 @@ local function FT_CreateMainUI()
         -- Checkbox
         local cb = CreateFrame("CheckButton", "FTSniperRow" .. i .. "CB", row, "UICheckButtonTemplate")
         cb:SetSize(18, 18)
-        cb:SetPoint("LEFT", row, "LEFT", 0, 0)
+        cb:SetPoint("LEFT", row, "LEFT", 2, 0)
+        cb:SetFrameLevel(row:GetFrameLevel() + 1)
         cb:SetScript("OnClick", function(self)
             local r = self:GetParent()
-            local itemId = r and r.itemId
-            if not itemId then return end
+            local itemKey = r and (r.itemKey or r.itemId or r.itemName)
+            if not itemKey then return end
             FT_CustomTargets = FT_CustomTargets or {}
-            FT_CustomTargets[itemId] = FT_CustomTargets[itemId] or {}
-            FT_CustomTargets[itemId].enabled = self:GetChecked() and true or false
+            FT_CustomTargets[itemKey] = FT_CustomTargets[itemKey] or {}
+            FT_CustomTargets[itemKey].enabled = self:GetChecked() and true or false
+            if r.itemId then
+                FT_CustomTargets[r.itemId] = FT_CustomTargets[r.itemId] or {}
+                FT_CustomTargets[r.itemId].enabled = self:GetChecked() and true or false
+            end
             FT_RefreshUIPanel(true)
         end)
         row.cb = cb
@@ -1332,7 +1445,7 @@ local function FT_CreateMainUI()
         local itemBtn = CreateFrame("Button", nil, row)
         itemBtn:SetHeight(20)
         itemBtn:SetPoint("LEFT", icon, "RIGHT", 6, 0)
-        itemBtn:SetPoint("RIGHT", row, "LEFT", 340, 0)
+        itemBtn:SetPoint("RIGHT", row, "LEFT", 350, 0)
         itemBtn:SetScript("OnEnter", Row_OnEnter)
         itemBtn:SetScript("OnLeave", Row_OnLeave)
 
@@ -1343,15 +1456,16 @@ local function FT_CreateMainUI()
 
         -- Default ceiling label: Дефолт: Xз Yс Zм
         local defLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        defLabel:SetPoint("LEFT", row, "LEFT", 350, 0)
-        defLabel:SetPoint("RIGHT", row, "LEFT", 510, 0)
+        defLabel:SetPoint("LEFT", row, "LEFT", 360, 0)
+        defLabel:SetPoint("RIGHT", row, "LEFT", 520, 0)
         defLabel:SetJustifyH("LEFT")
         row.defLabel = defLabel
 
         -- Custom price EditBox
         local eb = CreateFrame("EditBox", "FTSniperRow" .. i .. "EB", row, "InputBoxTemplate")
         eb:SetSize(130, 20)
-        eb:SetPoint("LEFT", row, "LEFT", 520, 0)
+        eb:SetPoint("LEFT", row, "LEFT", 530, 0)
+        eb:SetFrameLevel(row:GetFrameLevel() + 1)
         eb:SetAutoFocus(false)
         eb:SetMaxLetters(25)
 
@@ -1374,26 +1488,46 @@ local function FT_CreateMainUI()
         eb:SetScript("OnTextChanged", function(self, isUserInput)
             if not isUserInput then return end
             local r = self:GetParent()
-            local itemId = r and r.itemId
-            if not itemId then return end
+            local itemKey = r and (r.itemKey or r.itemId or r.itemName)
+            if not itemKey then return end
 
             local text = self:GetText()
             local val = FT_ParseMoneyInput(text)
             FT_CustomTargets = FT_CustomTargets or {}
-            FT_CustomTargets[itemId] = FT_CustomTargets[itemId] or {}
+            FT_CustomTargets[itemKey] = FT_CustomTargets[itemKey] or {}
+            if r.itemId then
+                FT_CustomTargets[r.itemId] = FT_CustomTargets[r.itemId] or {}
+            end
             if val and val > 0 then
-                FT_CustomTargets[itemId].customPrice = val
-                if FT_CustomTargets[itemId].enabled == nil then
-                    FT_CustomTargets[itemId].enabled = true
+                FT_CustomTargets[itemKey].customPrice = val
+                if FT_CustomTargets[itemKey].enabled == nil then
+                    FT_CustomTargets[itemKey].enabled = true
+                end
+                if r.itemId then
+                    FT_CustomTargets[r.itemId].customPrice = val
+                    if FT_CustomTargets[r.itemId].enabled == nil then
+                        FT_CustomTargets[r.itemId].enabled = true
+                    end
                 end
             else
-                FT_CustomTargets[itemId].customPrice = nil
+                FT_CustomTargets[itemKey].customPrice = nil
+                if r.itemId and FT_CustomTargets[r.itemId] then
+                    FT_CustomTargets[r.itemId].customPrice = nil
+                end
             end
         end)
 
         row.eb = eb
 
         frame.rows[i] = row
+    end
+
+    if not frame._ftOnShowHooked then
+        frame._ftOnShowHooked = true
+        frame:HookScript("OnShow", function(self)
+            FT_RebuildItemList()
+            FT_RefreshUIPanel()
+        end)
     end
 
     FTSniperMainFrame = frame
@@ -1455,10 +1589,13 @@ function FT_SelectSniperTab(tabIndex)
         FT_CreateMainUI()
     end
 
-    FTSniperMainFrame:SetParent(AuctionFrame)
-    FTSniperMainFrame:ClearAllPoints()
-    FTSniperMainFrame:SetPoint("TOPLEFT", AuctionFrame, "TOPLEFT", 18, -68)
-    FTSniperMainFrame:SetPoint("BOTTOMRIGHT", AuctionFrame, "BOTTOMRIGHT", -18, 36)
+    if FTSniperMainFrame:GetParent() == UIParent then
+        FTSniperMainFrame:SetParent(AuctionFrame)
+        FTSniperMainFrame:ClearAllPoints()
+        FTSniperMainFrame:SetPoint("TOPLEFT", AuctionFrame, "TOPLEFT", 18, -68)
+        FTSniperMainFrame:SetPoint("BOTTOMRIGHT", AuctionFrame, "BOTTOMRIGHT", -18, 36)
+    end
+
     if FTSniperMainFrame.closeBtn then
         FTSniperMainFrame.closeBtn:Hide()
     end
@@ -1494,14 +1631,9 @@ local function FT_RegisterAuctionTab()
     if atrTab then
         FTSniperAuctionTab = atrTab
         FTSniperAuctionTabIndex = atrTab:GetID()
-        if not atrTab._ftHooked then
-            atrTab._ftHooked = true
-            atrTab:HookScript("OnClick", function()
-                if not FTSniperMainFrame or not FTSniperMainFrame.rows then
-                    FT_CreateMainUI()
-                end
-                FT_RefreshUIPanel()
-            end)
+        local mf = _G["FTSniperMainFrame"]
+        if mf and not mf.rows then
+            FT_CreateMainUI()
         end
         return
     end
@@ -1521,12 +1653,10 @@ local function FT_RegisterAuctionTab()
             end
             FTSniperAuctionTab = tab
             FTSniperAuctionTabIndex = tab:GetID()
-            tab:HookScript("OnClick", function()
-                if not FTSniperMainFrame or not FTSniperMainFrame.rows then
-                    FT_CreateMainUI()
-                end
-                FT_RefreshUIPanel()
-            end)
+            local mf = _G["FTSniperMainFrame"]
+            if mf and not mf.rows then
+                FT_CreateMainUI()
+            end
             tab:Show()
             return
         end
@@ -1588,7 +1718,16 @@ local function FT_RegisterAuctionTab()
 
     if type(AuctionFrameTab_OnClick) == "function" and not AuctionFrameTab_OnClick._ftHooked then
         hooksecurefunc("AuctionFrameTab_OnClick", function(self, button)
-            if self:GetID() ~= FTSniperAuctionTabIndex and self ~= _G["AuctionatorTabs_Snipe"] then
+            local isSnipe = (self == _G["AuctionatorTabs_Snipe"]) or
+                            (FTSniperAuctionTabIndex and self:GetID() == FTSniperAuctionTabIndex) or
+                            (self.GetText and self:GetText() == "Snipe")
+            if isSnipe then
+                if not FTSniperMainFrame or not FTSniperMainFrame.rows then
+                    FT_CreateMainUI()
+                end
+                FT_RebuildItemList()
+                FT_RefreshUIPanel()
+            else
                 if FTSniperMainFrame and FTSniperMainFrame:IsShown() and FTSniperMainFrame:GetParent() == AuctionFrame then
                     FTSniperMainFrame:Hide()
                 end
@@ -1821,6 +1960,17 @@ frame:SetScript("OnUpdate", function(self, elapsed)
         if not FTSniperAuctionTabIndex or not FTSniperAuctionTab or not FTSniperAuctionTab:IsShown() then
             FT_RegisterAuctionTab()
         end
+        local mf = _G["FTSniperMainFrame"]
+        if mf and not mf.rows then
+            FT_CreateMainUI()
+        end
+        if mf and mf:IsShown() and not mf._ftLastRefresh then
+            FT_RebuildItemList()
+            FT_RefreshUIPanel()
+            mf._ftLastRefresh = true
+        elseif mf and not mf:IsShown() then
+            mf._ftLastRefresh = false
+        end
     elseif toggleBtn and toggleBtn:IsShown() then
         toggleBtn:Hide()
     end
@@ -1960,8 +2110,22 @@ local function FT_OnEvent(self, event, ...)
         end
 
     elseif event == "GET_ITEM_INFO_RECEIVED" then
-        if FTSniperMainFrame and FTSniperMainFrame:IsShown() then
-            FT_RefreshUIPanel(true)
+        if FT_CachedItemList then
+            local needFullRefresh = false
+            for _, it in ipairs(FT_CachedItemList) do
+                if not it.id and it.cleanName then
+                    local resolvedId = FT_GetItemIdByName(it.cleanName)
+                    if resolvedId then
+                        it.id = resolvedId
+                        it.key = resolvedId
+                        FT_ActiveItemsMap[resolvedId] = true
+                        needFullRefresh = true
+                    end
+                end
+            end
+            if FTSniperMainFrame and FTSniperMainFrame:IsShown() then
+                FT_RefreshUIPanel(not needFullRefresh)
+            end
         end
 
     elseif event == "PLAYER_REGEN_ENABLED" then
