@@ -320,7 +320,7 @@ def _build_price_history_chart(conn: sqlite3.Connection, realm: Optional[str] = 
         zerolinecolor="#35445a",
     )
 
-    chart_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+    chart_html = fig.to_html(full_html=False, include_plotlyjs=False)
     # Escape '</' in serialized chart data to prevent Stored XSS / script tag breakout
     chart_html = chart_html.replace("</", r"<\/").replace(r"<\/script>", "</script>").replace(r"<\/div>", "</div>")
     return chart_html
@@ -1130,6 +1130,30 @@ def build_standalone_dashboard(
         )
     options_html = "\n".join(options_parts)
 
+    # Build options for #overview-item-select
+    # Prioritize key commodities, then items with snapshots, then alphabetical
+    key_commodity_ids = (2447, 765, 2450, 2452, 2840, 2318)
+    overview_items = sorted(
+        items_market_data.values(),
+        key=lambda x: (
+            0 if x.get("item_id") in key_commodity_ids else 1,
+            0 if len(x.get("points", [])) > 0 else 1,
+            str(x.get("name_ru") or x.get("name_en") or "").lower(),
+        ),
+    )
+    ov_options_parts = []
+    for it in overview_items:
+        i_id = it["item_id"]
+        cat = it.get("category", "trade_goods")
+        n_ru = html.escape(str(it.get("name_ru") or f"Item {i_id}"))
+        n_en = html.escape(str(it.get("name_en") or f"Item {i_id}"))
+        pts_cnt = len(it.get("points", []))
+        suffix = f" ({pts_cnt})" if pts_cnt > 0 else ""
+        ov_options_parts.append(
+            f'<option value="{i_id}" data-category="{cat}" data-ru="{n_ru}" data-en="{n_en}">{n_ru}{suffix}</option>'
+        )
+    overview_options_html = "\n".join(ov_options_parts)
+
     # 8. Serialize items market data to JSON
     items_store_json = json.dumps(items_market_data, ensure_ascii=False)
     items_store_json = items_store_json.replace("</", r"<\/").replace("<", r"\u003c")
@@ -1144,6 +1168,8 @@ def build_standalone_dashboard(
     <meta http-equiv="refresh" content="30">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Forever Trade — Goblin Terminal</title>
+    <!-- Plotly.js -->
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
     <!-- Wowhead Forever Tooltips -->
     <script>const whTooltips = {{colorLinks: true, iconizeLinks: true, renameLinks: false, domain: 'forever'}};</script>
     <script src="https://wow.zamimg.com/js/tooltips.js"></script>
@@ -1850,6 +1876,24 @@ def build_standalone_dashboard(
             font-weight: 600;
         }}
 
+        .chip-btn {{
+            background: var(--ft-surface-raised, #161d28);
+            border: 1px solid var(--ft-border, #263142);
+            color: var(--ft-text-secondary, #b7c2cf);
+            padding: 3px 8px;
+            font-size: var(--ft-text-xs, 11px);
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            white-space: nowrap;
+        }}
+
+        .chip-btn:hover, .chip-btn.active {{
+            background: var(--ft-accent-soft, rgba(59, 130, 246, 0.14));
+            border-color: var(--ft-accent, #6b9dff);
+            color: var(--ft-text, #e6edf3);
+        }}
+
         .inspector-chart-container {{
             min-height: 250px;
             max-height: 270px;
@@ -2471,9 +2515,48 @@ def build_standalone_dashboard(
                         </div>
                     </div>
 
-                    <!-- Tab 6: Plotly Market Overview Chart -->
+                    <!-- Tab 6: Plotly Market Overview & Candlestick Exchange Chart -->
                     <div class="tab-pane" id="charts-section">
-                        <div id="overview-chart-container">
+                        <div class="overview-chart-panel" style="padding: 12px; background: var(--ft-surface); border: 1px solid var(--ft-border); border-radius: 6px; margin-bottom: 16px;">
+                            <div class="overview-toolbar" style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px;">
+                                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                    <label for="overview-item-select" style="font-size: var(--ft-text-sm); font-weight: 600; color: var(--ft-text-secondary);">
+                                        <span class="i18n" data-ru="Товар / Ресурс:" data-en="Commodity / Resource:">Товар / Ресурс:</span>
+                                    </label>
+                                    <select id="overview-item-select" class="terminal-select" style="min-width: 220px; background: var(--ft-surface-raised); color: var(--ft-text); border: 1px solid var(--ft-border-strong); padding: 5px 8px; border-radius: 4px; font-size: var(--ft-text-sm);" onchange="onOverviewItemChange(this.value)">
+                                        {overview_options_html}
+                                    </select>
+                                    <div class="quick-commodity-chips" style="display: flex; gap: 5px; flex-wrap: wrap;">
+                                        <button type="button" class="chip-btn" onclick="selectOverviewCommodity(2447)"><span class="i18n" data-ru="Мироцвет" data-en="Peacebloom">Мироцвет</span></button>
+                                        <button type="button" class="chip-btn" onclick="selectOverviewCommodity(765)"><span class="i18n" data-ru="Сребролист" data-en="Silverleaf">Сребролист</span></button>
+                                        <button type="button" class="chip-btn" onclick="selectOverviewCommodity(2450)"><span class="i18n" data-ru="Остротерн" data-en="Briarthorn">Остротерн</span></button>
+                                        <button type="button" class="chip-btn" onclick="selectOverviewCommodity(2452)"><span class="i18n" data-ru="Скорополох" data-en="Swiftthistle">Скорополох</span></button>
+                                        <button type="button" class="chip-btn" onclick="selectOverviewCommodity(2840)"><span class="i18n" data-ru="Медный слиток" data-en="Copper Bar">Медный слиток</span></button>
+                                        <button type="button" class="chip-btn" onclick="selectOverviewCommodity(2318)"><span class="i18n" data-ru="Тонкая кожа" data-en="Light Leather">Тонкая кожа</span></button>
+                                    </div>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <div class="chart-controls" style="margin: 0;">
+                                        <div class="chart-control-group chart-mode-group">
+                                            <button type="button" class="chart-btn active" id="ov-btn-candles" onclick="setOverviewMode('candles')"><span class="i18n" data-ru="Свечи" data-en="Candles">Свечи</span></button>
+                                            <button type="button" class="chart-btn" id="ov-btn-line" onclick="setOverviewMode('line')"><span class="i18n" data-ru="Линия" data-en="Line">Линия</span></button>
+                                        </div>
+                                        <div class="chart-control-group chart-tf-group">
+                                            <button type="button" class="chart-btn" data-ov-tf="24h" onclick="setOverviewTimeframe('24h')"><span class="i18n" data-ru="24ч" data-en="24h">24ч</span></button>
+                                            <button type="button" class="chart-btn" data-ov-tf="3d" onclick="setOverviewTimeframe('3d')"><span class="i18n" data-ru="3д" data-en="3d">3д</span></button>
+                                            <button type="button" class="chart-btn" data-ov-tf="7d" onclick="setOverviewTimeframe('7d')"><span class="i18n" data-ru="7д" data-en="7d">7д</span></button>
+                                            <button type="button" class="chart-btn active" data-ov-tf="all" onclick="setOverviewTimeframe('all')"><span class="i18n" data-ru="Все" data-en="All">Все</span></button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="overview-exchange-chart" class="plotly-graph-div" style="min-height: 480px; width: 100%; border-radius: 4px; overflow: hidden;"></div>
+                        </div>
+
+                        <div id="overview-chart-container" style="background: var(--ft-surface); border: 1px solid var(--ft-border); border-radius: 6px; padding: 12px;">
+                            <div style="font-size: var(--ft-text-sm); font-weight: 600; color: var(--ft-text-secondary); margin-bottom: 8px;">
+                                <span class="i18n" data-ru="Сводный тренд ключевых ресурсов рынка" data-en="Aggregated Key Market Commodities Trend">Сводный тренд ключевых ресурсов рынка</span>
+                            </div>
                             {chart_html}
                         </div>
                     </div>
@@ -2745,8 +2828,20 @@ def build_standalone_dashboard(
                 }});
             }}
 
+            var ovSelect = document.getElementById('overview-item-select');
+            if (ovSelect) {{
+                Array.from(ovSelect.options).forEach(function(opt) {{
+                    var val = opt.getAttribute('data-' + lang);
+                    if (val) opt.textContent = val;
+                }});
+            }}
+
             if (currentSelectedItemId && ITEM_STORE[currentSelectedItemId]) {{
                 selectInspectorItem(currentSelectedItemId);
+            }}
+
+            if (currentOverviewItemId && typeof renderOverviewCandleChart === 'function') {{
+                renderOverviewCandleChart(currentOverviewItemId);
             }}
         }}
 
@@ -2942,6 +3037,30 @@ def build_standalone_dashboard(
 
             if (currentSelectedItemId) {{
                 selectInspectorItem(currentSelectedItemId);
+            }}
+
+            if (tabId === 'charts-section' && typeof renderOverviewCandleChart === 'function') {{
+                renderOverviewCandleChart();
+            }}
+
+            if (window.Plotly) {{
+                requestAnimationFrame(function() {{
+                    var activePane = document.getElementById(tabId);
+                    if (activePane) {{
+                        var chartDivs = activePane.querySelectorAll('.plotly-graph-div, .js-plotly-plot');
+                        chartDivs.forEach(function(el) {{
+                            try {{
+                                Plotly.Plots.resize(el);
+                            }} catch(e) {{}}
+                        }});
+                    }}
+                    var inspectorDiv = document.getElementById('inspector-chart');
+                    if (inspectorDiv) {{
+                        try {{
+                            Plotly.Plots.resize(inspectorDiv);
+                        }} catch(e) {{}}
+                    }}
+                }});
             }}
         }}
 
@@ -3167,6 +3286,15 @@ def build_standalone_dashboard(
         function updateInspectorChart(item, activeName) {{
             var plotContainer = document.getElementById('inspector-chart');
             if (!plotContainer) return;
+            plotContainer.style.minHeight = '250px';
+
+            if (!window.Plotly) {{
+                setTimeout(function() {{
+                    updateInspectorChart(item, activeName);
+                }}, 100);
+                return;
+            }}
+
             var lang = getStoredLang();
 
             var rawPoints = item && item.points ? item.points : [];
@@ -3253,7 +3381,7 @@ def build_standalone_dashboard(
                 buckets[bKey].push(pt[1]);
             }}
 
-            var isCandles = (currentChartMode === 'candles' && bucketKeys.length >= 2);
+            var isCandles = (currentChartMode === 'candles' && bucketKeys.length >= 1);
             var traces = [];
             var maxVol = 1;
 
@@ -3423,15 +3551,365 @@ def build_standalone_dashboard(
                 }}
             }};
 
-            if (window.Plotly) {{
-                Plotly.react(plotContainer, traces, layout, {{ responsive: true, displayModeBar: false }});
-            }} else {{
-                setTimeout(function() {{
-                    if (window.Plotly) {{
-                        Plotly.react(plotContainer, traces, layout, {{ responsive: true, displayModeBar: false }});
-                    }}
-                }}, 300);
+            Plotly.react(plotContainer, traces, layout, {{ responsive: true, displayModeBar: false }});
+        }}
+
+        var currentOverviewItemId = null;
+        var currentOverviewMode = 'candles';
+        var currentOverviewTimeframe = 'all';
+
+        function selectOverviewCommodity(itemId) {{
+            var sel = document.getElementById('overview-item-select');
+            if (sel) {{
+                sel.value = String(itemId);
             }}
+            renderOverviewCandleChart(itemId);
+        }}
+
+        function onOverviewItemChange(val) {{
+            renderOverviewCandleChart(val);
+        }}
+
+        function setOverviewMode(mode) {{
+            currentOverviewMode = mode;
+            var cBtn = document.getElementById('ov-btn-candles');
+            var lBtn = document.getElementById('ov-btn-line');
+            if (cBtn) cBtn.classList.toggle('active', mode === 'candles');
+            if (lBtn) lBtn.classList.toggle('active', mode === 'line');
+            renderOverviewCandleChart(currentOverviewItemId);
+        }}
+
+        function setOverviewTimeframe(tf) {{
+            currentOverviewTimeframe = tf;
+            document.querySelectorAll('[data-ov-tf]').forEach(function(b) {{
+                b.classList.toggle('active', b.getAttribute('data-ov-tf') === tf);
+            }});
+            renderOverviewCandleChart(currentOverviewItemId);
+        }}
+
+        function renderOverviewCandleChart(itemId) {{
+            var plotContainer = document.getElementById('overview-exchange-chart');
+            if (!plotContainer) return;
+            plotContainer.style.minHeight = '480px';
+
+            if (!window.Plotly) {{
+                setTimeout(function() {{
+                    renderOverviewCandleChart(itemId);
+                }}, 100);
+                return;
+            }}
+
+            if (!itemId) {{
+                if (currentOverviewItemId) {{
+                    itemId = currentOverviewItemId;
+                }} else {{
+                    var sel = document.getElementById('overview-item-select');
+                    if (sel && sel.value) {{
+                        itemId = sel.value;
+                    }} else {{
+                        var defaults = [2447, 765, 2450, 2452, 2840, 2318];
+                        for (var d = 0; d < defaults.length; d++) {{
+                            if (ITEM_STORE[defaults[d]] && ITEM_STORE[defaults[d]].points && ITEM_STORE[defaults[d]].points.length > 0) {{
+                                itemId = defaults[d];
+                                break;
+                            }}
+                        }}
+                        if (!itemId) {{
+                            for (var k in ITEM_STORE) {{
+                                if (ITEM_STORE[k] && ITEM_STORE[k].points && ITEM_STORE[k].points.length > 0) {{
+                                    itemId = k;
+                                    break;
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+
+            itemId = parseInt(itemId, 10);
+            if (!itemId) return;
+            currentOverviewItemId = itemId;
+            var sel = document.getElementById('overview-item-select');
+            if (sel && sel.value !== String(itemId)) {{
+                sel.value = String(itemId);
+            }}
+
+            var item = ITEM_STORE[itemId];
+            var lang = getStoredLang();
+            var activeName = (item ? (lang === 'en' ? item.name_en : item.name_ru) || item.name_ru || item.name_en : null) || ('Item ' + itemId);
+
+            var rawPoints = item && item.points ? item.points : [];
+            var validPoints = [];
+            for (var i = 0; i < rawPoints.length; i++) {{
+                var pt = rawPoints[i];
+                if (Array.isArray(pt) && pt.length >= 2 && typeof pt[0] === 'number' && typeof pt[1] === 'number') {{
+                    validPoints.push([pt[0], pt[1]]);
+                }}
+            }}
+
+            if (validPoints.length === 0) {{
+                var emptyMsg = lang === 'en'
+                    ? 'Waiting for first price snapshot from Auctionator.lua for ' + activeName + '...'
+                    : 'База данных ожидает первого снимка цен из Auctionator.lua для ' + activeName + '...';
+                plotContainer.innerHTML = '<div class="empty-state i18n" style="padding: 60px 20px; text-align: center; color: var(--ft-text-muted);">' + emptyMsg + '</div>';
+                return;
+            }}
+
+            var newestTs = validPoints[0][0];
+            for (var i = 1; i < validPoints.length; i++) {{
+                if (validPoints[i][0] > newestTs) {{
+                    newestTs = validPoints[i][0];
+                }}
+            }}
+
+            var cutoffTs = 0;
+            if (currentOverviewTimeframe === '24h') {{
+                cutoffTs = newestTs - 86400;
+            }} else if (currentOverviewTimeframe === '3d') {{
+                cutoffTs = newestTs - 259200;
+            }} else if (currentOverviewTimeframe === '7d') {{
+                cutoffTs = newestTs - 604800;
+            }}
+
+            var filteredPoints = [];
+            for (var i = 0; i < validPoints.length; i++) {{
+                if (validPoints[i][0] >= cutoffTs) {{
+                    filteredPoints.push(validPoints[i]);
+                }}
+            }}
+            if (filteredPoints.length === 0) {{
+                filteredPoints = validPoints;
+            }}
+
+            filteredPoints.sort(function(a, b) {{
+                return a[0] - b[0];
+            }});
+
+            var minTs = filteredPoints[0][0];
+            var maxTs = filteredPoints[filteredPoints.length - 1][0];
+            var span = maxTs - minTs;
+
+            var bucketSec = 3600;
+            if (currentOverviewTimeframe === '24h') {{
+                bucketSec = 3600;
+            }} else if (currentOverviewTimeframe === '3d') {{
+                bucketSec = 7200;
+            }} else if (currentOverviewTimeframe === '7d') {{
+                bucketSec = 21600;
+            }} else {{
+                if (span <= 86400) {{
+                    bucketSec = 3600;
+                }} else if (span <= 3 * 86400) {{
+                    bucketSec = 7200;
+                }} else if (span <= 14 * 86400) {{
+                    bucketSec = 21600;
+                }} else {{
+                    bucketSec = 86400;
+                }}
+            }}
+
+            var buckets = {{}};
+            var bucketKeys = [];
+            for (var i = 0; i < filteredPoints.length; i++) {{
+                var pt = filteredPoints[i];
+                var bKey = Math.floor(pt[0] / bucketSec) * bucketSec;
+                if (!buckets[bKey]) {{
+                    buckets[bKey] = [];
+                    bucketKeys.push(bKey);
+                }}
+                buckets[bKey].push(pt[1]);
+            }}
+
+            var isCandles = (currentOverviewMode === 'candles' && bucketKeys.length >= 1);
+            var traces = [];
+            var maxVol = 1;
+
+            if (isCandles) {{
+                var candleX = [];
+                var candleOpen = [];
+                var candleHigh = [];
+                var candleLow = [];
+                var candleClose = [];
+                var candleVol = [];
+                var candleHover = [];
+                var closePrices = [];
+
+                for (var k = 0; k < bucketKeys.length; k++) {{
+                    var bKey = bucketKeys[k];
+                    var prices = buckets[bKey];
+                    var o = prices[0];
+                    var c = prices[prices.length - 1];
+                    var h = prices[0];
+                    var l = prices[0];
+                    for (var pi = 1; pi < prices.length; pi++) {{
+                        if (prices[pi] > h) h = prices[pi];
+                        if (prices[pi] < l) l = prices[pi];
+                    }}
+                    var vol = prices.length;
+                    if (vol > maxVol) maxVol = vol;
+
+                    var dt = new Date(bKey * 1000);
+                    var dtStr = dt.toISOString().slice(0, 16).replace('T', ' ');
+
+                    candleX.push(dtStr);
+                    candleOpen.push(o);
+                    candleHigh.push(h);
+                    candleLow.push(l);
+                    candleClose.push(c);
+                    candleVol.push(vol);
+                    closePrices.push(c);
+
+                    var hText = '<b>' + activeName + '</b><br>' +
+                        (lang === 'en' ? 'Open: ' : 'Открытие: ') + formatCurrencyText(o) + '<br>' +
+                        (lang === 'en' ? 'High: ' : 'Макс: ') + formatCurrencyText(h) + '<br>' +
+                        (lang === 'en' ? 'Low: ' : 'Мин: ') + formatCurrencyText(l) + '<br>' +
+                        (lang === 'en' ? 'Close: ' : 'Закрытие: ') + formatCurrencyText(c) + '<br>' +
+                        (lang === 'en' ? 'Volume / Lots: ' : 'Объем / Лотов: ') + vol;
+                    candleHover.push(hText);
+                }}
+
+                traces.push({{
+                    x: candleX,
+                    y: candleVol,
+                    type: 'bar',
+                    yaxis: 'y2',
+                    name: (lang === 'en' ? 'Volume' : 'Объем'),
+                    marker: {{ color: 'rgba(107, 157, 255, 0.22)' }},
+                    hoverinfo: 'x+y',
+                    showlegend: false
+                }});
+
+                traces.push({{
+                    x: candleX,
+                    open: candleOpen,
+                    high: candleHigh,
+                    low: candleLow,
+                    close: candleClose,
+                    type: 'candlestick',
+                    name: activeName,
+                    increasing: {{ line: {{ color: '#3fb950', width: 1.5 }}, fillcolor: '#3fb950' }},
+                    decreasing: {{ line: {{ color: '#f85149', width: 1.5 }}, fillcolor: '#f85149' }},
+                    hovertext: candleHover,
+                    hoverinfo: 'text+x'
+                }});
+
+                if (closePrices.length >= 3) {{
+                    var maPeriod = Math.min(5, closePrices.length);
+                    var maX = [];
+                    var maY = [];
+                    for (var mi = 0; mi < closePrices.length; mi++) {{
+                        var startIdx = Math.max(0, mi - maPeriod + 1);
+                        var sum = 0;
+                        var count = 0;
+                        for (var si = startIdx; si <= mi; si++) {{
+                            sum += closePrices[si];
+                            count++;
+                        }}
+                        maX.push(candleX[mi]);
+                        maY.push(Math.round(sum / count));
+                    }}
+                    traces.push({{
+                        x: maX,
+                        y: maY,
+                        mode: 'lines',
+                        name: 'SMA(' + maPeriod + ')',
+                        line: {{ color: '#e3b341', width: 1.8, dash: 'dot' }},
+                        hoverinfo: 'name+y'
+                    }});
+                }}
+            }} else {{
+                var lineX = [];
+                var lineY = [];
+                var lineHover = [];
+                var lineVolMap = {{}};
+
+                for (var i = 0; i < filteredPoints.length; i++) {{
+                    var pt = filteredPoints[i];
+                    var dt = new Date(pt[0] * 1000);
+                    var dtStr = dt.toISOString().slice(0, 16).replace('T', ' ');
+                    lineX.push(dtStr);
+                    lineY.push(pt[1]);
+                    lineHover.push('<b>' + activeName + '</b><br>' + formatCurrencyText(pt[1]));
+                    lineVolMap[dtStr] = (lineVolMap[dtStr] || 0) + 1;
+                }}
+
+                var lineVol = [];
+                for (var i = 0; i < lineX.length; i++) {{
+                    var v = lineVolMap[lineX[i]] || 1;
+                    lineVol.push(v);
+                    if (v > maxVol) maxVol = v;
+                }}
+
+                traces.push({{
+                    x: lineX,
+                    y: lineVol,
+                    type: 'bar',
+                    yaxis: 'y2',
+                    name: (lang === 'en' ? 'Volume' : 'Объем'),
+                    marker: {{ color: 'rgba(107, 157, 255, 0.22)' }},
+                    hoverinfo: 'x+y',
+                    showlegend: false
+                }});
+
+                traces.push({{
+                    x: lineX,
+                    y: lineY,
+                    mode: 'lines+markers',
+                    name: activeName,
+                    line: {{ color: '#6b9dff', width: 2.2 }},
+                    marker: {{ size: 5 }},
+                    hovertext: lineHover,
+                    hoverinfo: 'text+x'
+                }});
+            }}
+
+            if (item && item.mean_price && filteredPoints.length > 1) {{
+                var firstX = isCandles ? candleX[0] : lineX[0];
+                var lastX = isCandles ? candleX[candleX.length - 1] : lineX[lineX.length - 1];
+                traces.push({{
+                    x: [firstX, lastX],
+                    y: [item.mean_price, item.mean_price],
+                    mode: 'lines',
+                    name: (lang === 'en' ? 'Mean Price: ' : 'Средняя цена: ') + formatCurrencyText(item.mean_price),
+                    line: {{ color: '#d29922', width: 1.5, dash: 'dash' }},
+                    hoverinfo: 'name'
+                }});
+            }}
+
+            var layout = {{
+                template: 'plotly_dark',
+                paper_bgcolor: '#11161f',
+                plot_bgcolor: '#11161f',
+                font: {{ color: '#8b98a9', family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", size: 11 }},
+                title: {{
+                    text: activeName + ' — ' + (isCandles ? (lang === 'en' ? 'Japanese Candlesticks (OHLC)' : 'Свечной график (OHLC)') : (lang === 'en' ? 'Price Dynamics' : 'Динамика цен')),
+                    font: {{ size: 15, color: '#6b9dff' }}
+                }},
+                margin: {{ l: 55, r: 25, t: 45, b: 35 }},
+                height: 480,
+                showlegend: true,
+                legend: {{ orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1, font: {{ size: 10 }} }},
+                xaxis: {{
+                    gridcolor: '#263142',
+                    zerolinecolor: '#35445a',
+                    rangeslider: {{ visible: false }}
+                }},
+                yaxis: {{
+                    title: lang === 'en' ? 'Price (copper)' : 'Цена (медь)',
+                    gridcolor: '#263142',
+                    zerolinecolor: '#35445a'
+                }},
+                yaxis2: {{
+                    overlaying: 'y',
+                    side: 'right',
+                    showgrid: false,
+                    zeroline: false,
+                    showticklabels: false,
+                    range: [0, (maxVol || 1) * 4]
+                }}
+            }};
+
+            Plotly.react(plotContainer, traces, layout, {{ responsive: true, displayModeBar: true }});
         }}
 
         function onItemSearch(query) {{
@@ -3504,6 +3982,11 @@ def build_standalone_dashboard(
                 var savedTab = localStorage.getItem('ft_active_tab');
                 if (savedTab && document.getElementById(savedTab)) {{
                     switchTab(savedTab);
+                }} else {{
+                    switchTab('price-anomalies');
+                }}
+                if (typeof renderOverviewCandleChart === 'function') {{
+                    renderOverviewCandleChart();
                 }}
                 var savedSearch = localStorage.getItem('ft_search');
                 if (savedSearch) {{

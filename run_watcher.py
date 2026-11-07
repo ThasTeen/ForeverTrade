@@ -211,6 +211,32 @@ def main(argv=None):
         if discovered_realms and discovered_realms[0] != args.realm:
             args.realm = discovered_realms[0]
 
+        # Auto-detect realm from price_snapshots if args.realm has 0 rows
+        cursor = conn.cursor()
+        cursor.execute("SELECT count(*) FROM price_snapshots WHERE realm = ?", (args.realm,))
+        realm_count = cursor.fetchone()[0]
+        if realm_count == 0:
+            alt_realm = args.realm.replace("_", " ") if "_" in args.realm else args.realm.replace(" ", "_")
+            cursor.execute("SELECT count(*) FROM price_snapshots WHERE realm = ?", (alt_realm,))
+            alt_count = cursor.fetchone()[0]
+            if alt_count > 0:
+                print(f"[*] Switching realm from '{args.realm}' to matching '{alt_realm}' ({alt_count} snapshots).")
+                args.realm = alt_realm
+            else:
+                cursor.execute(
+                    "SELECT realm, count(*) as cnt FROM price_snapshots GROUP BY realm ORDER BY cnt DESC LIMIT 1"
+                )
+                top_realm_row = cursor.fetchone()
+                if top_realm_row and top_realm_row[1] > 0:
+                    top_realm, top_cnt = top_realm_row[0], top_realm_row[1]
+                    warning_msg = (
+                        f"Realm '{args.realm}' has 0 snapshots in database. "
+                        f"Auto-detected realm '{top_realm}' with {top_cnt} snapshots."
+                    )
+                    print(f"[!] Warning: {warning_msg}")
+                    logger.warning(warning_msg)
+                    args.realm = top_realm
+
         print("[*] Generating baseline AI market advice...")
         arb = get_vendor_arbitrage(conn, realm=args.realm, max_age_hours=args.max_age_hours)
         craft = get_crafting_margins(
