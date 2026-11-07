@@ -25,6 +25,26 @@ FT_CustomMinProfit = nil
 FT_CustomTargets = FT_CustomTargets or {}
 FT_SniperSettings = FT_SniperSettings or { mode = "LIST", minProfit = 5000, selectedList = 1 }
 
+-- Native registration with Auctionator tab container if present
+local function FT_RegisterWithAuctionator()
+    if not (Auctionator and Auctionator.Tabs and Auctionator.Tabs.Register) then return false end
+    if Auctionator.Tabs.State and Auctionator.Tabs.State.knownTabs then
+        for _, t in ipairs(Auctionator.Tabs.State.knownTabs) do
+            if t.name == "Snipe" then return true end
+        end
+    end
+    Auctionator.Tabs.Register({
+        name = "Snipe",
+        textLabel = "Snipe",
+        tabTemplate = "AuctionatorTabFrameTemplate",
+        tabHeader = "Auctionator - Snipe",
+        tabFrameName = "FTSniperMainFrame",
+        tabOrder = 10,
+    })
+    return true
+end
+pcall(FT_RegisterWithAuctionator)
+
 function FT_HasCustomSelection()
     if not FT_CustomTargets then return false end
     for _, cfg in pairs(FT_CustomTargets) do
@@ -937,24 +957,27 @@ FT_RefreshUIPanel = function(lightOnly)
 end
 
 local function FT_CreateMainUI()
-    if FTSniperMainFrame then return FTSniperMainFrame end
+    if FTSniperMainFrame and FTSniperMainFrame.rows then return FTSniperMainFrame end
 
-    local frame = CreateFrame("Frame", "FTSniperMainFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-    frame:SetSize(770, 420)
-    frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    frame:SetFrameStrata("HIGH")
-    frame:SetClampedToScreen(true)
-    frame:EnableMouse(true)
-    frame:SetMovable(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", function(self)
-        if self:GetParent() == UIParent then
-            self:StartMoving()
-        end
-    end)
-    frame:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-    end)
+    local frame = _G["FTSniperMainFrame"]
+    if not frame then
+        frame = CreateFrame("Frame", "FTSniperMainFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+        frame:SetSize(770, 420)
+        frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        frame:SetFrameStrata("HIGH")
+        frame:SetClampedToScreen(true)
+        frame:EnableMouse(true)
+        frame:SetMovable(true)
+        frame:RegisterForDrag("LeftButton")
+        frame:SetScript("OnDragStart", function(self)
+            if self:GetParent() == UIParent then
+                self:StartMoving()
+            end
+        end)
+        frame:SetScript("OnDragStop", function(self)
+            self:StopMovingOrSizing()
+        end)
+    end
 
     if frame.SetBackdrop then
         frame:SetBackdrop({
@@ -1409,6 +1432,12 @@ function FT_SelectSniperTab(tabIndex)
     tabIndex = tabIndex or FTSniperAuctionTabIndex
     if not AuctionFrame then return end
 
+    local atrTab = _G["AuctionatorTabs_Snipe"]
+    if atrTab and atrTab.Click then
+        atrTab:Click()
+        return
+    end
+
     if tabIndex and PanelTemplates_SetTab then
         PanelTemplates_SetTab(AuctionFrame, tabIndex)
     end
@@ -1420,8 +1449,9 @@ function FT_SelectSniperTab(tabIndex)
     if AuctionatorShoppingFrame then AuctionatorShoppingFrame:Hide() end
     if AuctionatorSellingFrame then AuctionatorSellingFrame:Hide() end
     if AuctionatorCancellingFrame then AuctionatorCancellingFrame:Hide() end
+    if AuctionatorConfigFrame then AuctionatorConfigFrame:Hide() end
 
-    if not FTSniperMainFrame then
+    if not FTSniperMainFrame or not FTSniperMainFrame.rows then
         FT_CreateMainUI()
     end
 
@@ -1458,12 +1488,63 @@ end
 
 local function FT_RegisterAuctionTab()
     if not AuctionFrame then return end
-    if FTSniperAuctionTabIndex then return end
+
+    -- 1. Check if Auctionator already created our tab via Auctionator.Tabs.Register
+    local atrTab = _G["AuctionatorTabs_Snipe"]
+    if atrTab then
+        FTSniperAuctionTab = atrTab
+        FTSniperAuctionTabIndex = atrTab:GetID()
+        if not atrTab._ftHooked then
+            atrTab._ftHooked = true
+            atrTab:HookScript("OnClick", function()
+                if not FTSniperMainFrame or not FTSniperMainFrame.rows then
+                    FT_CreateMainUI()
+                end
+                FT_RefreshUIPanel()
+            end)
+        end
+        return
+    end
+
+    -- 2. If Auctionator is present with tabs container, dynamically insert tab into Auctionator
+    if AuctionatorAHTabsContainer and AuctionatorAHTabsContainer.Tabs and AuctionatorTabMixin then
+        local tabIndex = AuctionFrame.numTabs + 1
+        local tabName = "AuctionFrameTab" .. tabIndex
+        local tab = CreateFrame("Button", tabName, AuctionFrame, "AuctionatorTabButtonTemplate")
+        if tab then
+            _G["AuctionatorTabs_Snipe"] = tab
+            tab:SetText("Snipe")
+            tab:Initialize("Snipe", "AuctionatorTabFrameTemplate", "Auctionator - Snipe", {"FTSniperMainFrame"})
+            table.insert(AuctionatorAHTabsContainer.Tabs, tab)
+            if PanelTemplates_TabResize then
+                PanelTemplates_TabResize(tab, 0, nil, 36)
+            end
+            FTSniperAuctionTab = tab
+            FTSniperAuctionTabIndex = tab:GetID()
+            tab:HookScript("OnClick", function()
+                if not FTSniperMainFrame or not FTSniperMainFrame.rows then
+                    FT_CreateMainUI()
+                end
+                FT_RefreshUIPanel()
+            end)
+            tab:Show()
+            return
+        end
+    end
+
+    -- 3. Standalone fallback (when Auctionator is not present, or manual tab)
+    if FTSniperAuctionTab and FTSniperAuctionTab:IsShown() then return end
     if type(AuctionFrame.numTabs) ~= "number" then return end
+
+    -- If Auctionator is present, wait until Auctionator finishes populating its tabs (at least tab 7)
+    if Auctionator and AuctionFrame.numTabs < 7 then
+        return
+    end
 
     local tabIndex = AuctionFrame.numTabs + 1
     local tabName = "AuctionFrameTab" .. tabIndex
-    local tab = CreateFrame("Button", tabName, AuctionFrame, "CharacterFrameTabButtonTemplate")
+    -- Use AuctionTabTemplate (Blizzard Classic Era Auction House tab template)
+    local tab = CreateFrame("Button", tabName, AuctionFrame, "AuctionTabTemplate")
     if not tab then return end
 
     tab:SetID(tabIndex)
@@ -1489,6 +1570,7 @@ local function FT_RegisterAuctionTab()
         FT_SelectSniperTab(tabIndex)
     end)
 
+    tab:Show()
     FTSniperAuctionTab = tab
     FTSniperAuctionTabIndex = tabIndex
 
@@ -1506,7 +1588,7 @@ local function FT_RegisterAuctionTab()
 
     if type(AuctionFrameTab_OnClick) == "function" and not AuctionFrameTab_OnClick._ftHooked then
         hooksecurefunc("AuctionFrameTab_OnClick", function(self, button)
-            if self:GetID() ~= FTSniperAuctionTabIndex then
+            if self:GetID() ~= FTSniperAuctionTabIndex and self ~= _G["AuctionatorTabs_Snipe"] then
                 if FTSniperMainFrame and FTSniperMainFrame:IsShown() and FTSniperMainFrame:GetParent() == AuctionFrame then
                     FTSniperMainFrame:Hide()
                 end
@@ -1736,7 +1818,7 @@ frame:SetScript("OnUpdate", function(self, elapsed)
         elseif not toggleBtn:IsShown() then
             toggleBtn:Show()
         end
-        if not FTSniperAuctionTabIndex then
+        if not FTSniperAuctionTabIndex or not FTSniperAuctionTab or not FTSniperAuctionTab:IsShown() then
             FT_RegisterAuctionTab()
         end
     elseif toggleBtn and toggleBtn:IsShown() then
@@ -1823,7 +1905,11 @@ local function FT_OnEvent(self, event, ...)
             if FT_SniperSettings.selectedList == nil then FT_SniperSettings.selectedList = 1 end
             if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
         end
+        if arg1 == "Auctionator" then
+            pcall(FT_RegisterWithAuctionator)
+        end
         if arg1 == "Blizzard_AuctionHouseUI" or arg1 == "Blizzard_AuctionUI" or arg1 == "Auctionator" or arg1 == ADDON_NAME then
+            pcall(FT_RegisterWithAuctionator)
             FT_HookAuctionFrame()
             local ah = FT_GetAuctionFrame()
             if ah and ah:IsShown() then
@@ -1834,12 +1920,21 @@ local function FT_OnEvent(self, event, ...)
         end
 
     elseif event == "AUCTION_HOUSE_SHOW" then
+        pcall(FT_RegisterWithAuctionator)
         FT_HookAuctionFrame()
         FT_RegisterAuctionTab()
         FT_CreateToggleButton()
         FT_SetEnabled(false) -- Default OFF: never interferes with manual buying/selling
         FT_DisarmSniperBuy()
         if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.1, function()
+                FT_RegisterAuctionTab()
+            end)
+            C_Timer.After(0.5, function()
+                FT_RegisterAuctionTab()
+            end)
+        end
 
     elseif event == "AUCTION_HOUSE_CLOSED" then
         FT_SetEnabled(false)
