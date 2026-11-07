@@ -3,10 +3,13 @@
 import atexit
 import datetime
 import json
+import logging
 import os
 import sqlite3
 import time
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Known item names localization mapping: item_id -> {"en": ..., "ru": ...}
 ITEM_LOCALIZATION: dict[int, dict[str, str]] = {
@@ -179,6 +182,36 @@ ITEM_LOCALIZATION: dict[int, dict[str, str]] = {
     10938: {"en": "Lesser Magic Essence", "ru": "Простая магическая субстанция"},
     10939: {"en": "Greater Magic Essence", "ru": "Великая магическая субстанция"},
 }
+
+def _load_herbalism_alchemy_localization():
+    """Preload herbalism, reagents, and alchemy potions into ITEM_LOCALIZATION."""
+    cand_paths = [
+        "data/herbalism_alchemy_era.json",
+        os.path.join(os.path.dirname(__file__), "..", "data", "herbalism_alchemy_era.json"),
+    ]
+    for p in cand_paths:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for section in ("herbs", "reagents", "recipes", "crafted_items"):
+                    for it in data.get(section, []):
+                        i_id = it.get("item_id") or it.get("crafted_item_id")
+                        if i_id is not None:
+                            i_id = int(i_id)
+                            name_ru = it.get("name_ru")
+                            name_en = it.get("name_en") or it.get("name")
+                            if i_id not in ITEM_LOCALIZATION:
+                                ITEM_LOCALIZATION[i_id] = {}
+                            if name_ru:
+                                ITEM_LOCALIZATION[i_id]["ru"] = name_ru
+                            if name_en:
+                                ITEM_LOCALIZATION[i_id]["en"] = name_en
+                break
+            except Exception as e:
+                logger.warning("Error loading herbalism_alchemy_era.json: %s", e)
+
+_load_herbalism_alchemy_localization()
 
 _DEFAULT_LOCALIZATION = ITEM_LOCALIZATION
 
@@ -355,6 +388,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE items ADD COLUMN vendor_buy_copper INTEGER DEFAULT 0;")
         except Exception:
             pass
+        for col, col_type in [
+            ("min_skill", "INTEGER DEFAULT 1"),
+            ("source", "TEXT DEFAULT 'trainer'"),
+            ("source_details_ru", "TEXT"),
+            ("source_details_en", "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE recipes ADD COLUMN {col} {col_type};")
+            except Exception:
+                pass
 
 
 def init_db(db_path: str = "market.db", load_data: bool = False) -> sqlite3.Connection:
@@ -1024,6 +1067,67 @@ def load_recipes(conn: sqlite3.Connection, recipes_path: str = "data/recipes_era
         }
     ]
 
+    # Load alchemy data from data/herbalism_alchemy_era.json
+    alchemy_path = "data/herbalism_alchemy_era.json"
+    if not os.path.exists(alchemy_path):
+        cand = os.path.join(os.path.dirname(__file__), "..", "data", "herbalism_alchemy_era.json")
+        if os.path.exists(cand):
+            alchemy_path = cand
+
+    if os.path.exists(alchemy_path):
+        try:
+            with open(alchemy_path, "r", encoding="utf-8") as f:
+                alc_data = json.load(f)
+
+            alc_items = []
+            for h in alc_data.get("herbs", []):
+                alc_items.append((int(h["item_id"]), h.get("name_en", f"Item {h['item_id']}"), h.get("name_ru"), int(h.get("quality", 1)), 0, 0, "herb"))
+            for rg in alc_data.get("reagents", []):
+                alc_items.append((int(rg["item_id"]), rg.get("name_en", f"Item {rg['item_id']}"), rg.get("name_ru"), int(rg.get("quality", 1)), int(rg.get("vendor_sell_copper", 0)), int(rg.get("vendor_buy_copper", 0)), "reagent"))
+            for ci in alc_data.get("crafted_items", []):
+                alc_items.append((int(ci["item_id"]), ci.get("name_en", f"Item {ci['item_id']}"), ci.get("name_ru"), int(ci.get("quality", 1)), int(ci.get("vendor_sell_copper", 0)), int(ci.get("vendor_buy_copper", 0)), "potion"))
+
+            with conn:
+                conn.executemany("""
+                    INSERT INTO items (item_id, name, name_ru, quality, vendor_sell_price, vendor_buy_price, category)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(item_id) DO UPDATE SET
+                        name = COALESCE(excluded.name, items.name),
+                        name_ru = COALESCE(excluded.name_ru, items.name_ru),
+                        category = COALESCE(items.category, excluded.category),
+                        vendor_sell_price = CASE WHEN items.vendor_sell_price > 0 THEN items.vendor_sell_price ELSE excluded.vendor_sell_price END,
+                        vendor_buy_price = CASE WHEN items.vendor_buy_price > 0 THEN items.vendor_buy_price ELSE excluded.vendor_buy_price END
+                """, alc_items)
+
+            existing_r_ids = {int(r["recipe_id"]) for r in recipes_data}
+            for rec in alc_data.get("recipes", []):
+                rec_id = int(rec["recipe_id"])
+                rec_entry = {
+                    "recipe_id": rec_id,
+                    "name": rec.get("name_en") or rec.get("name") or f"Recipe {rec_id}",
+                    "name_ru": rec.get("name_ru"),
+                    "profession": "Alchemy",
+                    "crafted_item_id": int(rec["crafted_item_id"]),
+                    "yield": float(rec.get("yield", 1.0)),
+                    "yield_min": 1,
+                    "yield_max": 1,
+                    "min_skill": int(rec.get("min_skill", 1)),
+                    "source": str(rec.get("source", "trainer")),
+                    "source_details_ru": rec.get("source_details_ru"),
+                    "source_details_en": rec.get("source_details_en"),
+                    "reagents": rec.get("reagents", []),
+                }
+                if rec_id not in existing_r_ids:
+                    recipes_data.append(rec_entry)
+                    existing_r_ids.add(rec_id)
+                else:
+                    for idx, ex in enumerate(recipes_data):
+                        if int(ex["recipe_id"]) == rec_id:
+                            recipes_data[idx].update(rec_entry)
+                            break
+        except Exception as e:
+            logger.warning("Could not load alchemy data from %s: %s", alchemy_path, e)
+
     # Foreign key safety: ensure crafted_item_id and reagent_item_id exist in items table
     items_to_ensure = []
     for r in recipes_data:
@@ -1062,18 +1166,27 @@ def load_recipes(conn: sqlite3.Connection, recipes_path: str = "data/recipes_era
             yield_val = float(r.get("yield", 1.0))
             yield_min = int(r.get("yield_min", max(1, int(yield_val))))
             yield_max = int(r.get("yield_max", max(yield_min, int(yield_val))))
+            min_skill = int(r.get("min_skill", 1))
+            source = str(r.get("source", "trainer"))
+            source_details_ru = r.get("source_details_ru")
+            source_details_en = r.get("source_details_en")
 
             conn.execute("""
                 INSERT INTO recipes (
-                    recipe_id, name, profession, crafted_item_id, yield, yield_min, yield_max
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    recipe_id, name, profession, crafted_item_id, yield, yield_min, yield_max,
+                    min_skill, source, source_details_ru, source_details_en
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(recipe_id) DO UPDATE SET
                     name = excluded.name,
                     profession = excluded.profession,
                     crafted_item_id = excluded.crafted_item_id,
                     yield = excluded.yield,
                     yield_min = excluded.yield_min,
-                    yield_max = excluded.yield_max
+                    yield_max = excluded.yield_max,
+                    min_skill = excluded.min_skill,
+                    source = excluded.source,
+                    source_details_ru = excluded.source_details_ru,
+                    source_details_en = excluded.source_details_en
             """, (
                 recipe_id,
                 name,
@@ -1081,7 +1194,11 @@ def load_recipes(conn: sqlite3.Connection, recipes_path: str = "data/recipes_era
                 crafted_item_id,
                 yield_val,
                 yield_min,
-                yield_max
+                yield_max,
+                min_skill,
+                source,
+                source_details_ru,
+                source_details_en
             ))
 
             conn.execute("DELETE FROM recipe_reagents WHERE recipe_id = ?", (recipe_id,))

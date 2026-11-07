@@ -645,7 +645,7 @@ def test_r45_localization_mappings(populated_db):
     """Verify R45: en and ru localization for items 2450, 2452, 2313, 2316."""
     expected_l10n = {
         2450: ("Briarthorn", "Остротерн"),
-        2452: ("Swiftthistle", "Свистоцвет"),
+        2452: ("Swiftthistle", "Скорополох"),
         2313: ("Medium Armor Kit", "Накладки из средней кожи"),
         2316: ("Toughened Leather Gloves", "Плотные кожаные перчатки"),
     }
@@ -1102,6 +1102,36 @@ def test_item_market_metrics_table_and_upsert(memory_db):
 
     # 5. Verify empty list handling
     assert upsert_item_market_metrics(memory_db, []) == 0
+
+
+def test_herbalism_alchemy_localization_preloaded():
+    """Verify _load_herbalism_alchemy_localization preloads all Era 1.15 herbs and potions into ITEM_LOCALIZATION."""
+    herbs = {
+        2447: ("Peacebloom", "Мироцвет"),
+        765: ("Silverleaf", "Сребролист"),
+        2449: ("Earthroot", "Земляной корень"),
+        785: ("Mageroyal", "Магороза"),
+        2450: ("Briarthorn", "Остротерн"),
+        2452: ("Swiftthistle", "Скорополох"),
+        3820: ("Stranglekelp", "Удавник"),
+        3355: ("Wild Steelbloom", "Дикий сталец"),
+    }
+    for item_id, (en_name, ru_name) in herbs.items():
+        assert item_id in ITEM_LOCALIZATION, f"Herb {item_id} ({en_name}) missing from ITEM_LOCALIZATION"
+        assert ITEM_LOCALIZATION[item_id]["en"] == en_name
+        assert ITEM_LOCALIZATION[item_id]["ru"] == ru_name
+
+    potions = {
+        118: ("Minor Healing Potion", "Крошечное зелье исцеления"),
+        858: ("Lesser Healing Potion", "Малое зелье исцеления"),
+        929: ("Healing Potion", "Зелье исцеления"),
+        2455: ("Minor Mana Potion", "Крошечное зелье маны"),
+    }
+    for item_id, (en_name, ru_name) in potions.items():
+        assert item_id in ITEM_LOCALIZATION, f"Potion {item_id} ({en_name}) missing from ITEM_LOCALIZATION"
+        assert ITEM_LOCALIZATION[item_id]["en"] == en_name
+        assert ITEM_LOCALIZATION[item_id]["ru"] == ru_name
+
 
 
 

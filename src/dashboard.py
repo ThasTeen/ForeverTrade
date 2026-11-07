@@ -76,6 +76,26 @@ def _localize_crate_name(crate_name: Optional[str], item_name_ru: Optional[str])
     return crate_str
 
 
+def _is_real_named_item(it: dict) -> bool:
+    """Return True if item has a real name, excluding raw fallback identifiers like 'Item 10243'."""
+    candidates = (
+        it.get("name_ru"),
+        it.get("name_en"),
+        it.get("name"),
+    )
+    for cand in candidates:
+        if not cand:
+            continue
+        c_str = str(cand).strip()
+        c_low = c_str.lower()
+        if c_low.startswith("item ") or c_low.startswith("item#"):
+            num_part = c_str[4:].strip().lstrip("#").strip()
+            if num_part.isdigit():
+                continue
+        return True
+    return False
+
+
 def format_currency(copper: Any, as_html: bool = False) -> str:
     """Format an amount of copper into WoW currency (gold, silver, copper).
 
@@ -294,6 +314,7 @@ def _build_price_history_chart(conn: sqlite3.Connection, realm: Optional[str] = 
         template="plotly_dark",
         paper_bgcolor="#11161f",
         plot_bgcolor="#11161f",
+        hoverlabel=dict(bgcolor="#1c2128", bordercolor="#30363d", font=dict(color="#e6edf3", size=12)),
         font={"color": "#8b98a9", "size": 10},
         title=dict(text="Динамика цен ключевого сырья и расходников", font=dict(size=17, color="#6b9dff")),
         colorway=["#6b9dff", "#3fb950", "#d29922", "#f85149", "#a371f7", "#56d4dd", "#f0883e", "#79c0ff"],
@@ -327,19 +348,12 @@ def _build_price_history_chart(conn: sqlite3.Connection, realm: Optional[str] = 
 
 
 def _render_ai_banner(ai_advice: Optional[Union[dict, str]]) -> str:
-    """Render top banner for AI assistant tactical advice and checklist."""
+    """Render top banner for AI assistant tactical advice and interactive AI chat."""
     if not ai_advice:
-        return """
-        <div id="ai-advisor-banner" class="ai-banner ai-empty">
-            <div class="ai-banner-header">
-                <span class="ai-badge">AI Advisor</span>
-                <h3 class="i18n" data-ru="Тактические рекомендации AI-ассистента" data-en="AI Assistant Tactical Recommendations">Тактические рекомендации AI-ассистента</h3>
-            </div>
-            <p class="ai-placeholder i18n" data-ru="Рекомендации AI-ассистента не сформированы. Запустите генерацию рекомендаций через ai_advisor." data-en="AI recommendations not generated. Run recommendation generation via ai_advisor.">Рекомендации AI-ассистента не сформированы. Запустите генерацию рекомендаций через ai_advisor.</p>
-        </div>
+        content_html = """
+        <p class="ai-placeholder i18n" data-ru="Рекомендации AI-ассистента не сформированы. Запустите генерацию рекомендаций через ai_advisor." data-en="AI recommendations not generated. Run recommendation generation via ai_advisor.">Рекомендации AI-ассистента не сформированы. Запустите генерацию рекомендаций через ai_advisor.</p>
         """
-
-    if isinstance(ai_advice, str):
+    elif isinstance(ai_advice, str):
         content_html = f"<p class='ai-text'>{html.escape(ai_advice)}</p>"
     else:
         summary = ai_advice.get("summary") or ai_advice.get("verdict") or ai_advice.get("title") or ""
@@ -387,9 +401,23 @@ def _render_ai_banner(ai_advice: Optional[Union[dict, str]]) -> str:
         <div class="ai-banner-header">
             <span class="ai-badge">Gemini 3.8 Flash</span>
             <h3 class="i18n" data-ru="Тактические рекомендации AI-ассистента" data-en="AI Assistant Tactical Recommendations">Тактические рекомендации AI-ассистента</h3>
+            <button type="button" class="btn-clear-chat" onclick="clearAiChat()" title="Очистить историю / Clear history" style="margin-left: auto; background: transparent; border: 1px solid var(--ft-border); color: var(--ft-text-muted); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px;">🗑️ <span class="i18n" data-ru="Очистить чат" data-en="Clear chat">Очистить чат</span></button>
         </div>
         <div class="ai-banner-body">
             {content_html}
+        </div>
+        <div class="ai-chat-section">
+            <div id="ai-chat-history" class="ai-chat-history"></div>
+            <div class="ai-quick-chips">
+                <button type="button" class="ai-chip" onclick="sendAiQuickPrompt('craft')">💡 <span class="i18n" data-ru="Что скрафтить прямо сейчас?" data-en="What to craft right now?">Что скрафтить прямо сейчас?</span></button>
+                <button type="button" class="ai-chip" onclick="sendAiQuickPrompt('herbs')">🌿 <span class="i18n" data-ru="Какие травы выгоднее скупать?" data-en="Which herbs to buy?">Какие травы выгоднее скупать?</span></button>
+                <button type="button" class="ai-chip" onclick="sendAiQuickPrompt('crates')">📦 <span class="i18n" data-ru="Какой ящик снабжения самый прибыльный?" data-en="Most profitable supply crate?">Какой ящик снабжения самый прибыльный?</span></button>
+                <button type="button" class="ai-chip" onclick="sendAiQuickPrompt('snipes')">📉 <span class="i18n" data-ru="Какие предметы в перепроданности (Z-Score)?" data-en="Oversold items (Z-Score)?">Какие предметы в перепроданности (Z-Score)?</span></button>
+            </div>
+            <form class="ai-chat-form" onsubmit="onAiChatSubmit(event)">
+                <input type="text" id="ai-chat-input" class="ai-chat-input" placeholder="Задайте вопрос AI по рынку Forever..." data-ru-placeholder="Задайте вопрос AI по рынку Forever..." data-en-placeholder="Ask AI about Forever market..." autocomplete="off">
+                <button type="submit" class="ai-chat-send-btn"><span class="i18n" data-ru="Спросить" data-en="Ask">Спросить</span></button>
+            </form>
         </div>
     </div>
     """
@@ -689,7 +717,115 @@ def build_standalone_dashboard(
     except Exception:
         disenchant_arbitrage = []
 
-    crafting_display = all_crafting
+    crafting_display = list(all_crafting)
+
+    # Supplement crafting_display with all Alchemy & Herbalism recipes from data/herbalism_alchemy_era.json
+    try:
+        with open("data/herbalism_alchemy_era.json", "r", encoding="utf-8") as f:
+            alchemy_catalog = json.load(f)
+            alch_recipes = alchemy_catalog.get("recipes", [])
+    except Exception:
+        alch_recipes = []
+
+    existing_crafted_ids = {c.get("crafted_item_id") for c in crafting_display if c.get("crafted_item_id")}
+    existing_recipe_ids = {c.get("recipe_id") for c in crafting_display if c.get("recipe_id")}
+
+    for rec in alch_recipes:
+        c_id = rec.get("crafted_item_id")
+        rec_id = rec.get("recipe_id")
+        if c_id in existing_crafted_ids or rec_id in existing_recipe_ids:
+            continue
+
+        name_ru = rec.get("name_ru")
+        name_en = rec.get("name_en")
+        min_skill = rec.get("min_skill", 1)
+        source = rec.get("source", "trainer")
+        source_details_ru = rec.get("source_details_ru")
+        source_details_en = rec.get("source_details_en")
+        reagents_raw = rec.get("reagents", [])
+
+        # Vials vendor prices: Empty Vial (3371)=30c, Leaded Vial (3372)=240c, Crystal Vial (8925)=400c
+        vial_vendor_prices = {3371: 30, 3372: 240, 8925: 400}
+        reagents_list = []
+        total_cost = 0
+        for r in reagents_raw:
+            r_id = r.get("item_id")
+            cnt = r.get("count", 1)
+            unit_cost = vial_vendor_prices.get(r_id, 0)
+            if unit_cost == 0:
+                unit_cost = 50
+            sub_total = unit_cost * cnt
+            total_cost += sub_total
+            r_ru = get_item_name(conn, r_id, "ru") if conn else "Реагент"
+            r_en = get_item_name(conn, r_id, "en") if conn else "Reagent"
+            reagents_list.append({
+                "item_id": r_id,
+                "name": r_en,
+                "name_ru": r_ru,
+                "count": cnt,
+                "unit_cost": unit_cost,
+                "total_cost": sub_total,
+                "is_vendor": r_id in vial_vendor_prices,
+                "source": "vendor" if r_id in vial_vendor_prices else "ah"
+            })
+
+        recipe_yield = float(rec.get("yield", 1.0) or 1.0)
+        c_price = 0
+        if conn and c_id:
+            try:
+                c_cur = conn.cursor()
+                c_cur.execute(
+                    "SELECT price FROM price_snapshots WHERE item_id = ? AND (? IS NULL OR realm = ?) AND price > 0 ORDER BY timestamp DESC LIMIT 1",
+                    (c_id, realm, realm)
+                )
+                p_row = c_cur.fetchone()
+                if p_row and p_row[0]:
+                    c_price = int(p_row[0])
+            except Exception:
+                c_price = 0
+
+        if c_price > 0:
+            gross_revenue = int(round(c_price * recipe_yield))
+        else:
+            gross_revenue = int(round(total_cost * 1.40 * recipe_yield))
+
+        deposit = 15
+        net_revenue = int(round(gross_revenue * 0.95)) - deposit
+        profit = net_revenue - total_cost
+        roi = round(profit / total_cost, 4) if total_cost > 0 else 0.0
+        roi_percent = round(roi * 100, 1)
+
+        crafting_display.append({
+            "recipe_id": rec_id,
+            "name": name_en,
+            "name_ru": name_ru,
+            "name_en": name_en,
+            "profession": "Alchemy",
+            "min_skill": min_skill,
+            "source": source,
+            "source_details_ru": source_details_ru,
+            "source_details_en": source_details_en,
+            "crafted_item_id": c_id,
+            "crafted_item_name": name_en,
+            "crafted_item_price": c_price if c_price > 0 else gross_revenue,
+            "yield": recipe_yield,
+            "base_yield": recipe_yield,
+            "expected_yield": recipe_yield,
+            "cost": total_cost,
+            "cost_copper": total_cost,
+            "revenue": gross_revenue,
+            "revenue_copper": gross_revenue,
+            "deposit": deposit,
+            "deposit_copper": deposit,
+            "profit": profit,
+            "profit_copper": profit,
+            "roi": roi,
+            "roi_percent": roi_percent,
+            "is_waylaid_target": False,
+            "reagents": reagents_list,
+            "realm": realm or "Everlook",
+        })
+
     crates_only = [c for c in crafting_display if c.get("is_waylaid_target")]
     strong_buys = [a for a in anomalies if "BUY" in str(a.get("signal", ""))]
 
@@ -705,6 +841,10 @@ def build_standalone_dashboard(
 
     # Market metadata
     extra_items = list(vendor_arbitrage) + list(crafting_display) + list(anomalies) + list(disenchant_arbitrage)
+    for cd in crafting_display:
+        for rg in cd.get("reagents", []):
+            if rg.get("item_id"):
+                extra_items.append({"item_id": rg["item_id"], "name": rg.get("name")})
     items_market_data = _get_all_items_market_data(conn, realm=realm, extra_items=extra_items)
 
     # Render Plotly price history chart
@@ -831,7 +971,7 @@ def build_standalone_dashboard(
             f"</tr>"
         )
     if not arbitrage_rows:
-        arbitrage_tbody = "<tr><td colspan='5' class='empty-state i18n' data-ru='Нет лотов с вендорной прибылью ≥ 50c' data-en='No lots with vendor profit ≥ 50c'>Нет лотов с вендорной прибылью ≥ 50c</td></tr>"
+        arbitrage_tbody = "<tr><td colspan='5' class='empty-state i18n' data-ru='⚖️ Нет лотов с вендорной прибылью ≥ 50c' data-en='⚖️ No lots with vendor profit ≥ 50c'>⚖️ Нет лотов с вендорной прибылью ≥ 50c</td></tr>"
     else:
         arbitrage_tbody = "\n".join(arbitrage_rows)
 
@@ -857,11 +997,62 @@ def build_standalone_dashboard(
         escaped_prof_ru = html.escape(prof_ru)
         escaped_prof_en = html.escape(prof_en)
 
+        prof_slug = prof_raw.lower().replace(" ", "_")
+        if "alchem" in prof_slug or "трав" in prof_slug:
+            prof_slug = "alchemy"
+        elif "blacksmith" in prof_slug or "кузн" in prof_slug:
+            prof_slug = "blacksmithing"
+        elif "tailor" in prof_slug or "портн" in prof_slug:
+            prof_slug = "tailoring"
+        elif "leather" in prof_slug or "кож" in prof_slug:
+            prof_slug = "leatherworking"
+        elif "engin" in prof_slug or "инжен" in prof_slug:
+            prof_slug = "engineering"
+        elif "cook" in prof_slug or "кулин" in prof_slug:
+            prof_slug = "cooking"
+
+        min_skill = item.get("min_skill")
+        prof_text_ru = f"{escaped_prof_ru} ({min_skill})" if min_skill else escaped_prof_ru
+        prof_text_en = f"{escaped_prof_en} ({min_skill})" if min_skill else escaped_prof_en
+
+        if min_skill:
+            prof_html_ru = f"{escaped_prof_ru} <span class=\"skill-badge\">({min_skill})</span>"
+            prof_html_en = f"{escaped_prof_en} <span class=\"skill-badge\">({min_skill})</span>"
+        else:
+            prof_html_ru = escaped_prof_ru
+            prof_html_en = escaped_prof_en
+
         raw_crate_name = str(item.get("waylaid_crate_name") or "—")
-        crate_ru = _localize_crate_name(raw_crate_name, name_ru) if (raw_crate_name != "—") else "—"
-        crate_en = raw_crate_name
-        escaped_crate_ru = html.escape(crate_ru)
-        escaped_crate_en = html.escape(crate_en)
+        source = item.get("source")
+        source_ru = item.get("source_details_ru")
+        source_en = item.get("source_details_en")
+        if raw_crate_name != "—":
+            crate_ru = _localize_crate_name(raw_crate_name, name_ru)
+            crate_en = raw_crate_name
+            escaped_crate_ru = html.escape(crate_ru)
+            escaped_crate_en = html.escape(crate_en)
+            source_text_ru = f"📦 {escaped_crate_ru}"
+            source_text_en = f"📦 {escaped_crate_en}"
+            source_html_ru = source_text_ru
+            source_html_en = source_text_en
+            source_sort_val = escaped_crate_ru
+        elif source_ru or source_en:
+            src_icon = "🎓" if source == "trainer" else ("🏛️" if source == "vendor" else "⚔️")
+            s_ru = source_ru or source_en or "Учитель"
+            s_en = source_en or source_ru or "Trainer"
+            esc_s_ru = html.escape(s_ru)
+            esc_s_en = html.escape(s_en)
+            source_text_ru = f"{src_icon} {esc_s_ru}"
+            source_text_en = f"{src_icon} {esc_s_en}"
+            source_html_ru = f"{src_icon} <span title=\"{esc_s_ru}\">{esc_s_ru}</span>"
+            source_html_en = f"{src_icon} <span title=\"{esc_s_en}\">{esc_s_en}</span>"
+            source_sort_val = esc_s_ru
+        else:
+            source_text_ru = "—"
+            source_text_en = "—"
+            source_html_ru = "—"
+            source_html_en = "—"
+            source_sort_val = ""
 
         cost = item.get("cost_copper", int(round(item.get("cost", 0))))
         revenue = item.get("revenue_copper", int(round(item.get("revenue", 0))))
@@ -900,7 +1091,7 @@ def build_standalone_dashboard(
         )
 
         row_html = (
-            f"<tr {id_attr} {click_attr} class='clickable-row'>"
+            f"<tr {id_attr} {click_attr} data-profession='{prof_slug}' class='clickable-row'>"
             f"<td data-value='{escaped_name_ru}'>"
             f"<div class='item-cell-wrap'>"
             f"<div>"
@@ -916,8 +1107,8 @@ def build_standalone_dashboard(
             f"</div>"
             f"</div>"
             f"</td>"
-            f"<td data-value='{escaped_prof_ru}'><span class='i18n' data-ru='{escaped_prof_ru}' data-en='{escaped_prof_en}'>{escaped_prof_ru}</span></td>"
-            f"<td data-value='{escaped_crate_ru}' class='crate-cell'><span class='i18n' data-ru='{escaped_crate_ru}' data-en='{escaped_crate_en}'>{escaped_crate_ru}</span></td>"
+            f"<td data-value='{escaped_prof_ru}'><span class='i18n' data-ru='{prof_text_ru}' data-en='{prof_text_en}'>{prof_html_ru}</span></td>"
+            f"<td data-value='{source_sort_val}' class='crate-cell'><span class='i18n' data-ru='{source_text_ru}' data-en='{source_text_en}'>{source_html_ru}</span></td>"
             f"<td data-value='{cost}' class='num'>{format_currency(cost, as_html=True)}</td>"
             f"<td data-value='{revenue}' class='num'>{format_currency(revenue, as_html=True)}</td>"
             f"<td data-value='{profit}' class='profit-cell num'>{format_currency(profit, as_html=True)}</td>"
@@ -932,7 +1123,7 @@ def build_standalone_dashboard(
             c_roi_pct = round((c_profit / c_cost * 100), 1) if c_cost > 0 else 0.0
 
             crate_row_html = (
-                f"<tr {id_attr} {click_attr} class='clickable-row'>"
+                f"<tr {id_attr} {click_attr} data-profession='{prof_slug}' class='clickable-row'>"
                 f"<td data-value='{escaped_name_ru}'>"
                 f"<div class='item-cell-wrap'>"
                 f"<div>"
@@ -959,12 +1150,12 @@ def build_standalone_dashboard(
             crates_rows.append(crate_row_html)
 
     if not crafting_rows:
-        crafting_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='Нет активных маржинальных рецептов (ROI ≥ 25%)' data-en='No active profitable recipes (ROI ≥ 25%)'>Нет активных маржинальных рецептов (ROI ≥ 25%)</td></tr>"
+        crafting_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='🔨 Нет активных маржинальных рецептов (ROI ≥ 25%)' data-en='🔨 No active profitable recipes (ROI ≥ 25%)'>🔨 Нет активных маржинальных рецептов (ROI ≥ 25%)</td></tr>"
     else:
         crafting_tbody = "\n".join(crafting_rows)
 
     if not crates_rows:
-        crates_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='Нет активных ящиков Waylaid Crates' data-en='No active Waylaid Crates'>Нет активных ящиков Waylaid Crates</td></tr>"
+        crates_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='📦 Нет активных ящиков Waylaid Crates' data-en='📦 No active Waylaid Crates'>📦 Нет активных ящиков Waylaid Crates</td></tr>"
     else:
         crates_tbody = "\n".join(crates_rows)
 
@@ -1017,7 +1208,7 @@ def build_standalone_dashboard(
             f"</tr>"
         )
     if not anomaly_rows:
-        anomaly_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='Аномальных сбросов или всплесков цен не обнаружено' data-en='No price anomalies or dumps detected'>Аномальных сбросов или всплесков цен не обнаружено</td></tr>"
+        anomaly_tbody = "<tr><td colspan='7' class='empty-state i18n' data-ru='⚡ Сигналы Strong Buy отсутствуют. Рыночные цены стабильны' data-en='⚡ No Strong Buy signals. Market prices are stable'>⚡ Сигналы Strong Buy отсутствуют. Рыночные цены стабильны</td></tr>"
     else:
         anomaly_tbody = "\n".join(anomaly_rows)
 
@@ -1106,9 +1297,9 @@ def build_standalone_dashboard(
     if not disenchant_rows:
         disenchant_tbody = (
             "<tr><td colspan='8' class='empty-state i18n' "
-            "data-ru='Нет прибыльных предметов для распыления (≥ 10s)' "
-            "data-en='No profitable disenchant opportunities (≥ 10s)'>"
-            "Нет прибыльных предметов для распыления (≥ 10s)</td></tr>"
+            "data-ru='✨ Нет прибыльных предметов для распыления (≥ 10s)' "
+            "data-en='✨ No profitable disenchant opportunities (≥ 10s)'>"
+            "✨ Нет прибыльных предметов для распыления (≥ 10s)</td></tr>"
         )
     else:
         disenchant_tbody = "\n".join(disenchant_rows)
@@ -1118,8 +1309,9 @@ def build_standalone_dashboard(
         items_market_data.values(),
         key=lambda x: str(x.get("name_ru") or x.get("name_en") or "").lower(),
     )
+    valid_items = [it for it in sorted_items if _is_real_named_item(it)] or sorted_items
     options_parts = []
-    for it in sorted_items:
+    for it in valid_items:
         i_id = it["item_id"]
         cat = it.get("category", "trade_goods")
         n_ru = html.escape(str(it.get("name_ru") or f"Item {i_id}"))
@@ -1141,8 +1333,9 @@ def build_standalone_dashboard(
             str(x.get("name_ru") or x.get("name_en") or "").lower(),
         ),
     )
+    valid_overview = [it for it in overview_items if _is_real_named_item(it)] or overview_items
     ov_options_parts = []
-    for it in overview_items:
+    for it in valid_overview:
         i_id = it["item_id"]
         cat = it.get("category", "trade_goods")
         n_ru = html.escape(str(it.get("name_ru") or f"Item {i_id}"))
@@ -1165,7 +1358,6 @@ def build_standalone_dashboard(
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="refresh" content="30">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Forever Trade — Goblin Terminal</title>
     <!-- Plotly.js -->
@@ -1402,6 +1594,34 @@ def build_standalone_dashboard(
             display: flex;
             align-items: center;
             gap: 10px;
+        }}
+
+        .btn-refresh {{
+            background: var(--ft-surface-raised, #161d28);
+            border: 1px solid var(--ft-border, #263142);
+            color: var(--ft-text, #e6edf3);
+            font-weight: 500;
+            font-size: 0.8rem;
+            padding: 5px 11px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }}
+
+        .btn-refresh:hover {{
+            background: var(--ft-surface-hover, #1b2431);
+            border-color: var(--ft-accent, #6b9dff);
+            color: #ffffff;
+        }}
+
+        .btn-refresh .refresh-timer {{
+            font-size: 0.75rem;
+            color: var(--ft-text-muted, #8b98a9);
+            font-variant-numeric: tabular-nums;
         }}
 
         .btn-shopping-list {{
@@ -1673,6 +1893,7 @@ def build_standalone_dashboard(
         .money-silver,
         .money-copper {{
             font-variant-numeric: tabular-nums;
+            white-space: nowrap;
         }}
 
         .data-table th.num,
@@ -1702,8 +1923,11 @@ def build_standalone_dashboard(
         .empty-state {{
             text-align: center;
             color: var(--ft-text-muted);
-            padding: var(--ft-space-6) var(--ft-space-4);
-            font-size: var(--ft-text-md);
+            padding: 32px 16px;
+            font-size: var(--ft-text-sm, 13px);
+            line-height: 1.6;
+            background: rgba(17, 22, 31, 0.4);
+            border-radius: 4px;
         }}
 
         tr.clickable-row {{
@@ -1880,12 +2104,17 @@ def build_standalone_dashboard(
             background: var(--ft-surface-raised, #161d28);
             border: 1px solid var(--ft-border, #263142);
             color: var(--ft-text-secondary, #b7c2cf);
-            padding: 3px 8px;
+            padding: 4px 10px;
             font-size: var(--ft-text-xs, 11px);
             border-radius: 4px;
             cursor: pointer;
             transition: all 0.15s ease;
             white-space: nowrap;
+            max-width: none;
+            overflow: visible;
+            text-overflow: clip;
+            flex-shrink: 0;
+            display: inline-block;
         }}
 
         .chip-btn:hover, .chip-btn.active {{
@@ -2132,7 +2361,7 @@ def build_standalone_dashboard(
             transform: translateY(0);
         }}
 
-        /* AI Banner */
+        /* AI Banner & Chat */
         .ai-banner {{
             background: #10141d;
             border: 1px solid #388bfd;
@@ -2146,6 +2375,209 @@ def build_standalone_dashboard(
         .ai-summary {{ font-size: 0.85rem; margin-bottom: 6px; }}
         .ai-checklist {{ margin-left: 18px; font-size: 0.82rem; }}
         .ai-checklist li {{ margin-bottom: 3px; }}
+
+        .ai-chat-section {{
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--ft-border);
+        }}
+        .ai-chat-history {{
+            max-height: 220px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 8px;
+            padding-right: 4px;
+        }}
+        .ai-msg {{
+            max-width: 90%;
+            padding: 8px 12px;
+            font-size: var(--ft-text-sm);
+            line-height: var(--ft-leading-ui);
+            word-break: break-word;
+        }}
+        .ai-msg-user {{
+            align-self: flex-end;
+            background: rgba(88, 166, 255, 0.15);
+            border: 1px solid rgba(88, 166, 255, 0.3);
+            color: #e6edf3;
+            border-radius: 8px 8px 2px 8px;
+        }}
+        .ai-msg-assistant {{
+            align-self: flex-start;
+            background: rgba(22, 29, 40, 0.95);
+            border: 1px solid var(--ft-border);
+            color: #e6edf3;
+            border-radius: 8px 8px 8px 2px;
+        }}
+        .ai-quick-chips {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 8px;
+        }}
+        .ai-chip {{
+            background: rgba(56, 139, 253, 0.1);
+            border: 1px solid rgba(56, 139, 253, 0.25);
+            border-radius: 12px;
+            padding: 4px 10px;
+            font-size: var(--ft-text-xs);
+            color: #58a6ff;
+            cursor: pointer;
+            transition: var(--ft-transition);
+        }}
+        .ai-chip:hover {{
+            background: rgba(56, 139, 253, 0.2);
+            border-color: #58a6ff;
+        }}
+        .ai-chat-form {{
+            display: flex;
+            gap: 8px;
+        }}
+        .ai-chat-input {{
+            flex: 1;
+            background: #0d1117;
+            border: 1px solid var(--ft-border);
+            border-radius: var(--ft-radius-sm);
+            padding: 6px 12px;
+            color: #e6edf3;
+            font-size: var(--ft-text-sm);
+            font-family: inherit;
+        }}
+        .ai-chat-input:focus {{
+            outline: none;
+            border-color: #58a6ff;
+        }}
+        .ai-chat-send-btn {{
+            background: #238636;
+            color: #ffffff;
+            border: none;
+            border-radius: var(--ft-radius-sm);
+            padding: 6px 14px;
+            font-size: var(--ft-text-sm);
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--ft-transition);
+        }}
+        .ai-chat-send-btn:hover {{
+            background: #2ea043;
+        }}
+
+        /* Profession Filter Bar */
+        .profession-filter-bar {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            background: var(--ft-surface-raised);
+            border-bottom: 1px solid var(--ft-border);
+            overflow-x: auto;
+            white-space: nowrap;
+        }}
+        .prof-label {{
+            font-size: var(--ft-text-xs);
+            font-weight: 600;
+            color: var(--ft-text-muted);
+            margin-right: 4px;
+        }}
+        .prof-btn {{
+            background: transparent;
+            border: 1px solid var(--ft-border);
+            color: var(--ft-text-secondary);
+            border-radius: var(--ft-radius-sm);
+            padding: 4px 10px;
+            font-size: var(--ft-text-xs);
+            font-weight: 500;
+            cursor: pointer;
+            transition: var(--ft-transition);
+            white-space: nowrap;
+        }}
+        .prof-btn:hover {{
+            border-color: var(--ft-accent);
+            color: var(--ft-text);
+        }}
+        .prof-btn.active {{
+            background: var(--ft-accent-soft);
+            border-color: var(--ft-accent);
+            color: #ffffff;
+            font-weight: 600;
+        }}
+        .skill-badge {{
+            font-size: 10px;
+            color: var(--ft-warning);
+            font-weight: 600;
+        }}
+
+        /* Search Autocomplete Dropdown */
+        .search-autocomplete-dropdown {{
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
+            right: 0;
+            background: #161d28;
+            border: 1px solid var(--ft-border-strong);
+            border-radius: var(--ft-radius-md);
+            box-shadow: var(--ft-shadow-popover);
+            max-height: 320px;
+            overflow-y: auto;
+            z-index: 1000;
+        }}
+        .search-ac-item {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--ft-border);
+            cursor: pointer;
+            transition: var(--ft-transition);
+            font-size: var(--ft-text-sm);
+        }}
+        .search-ac-item:last-child {{
+            border-bottom: none;
+        }}
+        .search-ac-item:hover, .search-ac-item.focused {{
+            background: var(--ft-surface-hover);
+        }}
+        .search-ac-left {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            overflow: hidden;
+        }}
+        .search-ac-name {{
+            color: var(--ft-text);
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .search-ac-cat {{
+            font-size: var(--ft-text-xs);
+            color: var(--ft-text-muted);
+            background: rgba(255, 255, 255, 0.06);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }}
+        .search-ac-price {{
+            font-family: var(--ft-font-mono);
+            font-size: var(--ft-text-xs);
+            color: var(--ft-text-secondary);
+            white-space: nowrap;
+            margin-left: 12px;
+        }}
+
+        /* Volume badge */
+        .badge-volume {{
+            font-size: 11px;
+            padding: 2px 6px;
+            background: rgba(88, 166, 255, 0.15);
+            border: 1px solid rgba(88, 166, 255, 0.3);
+            border-radius: 4px;
+            color: #58a6ff;
+            margin-left: 8px;
+            white-space: nowrap;
+        }}
 
         /* Hidden elements for compatibility */
         .compat-hidden {{
@@ -2311,7 +2743,7 @@ def build_standalone_dashboard(
                     <span class="tab-label i18n" data-ru="Ящики" data-en="Waylaid Crates">Ящики</span>
                     <span class="tab-count">{len(crates_only)}</span>
                 </button>
-                <button class="tab-btn" data-tab="tab-shuffle" onclick="switchTab('tab-shuffle')">
+                <button class="tab-btn" data-tab="tab-shuffle" onclick="switchTab('tab-shuffle')" style="display: none;">
                     <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <circle cx="8" cy="8" r="5" /><path d="M6 8h4M8 6v4" />
                     </svg>
@@ -2341,11 +2773,17 @@ def build_standalone_dashboard(
                     </div>
                 </div>
 
-                <div class="header-center">
-                    <input type="text" id="item-search-input" class="search-input" placeholder="🔍 Поиск RU/EN (Ctrl+K)..." data-ru-placeholder="🔍 Поиск RU/EN (Ctrl+K)..." data-en-placeholder="🔍 Search RU/EN (Ctrl+K)..." oninput="onItemSearch(this.value)" />
+                <div class="header-center search-wrapper" style="position: relative; width: 100%; max-width: 480px;">
+                    <input type="text" id="item-search-input" class="search-input" placeholder="🔍 Поиск RU/EN (Ctrl+K)..." data-ru-placeholder="🔍 Поиск RU/EN (Ctrl+K)..." data-en-placeholder="🔍 Search RU/EN (Ctrl+K)..." oninput="onItemSearchDebounced(this.value)" onkeydown="onSearchInputKeydown(event)" autocomplete="off" />
+                    <div id="search-autocomplete-dropdown" class="search-autocomplete-dropdown" style="display: none;"></div>
                 </div>
 
                 <div class="header-actions">
+                    <button id="btn-refresh-dashboard" class="btn-refresh" onclick="manualRefresh()" title="Обновить страницу">
+                        <span class="refresh-icon">🔄</span>
+                        <span class="i18n" data-ru="Обновить" data-en="Refresh">Обновить</span>
+                        <span id="refresh-timer" class="refresh-timer">(30с)</span>
+                    </button>
                     <button id="btn-export-shopping-list" class="btn-shopping-list" onclick="copyAuctionatorShoppingList()">
                         <span class="i18n" data-ru="📋 Скопировать Shopping List для Auctionator" data-en="📋 Copy Auctionator Shopping List">📋 Скопировать Shopping List для Auctionator</span>
                     </button>
@@ -2451,15 +2889,24 @@ def build_standalone_dashboard(
                         </div>
                     </div>
 
-                    <!-- Tab 3: Крафт под Waylaid Crates (Dual Crafting) -->
+                    <!-- Tab 3: Крафт под Waylaid Crates (Dual Crafting) & Алхимия -->
                     <div class="tab-pane" id="waylaid-crates">
+                        <div class="profession-filter-bar">
+                            <span class="prof-label i18n" data-ru="Профессия:" data-en="Profession:">Профессия:</span>
+                            <button type="button" class="prof-btn" data-prof="all" onclick="filterProfession('all')"><span class="i18n" data-ru="Все профессии" data-en="All Professions">Все профессии</span></button>
+                            <button type="button" class="prof-btn active" data-prof="alchemy" onclick="filterProfession('alchemy')"><span class="i18n" data-ru="🌿 Алхимия и Травничество" data-en="🌿 Alchemy & Herbalism">🌿 Алхимия и Травничество</span></button>
+                            <button type="button" class="prof-btn" data-prof="blacksmithing" onclick="filterProfession('blacksmithing')"><span class="i18n" data-ru="Кузнечное дело" data-en="Blacksmithing">Кузнечное дело</span></button>
+                            <button type="button" class="prof-btn" data-prof="tailoring" onclick="filterProfession('tailoring')"><span class="i18n" data-ru="Портняжное дело" data-en="Tailoring">Портняжное дело</span></button>
+                            <button type="button" class="prof-btn" data-prof="leatherworking" onclick="filterProfession('leatherworking')"><span class="i18n" data-ru="Кожевничество" data-en="Leatherworking">Кожевничество</span></button>
+                            <button type="button" class="prof-btn" data-prof="engineering" onclick="filterProfession('engineering')"><span class="i18n" data-ru="Инженерное дело" data-en="Engineering">Инженерное дело</span></button>
+                        </div>
                         <div class="table-scroll">
                             <table class="data-table sortable"><!-- <table class="sortable"> -->
                                 <thead>
                                     <tr>
-                                        <th class="i18n" data-ru="Рецепт / Предмет" data-en="Recipe / Item">Рецепт / Предмет</th>
-                                        <th class="i18n" data-ru="Профессия" data-en="Profession">Профессия</th>
-                                        <th class="i18n" data-ru="Ящик Waylaid Crate" data-en="Waylaid Crate">Ящик Waylaid Crate</th>
+                                        <th class="i18n" data-ru="Рецепт / Зелье" data-en="Recipe / Potion">Рецепт / Зелье</th>
+                                        <th class="i18n" data-ru="Профессия / Навык" data-en="Profession / Skill">Профессия / Навык</th>
+                                        <th class="i18n" data-ru="Где взять рецепт / Ящик" data-en="Recipe Source / Crate">Где взять рецепт / Ящик</th>
                                         <th class="num i18n" data-ru="Себестоимость" data-en="Craft Cost">Себестоимость</th>
                                         <th class="num i18n" data-ru="Выручка (AH)" data-en="Revenue (AH)">Выручка (AH)</th>
                                         <th class="num i18n" data-ru="Чистая прибыль" data-en="Net Profit">Чистая прибыль</th>
@@ -2495,8 +2942,8 @@ def build_standalone_dashboard(
                         </div>
                     </div>
 
-                    <!-- Tab 5: Вендор-шаффл -->
-                    <div class="tab-pane" id="tab-shuffle">
+                    <!-- Tab 5: Вендор-шаффл (скрыт во избежание дублирования арбитража) -->
+                    <div class="tab-pane" id="tab-shuffle" style="display: none;">
                         <div class="table-scroll">
                             <table class="data-table sortable"><!-- <table class="sortable"> -->
                                 <thead>
@@ -2526,7 +2973,7 @@ def build_standalone_dashboard(
                                     <select id="overview-item-select" class="terminal-select" style="min-width: 220px; background: var(--ft-surface-raised); color: var(--ft-text); border: 1px solid var(--ft-border-strong); padding: 5px 8px; border-radius: 4px; font-size: var(--ft-text-sm);" onchange="onOverviewItemChange(this.value)">
                                         {overview_options_html}
                                     </select>
-                                    <div class="quick-commodity-chips" style="display: flex; gap: 5px; flex-wrap: wrap;">
+                                    <div class="quick-commodity-chips" style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
                                         <button type="button" class="chip-btn" onclick="selectOverviewCommodity(2447)"><span class="i18n" data-ru="Мироцвет" data-en="Peacebloom">Мироцвет</span></button>
                                         <button type="button" class="chip-btn" onclick="selectOverviewCommodity(765)"><span class="i18n" data-ru="Сребролист" data-en="Silverleaf">Сребролист</span></button>
                                         <button type="button" class="chip-btn" onclick="selectOverviewCommodity(2450)"><span class="i18n" data-ru="Остротерн" data-en="Briarthorn">Остротерн</span></button>
@@ -2542,9 +2989,9 @@ def build_standalone_dashboard(
                                             <button type="button" class="chart-btn" id="ov-btn-line" onclick="setOverviewMode('line')"><span class="i18n" data-ru="Линия" data-en="Line">Линия</span></button>
                                         </div>
                                         <div class="chart-control-group chart-tf-group">
+                                            <button type="button" class="chart-btn" data-ov-tf="1h" onclick="setOverviewTimeframe('1h')"><span class="i18n" data-ru="1ч" data-en="1h">1ч</span></button>
+                                            <button type="button" class="chart-btn" data-ov-tf="4h" onclick="setOverviewTimeframe('4h')"><span class="i18n" data-ru="4ч" data-en="4h">4ч</span></button>
                                             <button type="button" class="chart-btn" data-ov-tf="24h" onclick="setOverviewTimeframe('24h')"><span class="i18n" data-ru="24ч" data-en="24h">24ч</span></button>
-                                            <button type="button" class="chart-btn" data-ov-tf="3d" onclick="setOverviewTimeframe('3d')"><span class="i18n" data-ru="3д" data-en="3d">3д</span></button>
-                                            <button type="button" class="chart-btn" data-ov-tf="7d" onclick="setOverviewTimeframe('7d')"><span class="i18n" data-ru="7д" data-en="7d">7д</span></button>
                                             <button type="button" class="chart-btn active" data-ov-tf="all" onclick="setOverviewTimeframe('all')"><span class="i18n" data-ru="Все" data-en="All">Все</span></button>
                                         </div>
                                     </div>
@@ -2572,6 +3019,7 @@ def build_standalone_dashboard(
                                 <span id="inspector-item-name" class="inspector-name q-1">Peacebloom</span>
                             </a>
                             <button id="inspector-copy-btn" class="copy-btn" title="Копировать название / Copy name" onclick="copyItemName(this, event)">📋</button>
+                            <span id="inspector-volume-badge" class="badge-volume">Объем: 0</span>
                         </div>
                     </div>
 
@@ -2586,14 +3034,14 @@ def build_standalone_dashboard(
                             </button>
                         </div>
                         <div class="chart-control-group chart-tf-group" id="chart-tf-group">
+                            <button type="button" class="chart-btn" data-tf="1h" onclick="setChartTimeframe('1h')">
+                                <span class="i18n" data-ru="1ч" data-en="1h">1ч</span>
+                            </button>
+                            <button type="button" class="chart-btn" data-tf="4h" onclick="setChartTimeframe('4h')">
+                                <span class="i18n" data-ru="4ч" data-en="4h">4ч</span>
+                            </button>
                             <button type="button" class="chart-btn" data-tf="24h" onclick="setChartTimeframe('24h')">
                                 <span class="i18n" data-ru="24ч" data-en="24h">24ч</span>
-                            </button>
-                            <button type="button" class="chart-btn" data-tf="3d" onclick="setChartTimeframe('3d')">
-                                <span class="i18n" data-ru="3д" data-en="3d">3д</span>
-                            </button>
-                            <button type="button" class="chart-btn" data-tf="7d" onclick="setChartTimeframe('7d')">
-                                <span class="i18n" data-ru="7д" data-en="7d">7д</span>
                             </button>
                             <button type="button" class="chart-btn active" data-tf="all" onclick="setChartTimeframe('all')">
                                 <span class="i18n" data-ru="Все" data-en="All">Все</span>
@@ -2776,7 +3224,8 @@ def build_standalone_dashboard(
 
         function getStoredLang() {{
             try {{
-                return localStorage.getItem('ft_lang') || 'ru';
+                var l = localStorage.getItem('ft_lang');
+                return (l === 'en') ? 'en' : 'ru';
             }} catch(e) {{
                 return 'ru';
             }}
@@ -2842,6 +3291,10 @@ def build_standalone_dashboard(
 
             if (currentOverviewItemId && typeof renderOverviewCandleChart === 'function') {{
                 renderOverviewCandleChart(currentOverviewItemId);
+            }}
+
+            if (typeof updateRefreshTimerUI === 'function') {{
+                updateRefreshTimerUI();
             }}
         }}
 
@@ -3018,6 +3471,9 @@ def build_standalone_dashboard(
             if (tabId === 'tab-crafting' || tabId === 'crafting') {{
                 tabId = 'waylaid-crates';
             }}
+            if (tabId === 'tab-shuffle') {{
+                tabId = 'vendor-arbitrage';
+            }}
             currentActiveTab = tabId;
             try {{
                 localStorage.setItem('ft_active_tab', tabId);
@@ -3033,6 +3489,8 @@ def build_standalone_dashboard(
 
             if (currentSearchQuery) {{
                 onItemSearch(currentSearchQuery);
+            }} else {{
+                applyTableFilters();
             }}
 
             if (currentSelectedItemId) {{
@@ -3152,6 +3610,12 @@ def build_standalone_dashboard(
             var copyBtn = document.getElementById('inspector-copy-btn');
             if (copyBtn) {{
                 copyBtn.setAttribute('data-name', activeName);
+            }}
+
+            var vBadge = document.getElementById('inspector-volume-badge');
+            if (vBadge) {{
+                var vCount = (item && item.points ? item.points.length : 0);
+                vBadge.textContent = (lang === 'en' ? 'Volume: ' : 'Объем: ') + vCount + (lang === 'en' ? ' scans' : ' замеров');
             }}
 
             // Deal Calculator updates
@@ -3315,20 +3779,42 @@ def build_standalone_dashboard(
             }}
 
             // Timeframe filtering (relative to newest point timestamp)
-            var newestTs = validPoints[0][0];
+            var minTs = validPoints[0][0];
+            var maxTs = validPoints[0][0];
             for (var i = 1; i < validPoints.length; i++) {{
-                if (validPoints[i][0] > newestTs) {{
-                    newestTs = validPoints[i][0];
-                }}
+                if (validPoints[i][0] < minTs) minTs = validPoints[i][0];
+                if (validPoints[i][0] > maxTs) maxTs = validPoints[i][0];
             }}
+            var span = maxTs - minTs;
+            var newestTs = maxTs;
 
             var cutoffTs = 0;
-            if (currentChartTimeframe === '24h') {{
+            var bucketSec = 3600;
+
+            if (currentChartTimeframe === '1h') {{
                 cutoffTs = newestTs - 86400;
+                bucketSec = 3600;
+            }} else if (currentChartTimeframe === '4h') {{
+                cutoffTs = newestTs - (3 * 86400);
+                bucketSec = 14400;
+            }} else if (currentChartTimeframe === '24h') {{
+                cutoffTs = newestTs - (14 * 86400);
+                bucketSec = 86400;
             }} else if (currentChartTimeframe === '3d') {{
                 cutoffTs = newestTs - 259200;
+                bucketSec = 7200;
             }} else if (currentChartTimeframe === '7d') {{
                 cutoffTs = newestTs - 604800;
+                bucketSec = 21600;
+            }} else {{
+                cutoffTs = 0;
+                if (span <= 86400) {{
+                    bucketSec = 3600;
+                }} else if (span <= 7 * 86400) {{
+                    bucketSec = 14400;
+                }} else {{
+                    bucketSec = 86400;
+                }}
             }}
 
             var filteredPoints = [];
@@ -3344,30 +3830,6 @@ def build_standalone_dashboard(
             filteredPoints.sort(function(a, b) {{
                 return a[0] - b[0];
             }});
-
-            // Time bucket interval determination
-            var minTs = filteredPoints[0][0];
-            var maxTs = filteredPoints[filteredPoints.length - 1][0];
-            var span = maxTs - minTs;
-
-            var bucketSec = 3600;
-            if (currentChartTimeframe === '24h') {{
-                bucketSec = 3600;
-            }} else if (currentChartTimeframe === '3d') {{
-                bucketSec = 7200;
-            }} else if (currentChartTimeframe === '7d') {{
-                bucketSec = 21600;
-            }} else {{
-                if (span <= 86400) {{
-                    bucketSec = 3600;
-                }} else if (span <= 3 * 86400) {{
-                    bucketSec = 7200;
-                }} else if (span <= 14 * 86400) {{
-                    bucketSec = 21600;
-                }} else {{
-                    bucketSec = 86400;
-                }}
-            }}
 
             var buckets = {{}};
             var bucketKeys = [];
@@ -3450,8 +3912,39 @@ def build_standalone_dashboard(
                     increasing: {{ line: {{ color: '#3fb950' }} }},
                     decreasing: {{ line: {{ color: '#f85149' }} }},
                     hovertext: candleHover,
-                    hoverinfo: 'text+x'
+                    hoverinfo: 'text+x',
+                    hoverlabel: {{ bgcolor: '#1c2128', bordercolor: '#30363d', font: {{ color: '#e6edf3', family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", size: 12 }}, align: 'left' }}
                 }});
+
+                if (candleClose.length >= 2) {{
+                    var maPeriod = Math.min(5, candleClose.length);
+                    var maX = [];
+                    var maY = [];
+                    for (var mi = 0; mi < candleClose.length; mi++) {{
+                        var startIdx = Math.max(0, mi - maPeriod + 1);
+                        var sum = 0;
+                        var count = 0;
+                        for (var si = startIdx; si <= mi; si++) {{
+                            sum += candleClose[si];
+                            count++;
+                        }}
+                        maX.push(candleX[mi]);
+                        maY.push(Math.round(sum / count));
+                    }}
+                    var maHover = [];
+                    for (var mi = 0; mi < maY.length; mi++) {{
+                        maHover.push('SMA(' + maPeriod + '): ' + formatCurrencyText(maY[mi]));
+                    }}
+                    traces.push({{
+                        x: maX,
+                        y: maY,
+                        mode: 'lines',
+                        name: 'SMA(' + maPeriod + ')',
+                        line: {{ color: '#e3b341', width: 1.8, dash: 'dot' }},
+                        hovertext: maHover,
+                        hoverinfo: 'text+x'
+                    }});
+                }}
             }} else {{
                 var lineX = [];
                 var lineY = [];
@@ -3527,6 +4020,7 @@ def build_standalone_dashboard(
                 template: 'plotly_dark',
                 paper_bgcolor: '#11161f',
                 plot_bgcolor: '#11161f',
+                hoverlabel: {{ bgcolor: '#1c2128', bordercolor: '#30363d', font: {{ color: '#e6edf3', size: 12 }} }},
                 font: {{ color: '#8b98a9', family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", size: 10 }},
                 margin: {{ l: 45, r: 15, t: 25, b: 30 }},
                 height: 250,
@@ -3647,28 +4141,51 @@ def build_standalone_dashboard(
                 }}
             }}
 
+            var safeActiveName = String(activeName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
             if (validPoints.length === 0) {{
                 var emptyMsg = lang === 'en'
-                    ? 'Waiting for first price snapshot from Auctionator.lua for ' + activeName + '...'
-                    : 'База данных ожидает первого снимка цен из Auctionator.lua для ' + activeName + '...';
+                    ? 'Waiting for first price snapshot from Auctionator.lua for ' + safeActiveName + '...'
+                    : 'База данных ожидает первого снимка цен из Auctionator.lua для ' + safeActiveName + '...';
                 plotContainer.innerHTML = '<div class="empty-state i18n" style="padding: 60px 20px; text-align: center; color: var(--ft-text-muted);">' + emptyMsg + '</div>';
                 return;
             }}
 
-            var newestTs = validPoints[0][0];
+            var minTs = validPoints[0][0];
+            var maxTs = validPoints[0][0];
             for (var i = 1; i < validPoints.length; i++) {{
-                if (validPoints[i][0] > newestTs) {{
-                    newestTs = validPoints[i][0];
-                }}
+                if (validPoints[i][0] < minTs) minTs = validPoints[i][0];
+                if (validPoints[i][0] > maxTs) maxTs = validPoints[i][0];
             }}
+            var span = maxTs - minTs;
+            var newestTs = maxTs;
 
             var cutoffTs = 0;
-            if (currentOverviewTimeframe === '24h') {{
+            var bucketSec = 3600;
+
+            if (currentOverviewTimeframe === '1h') {{
                 cutoffTs = newestTs - 86400;
+                bucketSec = 3600;
+            }} else if (currentOverviewTimeframe === '4h') {{
+                cutoffTs = newestTs - (3 * 86400);
+                bucketSec = 14400;
+            }} else if (currentOverviewTimeframe === '24h') {{
+                cutoffTs = newestTs - (14 * 86400);
+                bucketSec = 86400;
             }} else if (currentOverviewTimeframe === '3d') {{
                 cutoffTs = newestTs - 259200;
+                bucketSec = 7200;
             }} else if (currentOverviewTimeframe === '7d') {{
                 cutoffTs = newestTs - 604800;
+                bucketSec = 21600;
+            }} else {{
+                cutoffTs = 0;
+                if (span <= 86400) {{
+                    bucketSec = 3600;
+                }} else if (span <= 7 * 86400) {{
+                    bucketSec = 14400;
+                }} else {{
+                    bucketSec = 86400;
+                }}
             }}
 
             var filteredPoints = [];
@@ -3684,29 +4201,6 @@ def build_standalone_dashboard(
             filteredPoints.sort(function(a, b) {{
                 return a[0] - b[0];
             }});
-
-            var minTs = filteredPoints[0][0];
-            var maxTs = filteredPoints[filteredPoints.length - 1][0];
-            var span = maxTs - minTs;
-
-            var bucketSec = 3600;
-            if (currentOverviewTimeframe === '24h') {{
-                bucketSec = 3600;
-            }} else if (currentOverviewTimeframe === '3d') {{
-                bucketSec = 7200;
-            }} else if (currentOverviewTimeframe === '7d') {{
-                bucketSec = 21600;
-            }} else {{
-                if (span <= 86400) {{
-                    bucketSec = 3600;
-                }} else if (span <= 3 * 86400) {{
-                    bucketSec = 7200;
-                }} else if (span <= 14 * 86400) {{
-                    bucketSec = 21600;
-                }} else {{
-                    bucketSec = 86400;
-                }}
-            }}
 
             var buckets = {{}};
             var bucketKeys = [];
@@ -3790,7 +4284,8 @@ def build_standalone_dashboard(
                     increasing: {{ line: {{ color: '#3fb950', width: 1.5 }}, fillcolor: '#3fb950' }},
                     decreasing: {{ line: {{ color: '#f85149', width: 1.5 }}, fillcolor: '#f85149' }},
                     hovertext: candleHover,
-                    hoverinfo: 'text+x'
+                    hoverinfo: 'text+x',
+                    hoverlabel: {{ bgcolor: '#1c2128', bordercolor: '#30363d', font: {{ color: '#e6edf3', family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", size: 12 }}, align: 'left' }}
                 }});
 
                 if (closePrices.length >= 3) {{
@@ -3808,13 +4303,18 @@ def build_standalone_dashboard(
                         maX.push(candleX[mi]);
                         maY.push(Math.round(sum / count));
                     }}
+                    var maHover = [];
+                    for (var mi = 0; mi < maY.length; mi++) {{
+                        maHover.push('SMA(' + maPeriod + '): ' + formatCurrencyText(maY[mi]));
+                    }}
                     traces.push({{
                         x: maX,
                         y: maY,
                         mode: 'lines',
                         name: 'SMA(' + maPeriod + ')',
                         line: {{ color: '#e3b341', width: 1.8, dash: 'dot' }},
-                        hoverinfo: 'name+y'
+                        hovertext: maHover,
+                        hoverinfo: 'text+x'
                     }});
                 }}
             }} else {{
@@ -3880,6 +4380,7 @@ def build_standalone_dashboard(
                 template: 'plotly_dark',
                 paper_bgcolor: '#11161f',
                 plot_bgcolor: '#11161f',
+                hoverlabel: {{ bgcolor: '#1c2128', bordercolor: '#30363d', font: {{ color: '#e6edf3', size: 12 }} }},
                 font: {{ color: '#8b98a9', family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", size: 11 }},
                 title: {{
                     text: activeName + ' — ' + (isCandles ? (lang === 'en' ? 'Japanese Candlesticks (OHLC)' : 'Свечной график (OHLC)') : (lang === 'en' ? 'Price Dynamics' : 'Динамика цен')),
@@ -3912,25 +4413,476 @@ def build_standalone_dashboard(
             Plotly.react(plotContainer, traces, layout, {{ responsive: true, displayModeBar: true }});
         }}
 
+        var currentCraftProfession = 'alchemy';
+
+        function applyTableFilters() {{
+            var panesToFilter = [];
+            var activePane = document.querySelector('.tab-pane.active');
+            if (activePane) panesToFilter.push(activePane);
+            var waylaidPane = document.getElementById('waylaid-crates');
+            if (waylaidPane && panesToFilter.indexOf(waylaidPane) === -1) {{
+                panesToFilter.push(waylaidPane);
+            }}
+
+            panesToFilter.forEach(function(pane) {{
+                var rows = pane.querySelectorAll('tbody tr');
+                var isCraftingTab = (pane.id === 'waylaid-crates' || pane.id === 'tab-crates');
+                var visibleCount = 0;
+                var realRowCount = 0;
+
+                rows.forEach(function(row) {{
+                    if (row.classList.contains('filter-empty-row') || row.querySelector('.empty-state')) {{
+                        return;
+                    }}
+                    realRowCount++;
+
+                    var text = (row.textContent || '').toLowerCase();
+                    var searchMatch = !currentSearchQuery || text.indexOf(currentSearchQuery) !== -1;
+
+                    var rowProf = row.getAttribute('data-profession');
+                    var profMatch = !isCraftingTab || (!currentCraftProfession || currentCraftProfession === 'all' || !rowProf || rowProf === currentCraftProfession);
+
+                    var rowCat = row.getAttribute('data-category');
+                    var catMatch = (!currentFilterCat || currentFilterCat === 'all' || !rowCat || rowCat === currentFilterCat);
+
+                    if (searchMatch && profMatch && catMatch) {{
+                        row.style.display = '';
+                        visibleCount++;
+                    }} else {{
+                        row.style.display = 'none';
+                    }}
+                }});
+
+                var tbody = pane.querySelector('tbody');
+                if (tbody && realRowCount > 0) {{
+                    var existingEmpty = tbody.querySelector('.filter-empty-row');
+                    if (visibleCount === 0) {{
+                        if (!existingEmpty) {{
+                            var lang = getStoredLang();
+                            var emptyMsg = lang === 'en'
+                                ? 'No items found matching the current filter'
+                                : 'Нет предметов, соответствующих текущему фильтру';
+                            var colCount = pane.querySelectorAll('thead th').length || 7;
+                            var emptyRow = document.createElement('tr');
+                            emptyRow.className = 'filter-empty-row';
+                            emptyRow.innerHTML = '<td colspan="' + colCount + '" class="empty-state i18n" data-ru="Нет предметов, соответствующих текущему фильтру" data-en="No items found matching the current filter">' + emptyMsg + '</td>';
+                            tbody.appendChild(emptyRow);
+                        }}
+                    }} else if (existingEmpty) {{
+                        existingEmpty.remove();
+                    }}
+                }}
+            }});
+        }}
+
+        function filterProfession(prof) {{
+            currentCraftProfession = prof;
+            try {{
+                localStorage.setItem('ft_craft_prof', prof);
+            }} catch(e) {{}}
+
+            var btns = document.querySelectorAll('.profession-filter-bar .prof-btn');
+            btns.forEach(function(b) {{
+                b.classList.toggle('active', b.getAttribute('data-prof') === prof);
+            }});
+
+            applyTableFilters();
+        }}
+
+        var acSelectedIndex = -1;
+
+        function renderSearchAutocomplete(q) {{
+            var dropdown = document.getElementById('search-autocomplete-dropdown');
+            if (!dropdown) return;
+            acSelectedIndex = -1;
+            if (!q || q.trim().length < 2) {{
+                dropdown.style.display = 'none';
+                dropdown.innerHTML = '';
+                return;
+            }}
+
+            var query = q.trim().toLowerCase();
+            var matches = [];
+            var lang = getStoredLang();
+
+            for (var itemId in ITEM_STORE) {{
+                var item = ITEM_STORE[itemId];
+                if (!item) continue;
+                var ru = (item.name_ru || '').toLowerCase();
+                var en = (item.name_en || '').toLowerCase();
+                var idStr = String(itemId);
+
+                if (ru.indexOf(query) !== -1 || en.indexOf(query) !== -1 || idStr === query) {{
+                    matches.push(item);
+                    if (matches.length >= 8) break;
+                }}
+            }}
+
+            if (matches.length === 0) {{
+                dropdown.style.display = 'none';
+                dropdown.innerHTML = '';
+                return;
+            }}
+
+            var html = '';
+            for (var i = 0; i < matches.length; i++) {{
+                var m = matches[i];
+                var name = (lang === 'en' ? m.name_en : m.name_ru) || m.name_ru || m.name_en || ('Item ' + m.item_id);
+                var safeName = String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                var cat = m.category || (m.deal_info ? m.deal_info.deal_type : '') || '';
+                var catBadge = cat ? '<span class="search-ac-cat">' + cat + '</span>' : '';
+                var price = m.current_price || (m.deal_info ? m.deal_info.cost : 0) || 0;
+                var priceHtml = price > 0 ? formatCurrencyHtml(price) : '';
+
+                html += '<div class="search-ac-item" data-index="' + i + '" data-item-id="' + m.item_id + '" onclick="onSelectAutocompleteItem(' + m.item_id + ')">' +
+                    '<div class="search-ac-left">' +
+                        '<span class="search-ac-name">' + safeName + '</span>' +
+                        catBadge +
+                    '</div>' +
+                    '<div class="search-ac-price">' + priceHtml + '</div>' +
+                '</div>';
+            }}
+
+            dropdown.innerHTML = html;
+            dropdown.style.display = 'block';
+        }}
+
+        function onSearchInputKeydown(event) {{
+            var dropdown = document.getElementById('search-autocomplete-dropdown');
+            var isOpen = dropdown && dropdown.style.display !== 'none';
+
+            if (event.key === 'ArrowDown') {{
+                if (isOpen) {{
+                    event.preventDefault();
+                    var items = dropdown.querySelectorAll('.search-ac-item');
+                    if (items.length > 0) {{
+                        acSelectedIndex++;
+                        if (acSelectedIndex >= items.length) acSelectedIndex = 0;
+                        updateAcHighlight(items);
+                    }}
+                }}
+            }} else if (event.key === 'ArrowUp') {{
+                if (isOpen) {{
+                    event.preventDefault();
+                    var items = dropdown.querySelectorAll('.search-ac-item');
+                    if (items.length > 0) {{
+                        acSelectedIndex--;
+                        if (acSelectedIndex < 0) acSelectedIndex = items.length - 1;
+                        updateAcHighlight(items);
+                    }}
+                }}
+            }} else if (event.key === 'Enter') {{
+                if (isOpen && acSelectedIndex >= 0) {{
+                    var items = dropdown.querySelectorAll('.search-ac-item');
+                    if (items[acSelectedIndex]) {{
+                        event.preventDefault();
+                        var itemId = parseInt(items[acSelectedIndex].getAttribute('data-item-id'), 10);
+                        onSelectAutocompleteItem(itemId);
+                        return;
+                    }}
+                }}
+                if (isOpen) {{
+                    dropdown.style.display = 'none';
+                }}
+            }} else if (event.key === 'Escape') {{
+                if (isOpen) {{
+                    event.preventDefault();
+                    dropdown.style.display = 'none';
+                }}
+            }}
+        }}
+
+        function updateAcHighlight(items) {{
+            items.forEach(function(el, idx) {{
+                if (idx === acSelectedIndex) {{
+                    el.classList.add('focused');
+                    el.scrollIntoView({{ block: 'nearest' }});
+                }} else {{
+                    el.classList.remove('focused');
+                }}
+            }});
+        }}
+
+        function onSelectAutocompleteItem(itemId) {{
+            var dropdown = document.getElementById('search-autocomplete-dropdown');
+            if (dropdown) dropdown.style.display = 'none';
+
+            var item = ITEM_STORE[itemId];
+            if (item) {{
+                var lang = getStoredLang();
+                var name = (lang === 'en' ? item.name_en : item.name_ru) || item.name_ru || item.name_en;
+                var inp = document.getElementById('item-search-input');
+                if (inp) inp.value = name;
+                onItemSearch(name);
+            }}
+
+            selectInspectorItem(itemId);
+        }}
+
+        function sendAiQuickPrompt(promptType) {{
+            var questions = {{
+                'craft': {{
+                    ru: 'Что скрафтить прямо сейчас?',
+                    en: 'What to craft right now?'
+                }},
+                'herbs': {{
+                    ru: 'Какие травы выгоднее скупать?',
+                    en: 'Which herbs to buy?'
+                }},
+                'crates': {{
+                    ru: 'Какой ящик снабжения самый прибыльный?',
+                    en: 'Most profitable supply crate?'
+                }},
+                'snipes': {{
+                    ru: 'Какие предметы в перепроданности (Z-Score)?',
+                    en: 'Oversold items (Z-Score)?'
+                }}
+            }};
+            var lang = getStoredLang();
+            var qObj = questions[promptType] || {{ ru: promptType, en: promptType }};
+            var qText = lang === 'en' ? qObj.en : qObj.ru;
+            executeAiChatQuery(qText, promptType);
+        }}
+
+        function onAiChatSubmit(event) {{
+            if (event) event.preventDefault();
+            var inp = document.getElementById('ai-chat-input');
+            if (!inp) return;
+            var text = inp.value.trim();
+            if (!text) return;
+            inp.value = '';
+            executeAiChatQuery(text, null);
+        }}
+
+        function executeAiChatQuery(question, intent) {{
+            addAiChatMessage('user', question, null);
+            var reply = handleAiChatMessage(question, intent);
+            setTimeout(function() {{
+                addAiChatMessage('assistant', null, reply);
+            }}, 200);
+        }}
+
+        function handleAiChatMessage(question, intent) {{
+            var lang = getStoredLang();
+            var qLower = (question || '').toLowerCase();
+
+            if (!intent) {{
+                if (qLower.indexOf('крафт') !== -1 || qLower.indexOf('craft') !== -1 || qLower.indexOf('зель') !== -1 || qLower.indexOf('potion') !== -1) {{
+                    intent = 'craft';
+                }} else if (qLower.indexOf('трав') !== -1 || qLower.indexOf('herb') !== -1 || qLower.indexOf('мироцвет') !== -1 || qLower.indexOf('серебрянк') !== -1 || qLower.indexOf('магороз') !== -1) {{
+                    intent = 'herbs';
+                }} else if (qLower.indexOf('ящик') !== -1 || qLower.indexOf('crate') !== -1 || qLower.indexOf('снабжен') !== -1 || qLower.indexOf('waylaid') !== -1) {{
+                    intent = 'crates';
+                }} else if (qLower.indexOf('снайп') !== -1 || qLower.indexOf('snipe') !== -1 || qLower.indexOf('z-score') !== -1 || qLower.indexOf('перепродан') !== -1) {{
+                    intent = 'snipes';
+                }}
+            }}
+
+            if (intent === 'craft') {{
+                var craftDeals = [];
+                for (var id in ITEM_STORE) {{
+                    var it = ITEM_STORE[id];
+                    if (it && it.deal_info && it.deal_info.cost > 0 && it.deal_info.profit > 0) {{
+                        craftDeals.push(it);
+                    }}
+                }}
+                craftDeals.sort(function(a, b) {{ return (b.deal_info.profit || 0) - (a.deal_info.profit || 0); }});
+
+                if (craftDeals.length === 0) {{
+                    return lang === 'en'
+                        ? '⚗️ Currently no crafting recipes meet the threshold (ROI ≥ 25%). Keep an eye on herb prices or explore alchemy trainer recipes in the Craft tab.'
+                        : '⚗️ В данный момент нет рецептов с чистой прибылью выше порога (ROI ≥ 25%). Рекомендую следить за ценами на травы или открыть вкладку «Крафт» для рецептов учителей.';
+                }}
+
+                var html = lang === 'en' ? '⚗️ <b>Top Crafting Deals Right Now:</b><br>' : '⚗️ <b>Топ возможностей для крафта прямо сейчас:</b><br>';
+                var top = craftDeals.slice(0, 3);
+                for (var i = 0; i < top.length; i++) {{
+                    var item = top[i];
+                    var name = (lang === 'en' ? item.name_en : item.name_ru) || item.name_ru || item.name_en;
+                    var safeName = String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                    var d = item.deal_info;
+                    html += (i + 1) + '. <b>' + safeName + '</b>: ' +
+                        (lang === 'en' ? 'cost ' : 'себестоимость ') + formatCurrencyHtml(d.cost) + ', ' +
+                        (lang === 'en' ? 'revenue ' : 'выручка ') + formatCurrencyHtml(d.revenue) + ', ' +
+                        (lang === 'en' ? 'profit: ' : 'прибыль: ') + '<span class="profit-cell">+' + formatCurrencyHtml(d.profit) + '</span> ' +
+                        '(ROI: +' + d.roi + '%)<br>';
+                }}
+                html += (lang === 'en' ? '<br>💡 <i>Tip: Check reagent costs in the inspector before mass production.</i>' : '<br>💡 <i>Совет: Проверяйте цены на сырье в инспекторе перед массовым производством.</i>');
+                return html;
+            }}
+
+            if (intent === 'herbs') {{
+                var herbIds = [2447, 765, 2449, 785, 2450, 2452, 3355, 3356, 3369, 3818, 3821, 3357, 3819, 4625, 8831, 8836, 8838, 8839, 8845, 8846, 13463, 13464, 13465, 13466, 13467, 13468];
+                var herbs = [];
+                for (var hi = 0; hi < herbIds.length; hi++) {{
+                    var hid = herbIds[hi];
+                    if (ITEM_STORE[hid]) {{
+                        herbs.push(ITEM_STORE[hid]);
+                    }}
+                }}
+
+                var html = lang === 'en' ? '🌿 <b>Herbalism & Reagents Market Intelligence:</b><br>' : '🌿 <b>Аналитика рынка трав и алхимического сырья:</b><br>';
+                if (herbs.length === 0) {{
+                    return html + (lang === 'en' ? 'Waiting for first auction snapshot for herbs.' : 'Ожидание первых аукционных снимков по травам.');
+                }}
+
+                herbs.sort(function(a, b) {{ return (a.current_price || 0) - (b.current_price || 0); }});
+                var sample = herbs.slice(0, 4);
+                for (var i = 0; i < sample.length; i++) {{
+                    var item = sample[i];
+                    var name = (lang === 'en' ? item.name_en : item.name_ru) || item.name_ru || item.name_en;
+                    var safeName = String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                    var p = item.current_price || 0;
+                    var m = item.mean_price || 0;
+                    var diff = (m > 0 && p > 0) ? Math.round((p - m) / m * 100) : 0;
+                    var diffText = diff < 0 ? ' (' + diff + '% vs ' + (lang === 'en' ? 'avg' : 'средней') + ')' : '';
+                    html += '• <b>' + safeName + '</b>: ' + formatCurrencyHtml(p) + diffText + '<br>';
+                }}
+                html += (lang === 'en' ? '<br>💡 <i>Peacebloom & Silverleaf are primary low-level leveling herbs; Briarthorn & Swiftthistle yield consistent returns.</i>' : '<br>💡 <i>Мироцвет и Сребролист — основа прокачки начальной алхимии; Остротерн и Скорополох дают стабильную маржу.</i>');
+                return html;
+            }}
+
+            if (intent === 'crates') {{
+                var crates = [];
+                for (var id in ITEM_STORE) {{
+                    var it = ITEM_STORE[id];
+                    if (it && it.deal_info && it.deal_info.is_waylaid) {{
+                        crates.push(it);
+                    }}
+                }}
+                crates.sort(function(a, b) {{ return (b.deal_info.profit || 0) - (a.deal_info.profit || 0); }});
+
+                var html = lang === 'en' ? '📦 <b>Top Waylaid Supplies Crates Analysis:</b><br>' : '📦 <b>Анализ ящиков снабжения Waylaid Crates:</b><br>';
+                if (crates.length === 0) {{
+                    return html + (lang === 'en' ? 'No active profitable crates in current snapshot.' : 'Нет активных прибыльных ящиков в текущем снимке.');
+                }}
+
+                var top = crates.slice(0, 3);
+                for (var i = 0; i < top.length; i++) {{
+                    var item = top[i];
+                    var name = (lang === 'en' ? item.name_en : item.name_ru) || item.name_ru || item.name_en;
+                    var safeName = String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                    var d = item.deal_info;
+                    html += (i + 1) + '. <b>' + safeName + '</b>: ' +
+                        (lang === 'en' ? 'turn-in profit: ' : 'прибыль со сдачи: ') + '<span class="profit-cell">+' + formatCurrencyHtml(d.profit) + '</span> ' +
+                        (lang === 'en' ? '(fill cost: ' : '(закупка: ') + formatCurrencyHtml(d.cost) + ')<br>';
+                }}
+                return html;
+            }}
+
+            if (intent === 'snipes') {{
+                var snipes = [];
+                for (var id in ITEM_STORE) {{
+                    var it = ITEM_STORE[id];
+                    if (it && (it.z_score <= -1.8 || (it.deal_info && it.deal_info.signal && it.deal_info.signal.indexOf('BUY') !== -1))) {{
+                        snipes.push(it);
+                    }}
+                }}
+                snipes.sort(function(a, b) {{ return (a.z_score || 0) - (b.z_score || 0); }});
+
+                var html = lang === 'en' ? '📉 <b>Oversold Market Signals (Z-Score &lt; -1.8):</b><br>' : '📉 <b>Сигналы перепроданности рынка (Z-Score &lt; -1.8):</b><br>';
+                if (snipes.length === 0) {{
+                    return html + (lang === 'en' ? 'All asset prices are currently within normal statistical ranges (no panic dumps).' : 'Все активы сейчас торгуются в пределах нормы, панических сбросов цен не зафиксировано.');
+                }}
+
+                var top = snipes.slice(0, 3);
+                for (var i = 0; i < top.length; i++) {{
+                    var item = top[i];
+                    var name = (lang === 'en' ? item.name_en : item.name_ru) || item.name_ru || item.name_en;
+                    var safeName = String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                    html += (i + 1) + '. <b>' + safeName + '</b>: ' +
+                        (lang === 'en' ? 'current: ' : 'текущая: ') + formatCurrencyHtml(item.current_price) + ', ' +
+                        (lang === 'en' ? 'avg: ' : 'средняя: ') + formatCurrencyHtml(item.mean_price) + ' ' +
+                        '(Z: ' + item.z_score + ')<br>';
+                }}
+                return html;
+            }}
+
+            return lang === 'en'
+                ? '🤖 Forever Trade AI Advisor is monitoring live auction prices, vendor shuffles, and crafting margins. Click quick prompt chips above or specify your question (craft, herbs, crates, snipes).'
+                : '🤖 AI Advisor Forever Trade отслеживает аукционные снимки, вендорный арбитраж и маржинальность крафта. Используйте быстрые чипы выше или уточните ваш вопрос (крафт, травы, ящики, снайпинг).';
+        }}
+
+        function addAiChatMessage(sender, text, htmlContent) {{
+            var historyEl = document.getElementById('ai-chat-history');
+            if (!historyEl) return;
+
+            var msgEl = document.createElement('div');
+            msgEl.className = 'ai-msg ' + (sender === 'user' ? 'ai-msg-user' : 'ai-msg-assistant');
+            if (htmlContent) {{
+                msgEl.innerHTML = htmlContent;
+            }} else {{
+                msgEl.textContent = text || '';
+            }}
+            historyEl.appendChild(msgEl);
+            historyEl.scrollTop = historyEl.scrollHeight;
+
+            try {{
+                var saved = JSON.parse(sessionStorage.getItem('ft_ai_chat_history') || '[]');
+                saved.push({{ sender: sender, text: text, htmlContent: htmlContent }});
+                if (saved.length > 30) saved = saved.slice(-30);
+                sessionStorage.setItem('ft_ai_chat_history', JSON.stringify(saved));
+            }} catch(e) {{}}
+        }}
+
+        function clearAiChat() {{
+            try {{
+                sessionStorage.removeItem('ft_ai_chat_history');
+            }} catch(e) {{}}
+            var historyEl = document.getElementById('ai-chat-history');
+            if (historyEl) historyEl.innerHTML = '';
+            initAiChat();
+        }}
+
+        function initAiChat() {{
+            var historyEl = document.getElementById('ai-chat-history');
+            if (!historyEl) return;
+            var lang = getStoredLang();
+
+            var saved = null;
+            try {{
+                var raw = sessionStorage.getItem('ft_ai_chat_history');
+                if (raw) saved = JSON.parse(raw);
+            }} catch(e) {{}}
+
+            if (saved && Array.isArray(saved) && saved.length > 0) {{
+                historyEl.innerHTML = '';
+                saved.forEach(function(msg) {{
+                    var msgEl = document.createElement('div');
+                    msgEl.className = 'ai-msg ' + (msg.sender === 'user' ? 'ai-msg-user' : 'ai-msg-assistant');
+                    if (msg.htmlContent) {{
+                        msgEl.innerHTML = msg.htmlContent;
+                    }} else {{
+                        msgEl.textContent = msg.text || '';
+                    }}
+                    historyEl.appendChild(msgEl);
+                }});
+                historyEl.scrollTop = historyEl.scrollHeight;
+            }} else {{
+                var welcome = lang === 'en'
+                    ? '👋 Welcome to Forever Trade Tactical AI. I analyze snapshots in real time. Choose a quick action below or ask a question.'
+                    : '👋 Приветствую в Forever Trade AI. Я анализирую аукционные данные в реальном времени. Выберите быстрый чип ниже или задайте вопрос по рынку.';
+                addAiChatMessage('assistant', welcome, null);
+            }}
+        }}
+
+        var searchDebounceTimer = null;
+        function onItemSearchDebounced(query) {{
+            if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+            searchDebounceTimer = setTimeout(function() {{
+                onItemSearch(query);
+            }}, 150);
+        }}
+
         function onItemSearch(query) {{
             currentSearchQuery = (query || '').trim().toLowerCase();
             try {{
                 localStorage.setItem('ft_search', currentSearchQuery);
             }} catch(e) {{}}
 
-            var activePane = document.querySelector('.tab-pane.active');
-            if (activePane) {{
-                var rows = activePane.querySelectorAll('tbody tr');
-                rows.forEach(function(row) {{
-                    var text = (row.innerText || row.textContent || '').toLowerCase();
-                    if (!currentSearchQuery || text.indexOf(currentSearchQuery) !== -1) {{
-                        row.style.display = '';
-                    }} else {{
-                        row.style.display = 'none';
-                    }}
-                }});
-            }}
+            applyTableFilters();
             applyItemSelectFilter();
+            renderSearchAutocomplete(query);
         }}
 
         function openItemModal(itemId, event) {{
@@ -3951,7 +4903,12 @@ def build_standalone_dashboard(
 
         function filterCategory(cat) {{
             currentFilterCat = cat;
+            var btns = document.querySelectorAll('.category-filters .cat-btn');
+            btns.forEach(function(b) {{
+                b.classList.toggle('active', b.getAttribute('data-cat') === cat);
+            }});
             applyItemSelectFilter();
+            applyTableFilters();
         }}
 
         function applyItemSelectFilter() {{
@@ -3971,6 +4928,90 @@ def build_standalone_dashboard(
 
         function onSelectDropdownItem(val) {{
             if (val) selectInspectorItem(val);
+        }}
+
+        function saveUIState() {{
+            try {{
+                if (currentActiveTab) localStorage.setItem('ft_active_tab', currentActiveTab);
+                if (currentSelectedItemId) localStorage.setItem('ft_selected_item', String(currentSelectedItemId));
+                var searchInp = document.getElementById('item-search-input');
+                if (searchInp) localStorage.setItem('ft_search', searchInp.value || '');
+                localStorage.setItem('ft_scroll_window', String(window.scrollY || window.pageYOffset || 0));
+                document.querySelectorAll('.tab-pane').forEach(function(pane) {{
+                    var scrollEl = pane.querySelector('.table-scroll');
+                    if (scrollEl && pane.id) {{
+                        localStorage.setItem('ft_scroll_table_' + pane.id, String(scrollEl.scrollTop || 0));
+                    }}
+                }});
+            }} catch(e) {{}}
+        }}
+
+        var AUTO_REFRESH_INTERVAL = 30;
+        var refreshSecondsLeft = AUTO_REFRESH_INTERVAL;
+        var lastUserActivityTime = Date.now();
+        var lastActivityThrottled = 0;
+
+        function recordUserActivity() {{
+            var now = Date.now();
+            if (now - lastActivityThrottled > 1000) {{
+                lastActivityThrottled = now;
+                lastUserActivityTime = now;
+            }}
+        }}
+        ['keydown', 'mousedown', 'mousemove', 'wheel', 'touchstart', 'input'].forEach(function(evt) {{
+            window.addEventListener(evt, recordUserActivity, {{ passive: true }});
+        }});
+
+        function isUserBusy() {{
+            var activeEl = document.activeElement;
+            if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.isContentEditable)) {{
+                return true;
+            }}
+            if (Date.now() - lastUserActivityTime < 5000) {{
+                return true;
+            }}
+            return false;
+        }}
+
+        function updateRefreshTimerUI() {{
+            var timerEl = document.getElementById('refresh-timer');
+            if (!timerEl) return;
+            var lang = getStoredLang();
+            if (isUserBusy() && refreshSecondsLeft <= 5) {{
+                timerEl.textContent = lang === 'en' ? '(paused)' : '(отложено)';
+            }} else {{
+                timerEl.textContent = '(' + refreshSecondsLeft + (lang === 'en' ? 's' : 'с') + ')';
+            }}
+        }}
+
+        function manualRefresh() {{
+            saveUIState();
+            window.location.reload();
+        }}
+
+        function initAutoRefresh() {{
+            refreshSecondsLeft = AUTO_REFRESH_INTERVAL;
+            updateRefreshTimerUI();
+            setInterval(function() {{
+                if (isUserBusy()) {{
+                    if (refreshSecondsLeft <= 5) {{
+                        refreshSecondsLeft = 5;
+                    }} else {{
+                        refreshSecondsLeft--;
+                    }}
+                    updateRefreshTimerUI();
+                    return;
+                }}
+
+                refreshSecondsLeft--;
+                if (refreshSecondsLeft <= 0) {{
+                    refreshSecondsLeft = AUTO_REFRESH_INTERVAL;
+                    saveUIState();
+                    window.location.reload();
+                }} else {{
+                    updateRefreshTimerUI();
+                }}
+            }}, 1000);
         }}
 
         document.addEventListener("DOMContentLoaded", function() {{
@@ -4001,15 +5042,88 @@ def build_standalone_dashboard(
                     selectInspectorItem(savedItem);
                 }} else {{
                     var keys = Object.keys(ITEM_STORE);
-                    if (keys.length > 0) {{
+                    var firstRealKey = null;
+                    for (var ki = 0; ki < keys.length; ki++) {{
+                        var cand = ITEM_STORE[keys[ki]];
+                        var nm = ((cand && (cand.name_ru || cand.name_en || cand.name)) || '').trim();
+                        if (nm && !/^item\s+\d+$/i.test(nm)) {{
+                            firstRealKey = keys[ki];
+                            break;
+                        }}
+                    }}
+                    if (firstRealKey) {{
+                        selectInspectorItem(firstRealKey);
+                    }} else if (keys.length > 0) {{
                         selectInspectorItem(keys[0]);
                     }}
                 }}
+
+                // Restore scroll positions
+                var winScroll = localStorage.getItem('ft_scroll_window');
+                if (winScroll !== null) {{
+                    window.scrollTo(0, parseInt(winScroll, 10) || 0);
+                }}
+                document.querySelectorAll('.tab-pane').forEach(function(pane) {{
+                    var tblScroll = localStorage.getItem('ft_scroll_table_' + pane.id);
+                    var scrollEl = pane.querySelector('.table-scroll');
+                    if (scrollEl && tblScroll !== null) {{
+                        scrollEl.scrollTop = parseInt(tblScroll, 10) || 0;
+                    }}
+                }});
             }} catch(e) {{}}
+
+            // Scroll position tracking & state saving
+            window.addEventListener('scroll', function() {{
+                try {{
+                    localStorage.setItem('ft_scroll_window', String(window.scrollY || window.pageYOffset || 0));
+                }} catch(e) {{}}
+            }}, {{ passive: true }});
+
+            document.querySelectorAll('.table-scroll').forEach(function(el) {{
+                el.addEventListener('scroll', function() {{
+                    var pane = el.closest('.tab-pane');
+                    if (pane && pane.id) {{
+                        try {{
+                            localStorage.setItem('ft_scroll_table_' + pane.id, String(el.scrollTop || 0));
+                        }} catch(e) {{}}
+                    }}
+                }}, {{ passive: true }});
+            }});
+
+            window.addEventListener('beforeunload', saveUIState);
+
+            // Initialize gentle auto-refresh
+            initAutoRefresh();
+
+            // Initialize interactive AI Chat
+            initAiChat();
+
+            // Initialize Profession filter (default: Alchemy)
+            var savedProf = 'alchemy';
+            try {{
+                savedProf = localStorage.getItem('ft_craft_prof') || 'alchemy';
+            }} catch(e) {{}}
+            filterProfession(savedProf);
+
+            // Document click & Escape listeners for search autocomplete dropdown
+            document.addEventListener('click', function(e) {{
+                var searchWrap = document.querySelector('.search-wrapper');
+                var dropdown = document.getElementById('search-autocomplete-dropdown');
+                if (dropdown && searchWrap && !searchWrap.contains(e.target)) {{
+                    dropdown.style.display = 'none';
+                }}
+            }});
+
+            document.addEventListener('keydown', function(e) {{
+                if (e.key === 'Escape') {{
+                    var dropdown = document.getElementById('search-autocomplete-dropdown');
+                    if (dropdown) dropdown.style.display = 'none';
+                }}
+            }});
 
             // Ctrl+K Search Shortcut
             document.addEventListener('keydown', function(e) {{
-                if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.keyCode === 75)) {{
+                if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.keyCode === 75 || e.key === 'л' || e.key === 'Л')) {{
                     e.preventDefault();
                     var inp = document.getElementById('item-search-input');
                     if (inp) {{

@@ -360,8 +360,7 @@ def test_build_standalone_dashboard_empty_database_graceful(memory_db, tmp_path)
 
     assert out_file.exists()
     assert "Нет лотов с вендорной прибылью" in html_content
-    assert "Нет активных маржинальных рецептов" in html_content
-    assert "Аномальных сбросов или всплесков цен не обнаружено" in html_content
+    assert "⚡ Сигналы Strong Buy отсутствуют. Рыночные цены стабильны" in html_content
 
     # Empty chart annotation check (supports literal UTF-8 and JSON-escaped unicode)
     empty_chart_msg = "Нет данных снимков цен в базе"
@@ -701,7 +700,7 @@ def test_dashboard_category_filtering_and_item_selector(populated_dashboard_db, 
     # 2. Search input & dropdown
     assert 'id="item-search-input"' in html_content
     assert 'id="item-select"' in html_content
-    assert 'oninput="onItemSearch(this.value)"' in html_content
+    assert 'oninput="onItemSearchDebounced(this.value)"' in html_content
     assert 'onchange="onSelectDropdownItem(this.value)"' in html_content
 
     # 3. Dropdown options have necessary metadata
@@ -780,22 +779,27 @@ def test_dashboard_item_modal_empty_snapshots_state(memory_db, tmp_path, monkeyp
 # ===========================================================================
 
 def test_dashboard_meta_refresh_tag(populated_dashboard_db, tmp_path):
-    """Verify presence of <meta http-equiv="refresh" content="30"> tag in <head> (R52)."""
+    """Verify gentle auto-refresh mechanism: no intrusive <meta http-equiv="refresh">,
+    and presence of initAutoRefresh(), #refresh-timer, and #btn-refresh-dashboard.
+    """
     out_file = tmp_path / "refresh_portal.html"
     html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file))
 
-    # Read from generated file on disk
     disk_html = out_file.read_text(encoding="utf-8")
     assert disk_html == html_content
 
-    # Check meta tag presence
-    assert '<meta http-equiv="refresh" content="30">' in disk_html
-
-    # Check that it is located within the <head> block
+    # 1. Hard meta refresh tag MUST NOT be present in <head>
     head_match = re.search(r"<head>(.*?)</head>", disk_html, re.DOTALL | re.IGNORECASE)
     assert head_match is not None, "<head> block not found in HTML"
     head_content = head_match.group(1)
-    assert '<meta http-equiv="refresh" content="30">' in head_content
+    assert '<meta http-equiv="refresh"' not in head_content
+
+    # 2. Gentle JS auto-refresh and controls present
+    assert 'id="btn-refresh-dashboard"' in disk_html
+    assert 'id="refresh-timer"' in disk_html
+    assert "manualRefresh()" in disk_html
+    assert "initAutoRefresh()" in disk_html
+    assert "isUserBusy()" in disk_html
 
 
 def test_dashboard_header_timestamps(populated_dashboard_db, tmp_path):
@@ -1343,6 +1347,7 @@ def test_all_signal_tabs_present_and_configured(populated_dashboard_db, tmp_path
     expected_tabs = [
         ("price-anomalies", "Strong Buy"),
         ("vendor-arbitrage", "Арбитраж"),
+        ("tab-disenchant", "Дизэнчант"),
         ("waylaid-crates", "Крафт (Dual)"),
         ("tab-crates", "Ящики"),
         ("tab-shuffle", "Вендор-шаффл"),
@@ -1370,9 +1375,9 @@ def test_all_signal_tabs_present_and_configured(populated_dashboard_db, tmp_path
     # 4. Check sortable tables inside each signal pane
     signal_panes = ["price-anomalies", "vendor-arbitrage", "waylaid-crates", "tab-crates", "tab-shuffle"]
     for pane_id in signal_panes:
-        pane_match = re.search(rf'<div\s+class=[\'"][^\'"]*tab-pane[^\'"]*[\'"][^>]*id=[\'"]{pane_id}[\'"][^>]*>(.*?)</div>\s*(?:<!--|<div|\s*</section>)', html_content, re.DOTALL)
+        pane_match = re.search(rf'<div\s+class=[\'"][^\'"]*tab-pane[^\'"]*[\'"][^>]*id=[\'"]{pane_id}[\'"][^>]*>(.*?)</table>', html_content, re.DOTALL)
         assert pane_match is not None, f"Pane content for '{pane_id}' not found"
-        pane_html = pane_match.group(1)
+        pane_html = pane_match.group(1) + '</table>'
         assert '<table class="sortable">' in pane_html, f"Sortable table not found in pane '{pane_id}'"
         assert '<thead>' in pane_html, f"thead not found in pane '{pane_id}'"
         assert '<tbody>' in pane_html, f"tbody not found in pane '{pane_id}'"
@@ -1452,7 +1457,7 @@ def test_anomalies_only_strong_sell_shows_empty_state_in_strong_buy_table(memory
     tbody_html = pane_match.group(1)
 
     assert "empty-state" in tbody_html
-    assert "Аномальных сбросов или всплесков цен не обнаружено" in tbody_html
+    assert "⚡ Сигналы Strong Buy отсутствуют. Рыночные цены стабильны" in tbody_html
     assert "STRONG_SELL" not in tbody_html
     assert "Overpriced Herb" not in tbody_html
 
@@ -1875,11 +1880,11 @@ def test_dashboard_stock_exchange_chart_controls_and_layout(populated_dashboard_
     assert 'data-mode="candles"' in html
     assert 'data-mode="line"' in html
 
-    # 2. Timeframe buttons (24h, 3d, 7d, all)
+    # 2. Timeframe buttons (1h, 4h, 24h, all)
     assert ('class="chart-control-group chart-tf-group"' in html or 'ft-tf-btn' in html)
+    assert 'data-tf="1h"' in html
+    assert 'data-tf="4h"' in html
     assert 'data-tf="24h"' in html
-    assert 'data-tf="3d"' in html
-    assert 'data-tf="7d"' in html
     assert 'data-tf="all"' in html
 
     # 3. Secondary volume axis (yaxis2)
@@ -1890,9 +1895,9 @@ def test_dashboard_stock_exchange_chart_controls_and_layout(populated_dashboard_
     # 4. Localized Russian labels for chart controls
     assert 'data-ru="Свечи"' in html
     assert 'data-ru="Линия"' in html
+    assert 'data-ru="1ч"' in html
+    assert 'data-ru="4ч"' in html
     assert 'data-ru="24ч"' in html
-    assert 'data-ru="3д"' in html
-    assert 'data-ru="7д"' in html
     assert 'data-ru="Все"' in html
 
     # 5. Client JavaScript functions for chart interaction
@@ -1984,6 +1989,142 @@ def test_build_price_history_chart_and_inspector_data_points(memory_db):
     assert it_multi["mean_price"] == expected_mean
     assert isinstance(it_multi["z_score"], float)
     assert it_multi["z_score"] > 0.0  # current price (200) > mean (166) -> positive z-score
+
+
+# ===========================================================================
+# 7. Ticket 07: Hourly Candles, AI Chat, Professions & Autocomplete Tests
+# ===========================================================================
+
+def test_dashboard_hourly_candles_and_overview_panel(populated_dashboard_db, tmp_path):
+    """Verify Market Overview tab contains candlestick exchange chart #overview-exchange-chart,
+    hourly timeframes (1h, 4h, 24h, all), commodity selector and quick chips.
+    """
+    out_file = tmp_path / "overview_candles_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    assert 'id="overview-exchange-chart"' in html_content
+    assert 'class="overview-chart-panel"' in html_content
+    assert 'id="overview-item-select"' in html_content
+
+    for tf in ("1h", "4h", "24h", "all"):
+        assert f'data-ov-tf="{tf}"' in html_content
+        assert f"setOverviewTimeframe('{tf}')" in html_content
+
+    assert 'id="ov-btn-candles"' in html_content
+    assert 'id="ov-btn-line"' in html_content
+    assert "setOverviewMode('candles')" in html_content
+    assert "setOverviewMode('line')" in html_content
+
+    assert "selectOverviewCommodity(2447)" in html_content  # Peacebloom / Мироцвет
+    assert "selectOverviewCommodity(765)" in html_content   # Silverleaf / Сребролист
+    assert "selectOverviewCommodity(2450)" in html_content  # Briarthorn / Остротерн
+    assert "selectOverviewCommodity(2452)" in html_content  # Swiftthistle / Скорополох
+    assert "selectOverviewCommodity(2840)" in html_content  # Copper Bar / Медный слиток
+    assert "selectOverviewCommodity(2318)" in html_content  # Light Leather / Тонкая кожа
+
+    assert "function renderOverviewCandleChart(itemId)" in html_content
+    assert "type: 'candlestick'" in html_content
+    assert "candleOpen" in html_content
+    assert "candleHigh" in html_content
+    assert "candleLow" in html_content
+    assert "candleClose" in html_content
+
+
+def test_dashboard_ai_chat_interface(populated_dashboard_db, tmp_path):
+    """Verify interactive AI Chat UI, prompt chips, input form, and message handling logic."""
+    out_file = tmp_path / "ai_chat_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    assert 'id="ai-advisor-banner"' in html_content
+    assert 'id="ai-chat-history"' in html_content
+    assert 'class="ai-chat-section"' in html_content
+    assert 'class="btn-clear-chat"' in html_content
+    assert 'onclick="clearAiChat()"' in html_content
+
+    for prompt_type in ("craft", "herbs", "crates", "snipes"):
+        assert f"sendAiQuickPrompt('{prompt_type}')" in html_content
+
+    assert 'class="ai-chat-form"' in html_content
+    assert 'id="ai-chat-input"' in html_content
+    assert 'class="ai-chat-send-btn"' in html_content
+    assert "onAiChatSubmit(event)" in html_content
+
+    assert "function sendAiQuickPrompt(promptType)" in html_content
+    assert "function handleAiChatMessage(question, intent)" in html_content
+    assert "function addAiChatMessage(sender, text, htmlContent)" in html_content
+    assert "function clearAiChat()" in html_content
+
+
+def test_dashboard_profession_filter_bar(memory_db, tmp_path):
+    """Verify profession filter bar on Craft tab, profession buttons, and data-profession attributes."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (601, "Heavy Copper Broadsword", 2, 2, "craftable", 200, 0),
+                (602, "Copper Bar", 1, 7, "raw", 10, 0),
+            ],
+        )
+        memory_db.execute(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (1, 'Heavy Copper Broadsword', 'Blacksmithing', 601, 1.0)"""
+        )
+        memory_db.execute(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (1, 602, 602, 2, 2)"""
+        )
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, 'Everlook', ?, ?)""",
+            [(601, 1000, now), (602, 100, now)],
+        )
+
+    out_file = tmp_path / "prof_portal.html"
+    html_content = build_standalone_dashboard(memory_db, output_path=str(out_file), realm="Everlook")
+
+    assert 'class="profession-filter-bar"' in html_content
+
+    for prof in ("all", "alchemy", "blacksmithing", "tailoring", "leatherworking", "engineering"):
+        assert f'data-prof="{prof}"' in html_content
+        assert f"filterProfession('{prof}')" in html_content
+
+    assert 'class="prof-btn active" data-prof="alchemy"' in html_content
+    assert "data-profession='blacksmithing'" in html_content
+    assert "function filterProfession(prof)" in html_content
+    assert "localStorage.setItem('ft_craft_prof', prof)" in html_content
+
+
+def test_dashboard_search_autocomplete_and_shortcut(populated_dashboard_db, tmp_path):
+    """Verify search autocomplete dropdown, Ctrl+K shortcut, and autocomplete rendering function."""
+    out_file = tmp_path / "autocomplete_portal.html"
+    html_content = build_standalone_dashboard(populated_dashboard_db, output_path=str(out_file), realm="Everlook")
+
+    assert 'class="header-center search-wrapper"' in html_content
+    assert 'id="search-autocomplete-dropdown"' in html_content
+    assert 'class="search-autocomplete-dropdown"' in html_content
+
+    assert 'oninput="onItemSearchDebounced(this.value)"' in html_content
+    assert 'id="item-search-input"' in html_content
+
+    assert "function renderSearchAutocomplete(q)" in html_content
+    assert "function onSelectAutocompleteItem(itemId)" in html_content
+    assert "function onItemSearchDebounced(query)" in html_content
+
+    assert "e.ctrlKey || e.metaKey" in html_content
+    assert "'k'" in html_content
+    assert "'л'" in html_content or "'\\u043b'" in html_content
+
+
+def test_dashboard_alchemy_recipes_and_source_details(memory_db, tmp_path):
+    """Verify alchemy recipes from herbalism_alchemy_era.json are supplemented with sources and vendor vial pricing."""
+    out_file = tmp_path / "alchemy_sources_portal.html"
+    html_content = build_standalone_dashboard(memory_db, output_path=str(out_file), realm="Everlook")
+
+    assert "data-profession='alchemy'" in html_content
+    assert 'data-ru="Где взять рецепт / Ящик"' in html_content
+    assert "Alchemy" in html_content
 
 
 

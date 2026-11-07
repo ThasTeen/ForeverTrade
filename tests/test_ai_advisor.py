@@ -967,5 +967,5 @@ def test_dashboard_graceful_without_ai_advice(populated_advisor_db, tmp_path):
     content = html_file.read_text(encoding="utf-8")
 
     assert 'id="ai-advisor-banner"' in content
-    assert "ai-empty" in content
+    assert 'id="ai-chat-history"' in content
     assert "Рекомендации AI-ассистента не сформированы" in content

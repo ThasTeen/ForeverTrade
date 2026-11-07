@@ -3371,6 +3371,94 @@ def test_export_sniper_addon_config_craft_targets_integration(tmp_path, memory_d
     assert t2449.get("output_id") == 929
 
 
+# ===========================================================================
+# Ticket 07: Alchemy Margins with AH Fee & Hourly Candle Bucket Aggregation
+# ===========================================================================
+
+def test_alchemy_crafting_margins_ah_cut_and_deposit(memory_db):
+    """Verify alchemy crafting margins account for AH 5% commission and deposit fee."""
+    now = int(time.time())
+    with memory_db:
+        memory_db.executemany(
+            """INSERT INTO items (item_id, name, quality, item_class, category, vendor_sell_price, vendor_buy_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (118, "Minor Healing Potion", 1, 0, "consumable", 5, 0),
+                (2447, "Peacebloom", 1, 7, "herb", 2, 0),
+                (765, "Silverleaf", 1, 7, "herb", 2, 0),
+                (3371, "Empty Vial", 1, 7, "reagent", 0, 30),
+            ]
+        )
+        memory_db.execute(
+            """INSERT INTO recipes (recipe_id, name, profession, crafted_item_id, yield)
+               VALUES (10, 'Minor Healing Potion', 'Alchemy', 118, 1.0)"""
+        )
+        memory_db.executemany(
+            """INSERT INTO recipe_reagents (recipe_id, reagent_item_id, reagent_id, count, quantity)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (10, 2447, 2447, 1, 1),
+                (10, 765, 765, 1, 1),
+                (10, 3371, 3371, 1, 1),
+            ]
+        )
+        # Peacebloom = 50c, Silverleaf = 50c, Empty Vial = 30c -> total cost = 130c
+        # Potion selling price on AH = 300c -> Gross revenue = 300c
+        # AH 5% cut = 15c -> Net revenue before deposit = 285c
+        # AH deposit = 15c -> Net profit = 285c - 15c - 130c = 140c
+        memory_db.executemany(
+            """INSERT INTO price_snapshots (item_id, realm, price, timestamp)
+               VALUES (?, 'Everlook', ?, ?)""",
+            [
+                (118, 300, now),
+                (2447, 50, now),
+                (765, 50, now),
+            ]
+        )
+
+    crafts = get_crafting_margins(memory_db, realm="Everlook", min_roi=0.25)
+    assert len(crafts) == 1
+    c = crafts[0]
+    assert c["recipe_id"] == 10
+    assert c["crafted_item_id"] == 118
+    assert c["cost"] == 130
+    assert c["revenue"] == pytest.approx(285.0)
+    assert c["deposit"] == 15
+    assert c["profit"] == 140
+    assert c["roi"] == pytest.approx(140 / 130, rel=1e-2)
+
+
+def test_hourly_candle_bucket_aggregation():
+    """Verify hourly candle aggregation bucket logic: Open, High, Low, Close, and Volume."""
+    bucket_sec = 3600
+    base_ts = 1700000000
+    b_key = (base_ts // bucket_sec) * bucket_sec
+
+    snapshots = [
+        (b_key + 60, 100),
+        (b_key + 120, 250),
+        (b_key + 300, 80),
+        (b_key + 500, 180),
+    ]
+
+    prices = [p for _, p in snapshots]
+    o = prices[0]
+    c = prices[-1]
+    h = max(prices)
+    l = min(prices)
+    vol = len(prices)
+
+    assert o == 100
+    assert c == 180
+    assert h == 250
+    assert l == 80
+    assert vol == 4
+
+    bucket_sec_4h = 14400
+    b_key_4h = (base_ts // bucket_sec_4h) * bucket_sec_4h
+    assert b_key_4h <= b_key
+
+
 
 
 

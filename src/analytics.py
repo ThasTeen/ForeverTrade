@@ -605,11 +605,38 @@ def get_crafting_margins(
             waylaid_crates[r[2]] = crate_obj
 
     # 4. Recipes and reagents
-    cursor.execute("SELECT recipe_id, name, profession, crafted_item_id, yield FROM recipes")
-    recipes = [
-        {"recipe_id": r[0], "name": r[1], "profession": r[2], "crafted_item_id": r[3], "yield": r[4]}
-        for r in cursor.fetchall()
-    ]
+    try:
+        cursor.execute("SELECT recipe_id, name, profession, crafted_item_id, yield, min_skill, source, source_details_ru, source_details_en FROM recipes")
+        recipes = [
+            {
+                "recipe_id": r[0],
+                "name": r[1],
+                "profession": r[2],
+                "crafted_item_id": r[3],
+                "yield": r[4],
+                "min_skill": r[5] or 1,
+                "source": r[6] or "trainer",
+                "source_details_ru": r[7],
+                "source_details_en": r[8],
+            }
+            for r in cursor.fetchall()
+        ]
+    except sqlite3.OperationalError:
+        cursor.execute("SELECT recipe_id, name, profession, crafted_item_id, yield FROM recipes")
+        recipes = [
+            {
+                "recipe_id": r[0],
+                "name": r[1],
+                "profession": r[2],
+                "crafted_item_id": r[3],
+                "yield": r[4],
+                "min_skill": 1,
+                "source": "trainer",
+                "source_details_ru": None,
+                "source_details_en": None,
+            }
+            for r in cursor.fetchall()
+        ]
 
     cursor.execute("SELECT recipe_id, reagent_item_id, count, quantity FROM recipe_reagents")
     reagents_by_recipe = defaultdict(list)
@@ -766,6 +793,10 @@ def get_crafting_margins(
             "recipe_id": recipe_id,
             "name": recipe["name"],
             "profession": profession,
+            "min_skill": recipe.get("min_skill", 1),
+            "source": recipe.get("source", "trainer"),
+            "source_details_ru": recipe.get("source_details_ru"),
+            "source_details_en": recipe.get("source_details_en"),
             "crafted_item_id": crafted_item_id,
             "crafted_item_name": crafted_meta.get("name", recipe["name"]),
             "crafted_item_price": p_out,
