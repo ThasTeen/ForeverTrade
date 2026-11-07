@@ -21,8 +21,9 @@ FT_QueriesCount = 0
 FT_LotsScannedCount = 0
 FT_CustomMinProfit = nil
 
--- Target customizations (SavedVariables: FT_CustomTargets)
+-- Target customizations (SavedVariables: FT_CustomTargets, FT_SniperSettings)
 FT_CustomTargets = FT_CustomTargets or {}
+FT_SniperSettings = FT_SniperSettings or { mode = "LIST", minProfit = 5000, selectedList = 1 }
 
 function FT_HasCustomSelection()
     if not FT_CustomTargets then return false end
@@ -364,13 +365,259 @@ local function FT_GetEffectiveMinProfit()
     if FT_CustomMinProfit ~= nil then
         return FT_CustomMinProfit
     end
+    if FT_SniperSettings and FT_SniperSettings.minProfit ~= nil then
+        return FT_SniperSettings.minProfit
+    end
     return (FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.min_profit_copper) or 1000
+end
+
+-- Helper: Clean items by stripping outer quotes and query syntax before ';'
+local function FT_CleanItemString(str)
+    if not str or type(str) ~= "string" then return "" end
+    local s = str
+    if s:find(";") then
+        s = s:match("^([^;]+)") or s
+    end
+    s = s:match("^%s*(.-)%s*$") or ""
+    local unquoted = s:match('^"(.-)"$')
+    if unquoted then
+        s = unquoted:match("^%s*(.-)%s*$") or ""
+    end
+    return s
+end
+
+-- Helper: Match item names to IDs using FT_SNIPER_CONFIG.names, reverse lookup, or GetItemInfo
+local FT_NameToIdCache = nil
+
+function FT_GetItemIdByName(itemName)
+    if not itemName or itemName == "" then return nil end
+    local num = tonumber(itemName)
+    if num then return num end
+
+    if not FT_NameToIdCache then
+        FT_NameToIdCache = {}
+        if FT_SNIPER_CONFIG then
+            if FT_SNIPER_CONFIG.targets then
+                for id, t in pairs(FT_SNIPER_CONFIG.targets) do
+                    local n = (type(t) == "table" and t.name) or nil
+                    if n and type(n) == "string" then
+                        FT_NameToIdCache[n:lower()] = tonumber(id)
+                    end
+                end
+            end
+            if FT_SNIPER_CONFIG.names then
+                for id, n in pairs(FT_SNIPER_CONFIG.names) do
+                    if type(n) == "string" then
+                        FT_NameToIdCache[n:lower()] = tonumber(id)
+                    end
+                end
+            end
+        end
+    end
+
+    local lowerName = itemName:lower()
+    if FT_NameToIdCache[lowerName] then
+        return FT_NameToIdCache[lowerName]
+    end
+
+    if type(GetItemInfo) == "function" then
+        local _, link = GetItemInfo(itemName)
+        if link then
+            local id = link:match("item:(%d+)")
+            if id then
+                local numId = tonumber(id)
+                FT_NameToIdCache[lowerName] = numId
+                return numId
+            end
+        end
+    end
+
+    return nil
+end
+
+function FT_GetAvailableLists()
+    local lists = {}
+    if AUCTIONATOR_SHOPPING_LISTS and type(AUCTIONATOR_SHOPPING_LISTS) == "table" and #AUCTIONATOR_SHOPPING_LISTS > 0 then
+        for idx, l in ipairs(AUCTIONATOR_SHOPPING_LISTS) do
+            if type(l) == "table" and l.name and l.items then
+                table.insert(lists, {
+                    index = idx,
+                    name = l.name,
+                    items = l.items,
+                })
+            end
+        end
+    end
+    return lists
+end
+
+function FT_GetSelectedListDisplayName()
+    local lists = FT_GetAvailableLists()
+    if #lists == 0 then
+        return "Цели FT"
+    end
+    local cur = (FT_SniperSettings and FT_SniperSettings.selectedList) or 1
+    if cur == 0 or cur > #lists then
+        return "Все списки"
+    end
+    return lists[cur].name or ("Список #" .. cur)
+end
+
+local FT_CachedItemList = {}
+local FT_FilteredItemList = {}
+local FT_ActiveItemsMap = {}
+local FT_SearchQuery = ""
+local FT_RefreshUIPanel = nil -- forward declaration
+
+local function FT_FilterItemList()
+    FT_FilteredItemList = {}
+    local query = FT_SearchQuery and FT_SearchQuery:lower():gsub("^%s*(.-)%s*$", "%1") or ""
+
+    for _, it in ipairs(FT_CachedItemList) do
+        if query == "" then
+            table.insert(FT_FilteredItemList, it)
+        else
+            local matchName = it.name and it.name:lower():find(query, 1, true)
+            local matchRecipe = it.recipeName and it.recipeName:lower():find(query, 1, true)
+            local matchId = tostring(it.id):find(query, 1, true)
+            if matchName or matchRecipe or matchId then
+                table.insert(FT_FilteredItemList, it)
+            end
+        end
+    end
+end
+
+function FT_RebuildItemList()
+    FT_CachedItemList = {}
+    FT_ActiveItemsMap = {}
+
+    local lists = FT_GetAvailableLists()
+    local targets = (FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.targets) or {}
+
+    if #lists == 0 then
+        -- Fallback to FT_SNIPER_CONFIG.targets
+        for rawId, tVal in pairs(targets) do
+            local itemId = tonumber(rawId)
+            if itemId then
+                local defTarget = type(tVal) == "table" and (tVal.target or 0) or tonumber(tVal) or 0
+                local name = (type(tVal) == "table" and tVal.name) or (FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.names and FT_SNIPER_CONFIG.names[itemId]) or ("Item " .. itemId)
+                local craftTarget = type(tVal) == "table" and tVal.craft_target
+                local recipeName = type(tVal) == "table" and tVal.recipe_name
+
+                table.insert(FT_CachedItemList, {
+                    id = itemId,
+                    defaultTarget = defTarget,
+                    name = name,
+                    craftTarget = craftTarget,
+                    recipeName = recipeName,
+                })
+                FT_ActiveItemsMap[itemId] = true
+            end
+        end
+    else
+        local sel = (FT_SniperSettings and FT_SniperSettings.selectedList) or 1
+        local rawItemsToProcess = {}
+
+        if sel == 0 or sel > #lists then
+            -- "Все списки": merge items from all shopping lists
+            for _, l in ipairs(lists) do
+                if l.items then
+                    for _, it in ipairs(l.items) do
+                        table.insert(rawItemsToProcess, it)
+                    end
+                end
+            end
+        else
+            local l = lists[sel]
+            if l and l.items then
+                for _, it in ipairs(l.items) do
+                    table.insert(rawItemsToProcess, it)
+                end
+            end
+        end
+
+        local seenIds = {}
+        for _, rawIt in ipairs(rawItemsToProcess) do
+            local clean = FT_CleanItemString(rawIt)
+            if clean and clean ~= "" then
+                local itemId = FT_GetItemIdByName(clean)
+                if itemId and not seenIds[itemId] then
+                    seenIds[itemId] = true
+                    FT_ActiveItemsMap[itemId] = true
+
+                    local rawTarget = targets[itemId]
+                    local defTarget = type(rawTarget) == "table" and (rawTarget.target or 0) or tonumber(rawTarget) or 0
+                    local name = (type(rawTarget) == "table" and rawTarget.name) or (FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.names and FT_SNIPER_CONFIG.names[itemId]) or clean
+                    local craftTarget = type(rawTarget) == "table" and rawTarget.craft_target
+                    local recipeName = type(rawTarget) == "table" and rawTarget.recipe_name
+
+                    table.insert(FT_CachedItemList, {
+                        id = itemId,
+                        defaultTarget = defTarget,
+                        name = name,
+                        craftTarget = craftTarget,
+                        recipeName = recipeName,
+                    })
+                end
+            end
+        end
+    end
+
+    table.sort(FT_CachedItemList, function(a, b)
+        if a.name == b.name then
+            return a.id < b.id
+        end
+        return a.name < b.name
+    end)
+
+    FT_FilterItemList()
+end
+
+function FT_CycleShoppingList(step)
+    step = step or 1
+    FT_SniperSettings = FT_SniperSettings or {}
+    local lists = FT_GetAvailableLists()
+    if #lists == 0 then
+        FT_SniperSettings.selectedList = 1
+        FT_RebuildItemList()
+        if FT_RefreshUIPanel then FT_RefreshUIPanel(true) end
+        return
+    end
+
+    local cur = FT_SniperSettings.selectedList or 1
+    if step > 0 then
+        if cur == 0 then
+            cur = 1
+        elseif cur >= #lists then
+            cur = 0 -- "Все списки"
+        else
+            cur = cur + 1
+        end
+    else
+        if cur == 0 then
+            cur = #lists
+        elseif cur <= 1 then
+            cur = 0 -- "Все списки"
+        else
+            cur = cur - 1
+        end
+    end
+
+    FT_SniperSettings.selectedList = cur
+    FT_RebuildItemList()
+    if FT_RefreshUIPanel then FT_RefreshUIPanel(true) end
 end
 
 -- Mechanism 3: Unit-price check, profit filter, candidate selection
 local function FT_ScanCurrentPage(addedResults)
     local minProfit = FT_GetEffectiveMinProfit()
     local targets = (FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.targets) or {}
+    local isListMode = (not FT_SniperSettings) or (FT_SniperSettings.mode == "LIST")
+
+    if isListMode and next(FT_ActiveItemsMap) == nil then
+        FT_RebuildItemList()
+    end
+
     local bestCandidate = nil
 
     if FT_IsModernAH() and C_AuctionHouse and C_AuctionHouse.GetBrowseResults then
@@ -383,43 +630,64 @@ local function FT_ScanCurrentPage(addedResults)
 
             for _, res in ipairs(results) do
                 local itemId = res.itemKey and res.itemKey.itemID
-                if itemId and FT_IsItemActive(itemId) then
-                    local count = res.totalQuantity or 1
-                    local minPrice = res.minPrice or 0
-                    local rawTarget = targets[itemId]
-                    local defaultTarget = type(rawTarget) == "table" and rawTarget.target or rawTarget
-                    local unitTarget = defaultTarget and FT_GetEffectiveTargetPrice(itemId, defaultTarget)
+                if itemId and not res.containsOwnerItem then
+                    local shouldCheck = false
+                    if isListMode then
+                        shouldCheck = FT_ActiveItemsMap[itemId] and FT_IsItemActive(itemId)
+                    else
+                        shouldCheck = true
+                    end
 
-                    if unitTarget and minPrice > 0 and not res.containsOwnerItem then
-                        local unitPrice = minPrice
-                        local totalSaved = (unitTarget - unitPrice) * count
-                        if unitPrice <= unitTarget and (minProfit <= 0 or totalSaved >= minProfit) then
-                        local hash = string.format("m_%d_%d_%d", itemId, count, minPrice)
-                        if not FT_SeenCache[hash] then
-                            if not bestCandidate or totalSaved > bestCandidate.totalSaved then
-                                local itemLink = nil
-                                if type(GetItemInfo) == "function" then
-                                    local _, l = GetItemInfo(itemId)
-                                    itemLink = l
-                                    if not itemLink and C_Item and C_Item.RequestLoadItemDataByID then
-                                        C_Item.RequestLoadItemDataByID(itemId)
+                    if shouldCheck then
+                        local count = res.totalQuantity or 1
+                        local minPrice = res.minPrice or 0
+                        local rawTarget = targets[itemId]
+                        local defaultTarget = type(rawTarget) == "table" and rawTarget.target or rawTarget or 0
+                        local unitTarget = defaultTarget and FT_GetEffectiveTargetPrice(itemId, defaultTarget) or 0
+                        if unitTarget <= 0 and type(GetItemInfo) == "function" then
+                            local _, _, _, _, _, _, _, _, _, _, sp = GetItemInfo(itemId)
+                            unitTarget = sp or 0
+                        end
+
+                        if unitTarget and unitTarget > 0 and minPrice > 0 and count > 0 then
+                            local unitPrice = minPrice
+                            local totalSaved = (unitTarget - unitPrice) * count
+
+                            local matches = false
+                            if isListMode then
+                                matches = (unitPrice <= unitTarget)
+                            else
+                                matches = (unitPrice <= unitTarget) and (minProfit <= 0 or totalSaved >= minProfit)
+                            end
+
+                            if matches then
+                                local hash = string.format("m_%d_%d_%d", itemId, count, minPrice)
+                                if not FT_SeenCache[hash] then
+                                    if not bestCandidate or totalSaved > bestCandidate.totalSaved then
+                                        local itemLink = nil
+                                        if type(GetItemInfo) == "function" then
+                                            local _, l = GetItemInfo(itemId)
+                                            itemLink = l
+                                            if not itemLink and C_Item and C_Item.RequestLoadItemDataByID then
+                                                C_Item.RequestLoadItemDataByID(itemId)
+                                            end
+                                        end
+                                        bestCandidate = {
+                                            index = res.auctionID or 0,
+                                            itemId = itemId,
+                                            buyout = minPrice,
+                                            hash = hash,
+                                            totalSaved = totalSaved,
+                                            count = count,
+                                            unitPrice = unitPrice,
+                                            unitTarget = unitTarget,
+                                            link = itemLink,
+                                        }
                                     end
                                 end
-                                bestCandidate = {
-                                    index = res.auctionID or 0,
-                                    itemId = itemId,
-                                    buyout = minPrice,
-                                    hash = hash,
-                                    totalSaved = totalSaved,
-                                    count = count,
-                                    unitPrice = unitPrice,
-                                    unitTarget = unitTarget,
-                                    link = itemLink,
-                                }
                             end
                         end
                     end
-                end
                 end
             end
         end
@@ -444,33 +712,54 @@ local function FT_ScanCurrentPage(addedResults)
             local link = (type(GetAuctionItemLink) == "function") and GetAuctionItemLink("list", i)
             local itemId = (rawItemId and rawItemId > 0 and rawItemId) or (link and tonumber(string.match(link, "item:(%d+)")))
 
-            if itemId and FT_IsItemActive(itemId) then
-                local rawTarget = targets[itemId]
-                local defaultTarget = type(rawTarget) == "table" and rawTarget.target or rawTarget
-                local unitTarget = defaultTarget and FT_GetEffectiveTargetPrice(itemId, defaultTarget)
+            if itemId and buyout > 0 and count > 0 then
+                local shouldCheck = false
+                if isListMode then
+                    shouldCheck = FT_ActiveItemsMap[itemId] and FT_IsItemActive(itemId)
+                else
+                    shouldCheck = true
+                end
 
-                if unitTarget and buyout and buyout > 0 and count > 0 then
-                    local unitPrice = buyout / count
-                    local totalSaved = (unitTarget - unitPrice) * count
-                    if unitPrice <= unitTarget and (minProfit <= 0 or totalSaved >= minProfit) then
-                    local hash = string.format("%d_%d_%d_%d", itemId, count, minBid, buyout)
-                    if not FT_SeenCache[hash] then
-                        if not bestCandidate or totalSaved > bestCandidate.totalSaved then
-                            bestCandidate = {
-                                index = i,
-                                itemId = itemId,
-                                buyout = buyout,
-                                hash = hash,
-                                totalSaved = totalSaved,
-                                count = count,
-                                unitPrice = unitPrice,
-                                unitTarget = unitTarget,
-                                link = link,
-                            }
+                if shouldCheck then
+                    local rawTarget = targets[itemId]
+                    local defaultTarget = type(rawTarget) == "table" and rawTarget.target or rawTarget or 0
+                    local unitTarget = defaultTarget and FT_GetEffectiveTargetPrice(itemId, defaultTarget) or 0
+                    if unitTarget <= 0 and type(GetItemInfo) == "function" then
+                        local _, _, _, _, _, _, _, _, _, _, sp = GetItemInfo(itemId)
+                        unitTarget = sp or 0
+                    end
+
+                    if unitTarget and unitTarget > 0 then
+                        local unitPrice = buyout / count
+                        local totalSaved = (unitTarget - unitPrice) * count
+
+                        local matches = false
+                        if isListMode then
+                            matches = (unitPrice <= unitTarget)
+                        else
+                            matches = (unitPrice <= unitTarget) and (minProfit <= 0 or totalSaved >= minProfit)
+                        end
+
+                        if matches then
+                            local hash = string.format("%d_%d_%d_%d", itemId, count, minBid, buyout)
+                            if not FT_SeenCache[hash] then
+                                if not bestCandidate or totalSaved > bestCandidate.totalSaved then
+                                    bestCandidate = {
+                                        index = i,
+                                        itemId = itemId,
+                                        buyout = buyout,
+                                        hash = hash,
+                                        totalSaved = totalSaved,
+                                        count = count,
+                                        unitPrice = unitPrice,
+                                        unitTarget = unitTarget,
+                                        link = link,
+                                    }
+                                end
+                            end
                         end
                     end
                 end
-            end
             end
         end
     end
@@ -512,9 +801,10 @@ local function FT_PrintStatus()
     local minProf = FT_GetEffectiveMinProfit()
     local engineName = FT_IsModernAH() and "Modern AH (C_AuctionHouse)" or "Legacy AH"
     local stateStr = FT_IsEnabled and "|cff00ff00АКТИВЕН|r" or "|cffff4444ВЫКЛЮЧЕН|r"
+    local modeDesc = (FT_SniperSettings and FT_SniperSettings.mode == "ALL") and "Все лоты" or ("Список [" .. FT_GetSelectedListDisplayName() .. "]")
     FT_Print(string.format(
-        "Статус: %s | Движок: |cffffd100%s|r | Запросов: %d | Проверено лотов: %d | Целей в базе: %d (настроено: %d) | Мин. профит: %d мед. (%.2fs)",
-        stateStr, engineName, FT_QueriesCount, FT_LotsScannedCount, targetCount, customCount, minProf, minProf / 100
+        "Статус: %s (%s) | Движок: |cffffd100%s|r | Запросов: %d | Проверено лотов: %d | Целей в базе: %d (настроено: %d) | Мин. профит: %d мед. (%.2fs)",
+        stateStr, modeDesc, engineName, FT_QueriesCount, FT_LotsScannedCount, targetCount, customCount, minProf, minProf / 100
     ))
 end
 
@@ -522,63 +812,55 @@ end
 local FTSniperMainFrame = nil
 local FTSniperAuctionTab = nil
 local FTSniperAuctionTabIndex = nil
-local FT_CachedItemList = {}
-local FT_FilteredItemList = {}
-local FT_SearchQuery = ""
-local NUM_ROWS = 12
-local ROW_HEIGHT = 24
+local NUM_ROWS = 10
+local ROW_HEIGHT = 22
 
-local function FT_FilterItemList()
-    FT_FilteredItemList = {}
-    local query = FT_SearchQuery and FT_SearchQuery:lower():gsub("^%s*(.-)%s*$", "%1") or ""
+local function FT_UpdateSniperControlsUI()
+    if not FTSniperMainFrame then return end
 
-    for _, it in ipairs(FT_CachedItemList) do
-        if query == "" then
-            table.insert(FT_FilteredItemList, it)
+    -- Start/Stop button: [ СТАРТ СНАЙПА ] (green) / [ СТОП СНАЙПЕР ] (red)
+    if FTSniperMainFrame.btnStartStop then
+        if FT_IsEnabled then
+            FTSniperMainFrame.btnStartStop:SetText("|cffff4444[ СТОП СНАЙПЕР ]|r")
         else
-            local matchName = it.name and it.name:lower():find(query, 1, true)
-            local matchRecipe = it.recipeName and it.recipeName:lower():find(query, 1, true)
-            local matchId = tostring(it.id):find(query, 1, true)
-            if matchName or matchRecipe or matchId then
-                table.insert(FT_FilteredItemList, it)
+            FTSniperMainFrame.btnStartStop:SetText("|cff00ff00[ СТАРТ СНАЙПА ]|r")
+        end
+    end
+
+    -- Status indicator badge: АКТИВЕН (Список покупок) / АКТИВЕН (Все) / ВЫКЛЮЧЕН
+    if FTSniperMainFrame.statusBadge then
+        if FT_IsEnabled then
+            if FT_SniperSettings and FT_SniperSettings.mode == "ALL" then
+                FTSniperMainFrame.statusBadge:SetText("|cff00ff00АКТИВЕН (Все)|r")
+            else
+                FTSniperMainFrame.statusBadge:SetText("|cff00ff00АКТИВЕН (Список покупок)|r")
             end
-        end
-    end
-end
-
-local function FT_RebuildItemList()
-    FT_CachedItemList = {}
-    local targets = (FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.targets) or {}
-
-    for rawId, tVal in pairs(targets) do
-        local itemId = tonumber(rawId)
-        if itemId then
-            local defTarget = type(tVal) == "table" and (tVal.target or 0) or tonumber(tVal) or 0
-            local name = (type(tVal) == "table" and tVal.name) or (FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.names and FT_SNIPER_CONFIG.names[itemId]) or ("Item " .. itemId)
-            local craftTarget = type(tVal) == "table" and tVal.craft_target
-            local recipeName = type(tVal) == "table" and tVal.recipe_name
-
-            table.insert(FT_CachedItemList, {
-                id = itemId,
-                defaultTarget = defTarget,
-                name = name,
-                craftTarget = craftTarget,
-                recipeName = recipeName,
-            })
+        else
+            FTSniperMainFrame.statusBadge:SetText("|cffff4444ВЫКЛЮЧЕН|r")
         end
     end
 
-    table.sort(FT_CachedItemList, function(a, b)
-        if a.name == b.name then
-            return a.id < b.id
-        end
-        return a.name < b.name
-    end)
+    -- Mode selector radio buttons
+    local mode = (FT_SniperSettings and FT_SniperSettings.mode) or "LIST"
+    if FTSniperMainFrame.modeListCB then
+        FTSniperMainFrame.modeListCB:SetChecked(mode == "LIST")
+    end
+    if FTSniperMainFrame.modeAllCB then
+        FTSniperMainFrame.modeAllCB:SetChecked(mode == "ALL")
+    end
 
-    FT_FilterItemList()
+    -- Min profit EditBox
+    if FTSniperMainFrame.minProfitEB and not FTSniperMainFrame.minProfitEB:HasFocus() then
+        FTSniperMainFrame.minProfitEB:SetText(FT_FormatMoneyText(FT_GetEffectiveMinProfit()))
+    end
+
+    -- List selector button
+    if FTSniperMainFrame.listBtn then
+        FTSniperMainFrame.listBtn:SetText("Список: [ " .. FT_GetSelectedListDisplayName() .. " ]")
+    end
 end
 
-function FT_RefreshUIPanel(lightOnly)
+FT_RefreshUIPanel = function(lightOnly)
     if not FTSniperMainFrame or not FTSniperMainFrame:IsShown() then return end
 
     if not lightOnly then
@@ -592,6 +874,8 @@ function FT_RefreshUIPanel(lightOnly)
     if FTSniperMainFrame.titleText then
         FTSniperMainFrame.titleText:SetText(FT_GetTitleBarText())
     end
+
+    FT_UpdateSniperControlsUI()
 
     local scrollFrame = FTSniperMainFrame.scrollFrame
     if not scrollFrame then return end
@@ -688,7 +972,7 @@ local function FT_CreateMainUI()
     titleText:SetText(FT_GetTitleBarText())
     frame.titleText = titleText
 
-    -- Close button
+    -- Close button (for standalone mode)
     local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -4)
     closeBtn:SetScript("OnClick", function()
@@ -696,59 +980,168 @@ local function FT_CreateMainUI()
     end)
     frame.closeBtn = closeBtn
 
-    -- Top controls: [Включить все] [Отключить все] [Сброс к дефолту]
+    -- Status indicator badge
+    local statusBadge = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    statusBadge:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -36, -14)
+    frame.statusBadge = statusBadge
+
+    -- Top controls row 1: Start/Stop, Mode Selector, Min Profit
+    local btnStartStop = CreateFrame("Button", "FTSniperBtnStartStop", frame, "UIPanelButtonTemplate")
+    btnStartStop:SetSize(130, 22)
+    btnStartStop:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -38)
+    btnStartStop:SetScript("OnClick", function()
+        FT_Toggle()
+        FT_UpdateSniperControlsUI()
+    end)
+    frame.btnStartStop = btnStartStop
+
+    -- Mode selector radio buttons: [● Только список покупок]  [○ Снайпить всё]
+    local modeListCB = CreateFrame("CheckButton", "FTSniperModeListCB", frame, "UIRadioButtonTemplate")
+    modeListCB:SetPoint("LEFT", btnStartStop, "RIGHT", 14, 0)
+    local modeListText = modeListCB:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    modeListText:SetPoint("LEFT", modeListCB, "RIGHT", 4, 0)
+    modeListText:SetText("Только список покупок")
+    frame.modeListCB = modeListCB
+    frame.modeListText = modeListText
+
+    local modeAllCB = CreateFrame("CheckButton", "FTSniperModeAllCB", frame, "UIRadioButtonTemplate")
+    modeAllCB:SetPoint("LEFT", modeListText, "RIGHT", 14, 0)
+    local modeAllText = modeAllCB:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    modeAllText:SetPoint("LEFT", modeAllCB, "RIGHT", 4, 0)
+    modeAllText:SetText("Снайпить всё")
+    frame.modeAllCB = modeAllCB
+    frame.modeAllText = modeAllText
+
+    modeListCB:SetScript("OnClick", function()
+        FT_SniperSettings = FT_SniperSettings or {}
+        FT_SniperSettings.mode = "LIST"
+        FT_UpdateSniperControlsUI()
+        FT_RefreshUIPanel(true)
+        FT_Print("Режим снайпера: |cff00ff00Только список покупок|r")
+    end)
+
+    modeAllCB:SetScript("OnClick", function()
+        FT_SniperSettings = FT_SniperSettings or {}
+        FT_SniperSettings.mode = "ALL"
+        FT_UpdateSniperControlsUI()
+        FT_RefreshUIPanel(true)
+        FT_Print(string.format("Режим снайпера: |cffffd100Снайпить всё|r (порог профита: %s)", FT_FormatMoneyText(FT_GetEffectiveMinProfit())))
+    end)
+
+    -- Min profit input box
+    local minProfitLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    minProfitLabel:SetPoint("LEFT", modeAllText, "RIGHT", 14, 0)
+    minProfitLabel:SetText("Мин. профит:")
+
+    local minProfitEB = CreateFrame("EditBox", "FTSniperMinProfitEB", frame, "InputBoxTemplate")
+    minProfitEB:SetSize(75, 20)
+    minProfitEB:SetPoint("LEFT", minProfitLabel, "RIGHT", 6, 0)
+    minProfitEB:SetAutoFocus(false)
+    minProfitEB:SetMaxLetters(20)
+
+    local function SaveMinProfitInput(self)
+        local text = self:GetText()
+        local val = FT_ParseMoneyInput(text)
+        FT_CustomMinProfit = val
+        FT_SniperSettings = FT_SniperSettings or {}
+        FT_SniperSettings.minProfit = val
+        self:SetText(FT_FormatMoneyText(val))
+        FT_UpdateSniperControlsUI()
+        FT_Print(string.format("Минимальный профит изменён на: |cffffd100%d|r мед. (%s)", val, FT_FormatMoneyText(val)))
+    end
+
+    minProfitEB:SetScript("OnEnterPressed", function(self)
+        SaveMinProfitInput(self)
+        self:ClearFocus()
+    end)
+    minProfitEB:SetScript("OnEditFocusLost", function(self)
+        SaveMinProfitInput(self)
+    end)
+    minProfitEB:SetScript("OnEscapePressed", function(self)
+        self:ClearFocus()
+        self:SetText(FT_FormatMoneyText(FT_GetEffectiveMinProfit()))
+    end)
+    frame.minProfitEB = minProfitEB
+
+    -- Controls row 2: List selector button, quick buttons, search box
+    local listBtn = CreateFrame("Button", "FTSniperListSelectorBtn", frame, "UIPanelButtonTemplate")
+    listBtn:SetSize(180, 22)
+    listBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -66)
+    listBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    listBtn:SetScript("OnClick", function(self, button)
+        if button == "RightButton" then
+            FT_CycleShoppingList(-1)
+        else
+            FT_CycleShoppingList(1)
+        end
+    end)
+    listBtn:SetScript("OnEnter", function(self)
+        if GameTooltip then
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:AddLine("Выбор списка покупок", 1, 1, 1)
+            GameTooltip:AddLine("ЛКМ: следующий список, ПКМ: предыдущий список.", 0.8, 0.8, 0.8)
+            GameTooltip:AddLine("Текущий выбор: " .. FT_GetSelectedListDisplayName(), 0.2, 1, 0.2)
+            GameTooltip:Show()
+        end
+    end)
+    listBtn:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
+    end)
+    frame.listBtn = listBtn
+
+    -- Quick buttons: [ Включить все ] [ Отключить все ] [ Сброс цен ]
     local btnEnableAll = CreateFrame("Button", "FTSniperBtnEnableAll", frame, "UIPanelButtonTemplate")
-    btnEnableAll:SetSize(115, 22)
-    btnEnableAll:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -40)
+    btnEnableAll:SetSize(105, 22)
+    btnEnableAll:SetPoint("LEFT", listBtn, "RIGHT", 6, 0)
     btnEnableAll:SetText("Включить все")
     btnEnableAll:SetScript("OnClick", function()
         FT_CustomTargets = FT_CustomTargets or {}
-        if FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.targets then
-            for id in pairs(FT_SNIPER_CONFIG.targets) do
-                local numId = tonumber(id)
-                if numId then
-                    FT_CustomTargets[numId] = FT_CustomTargets[numId] or {}
-                    FT_CustomTargets[numId].enabled = true
-                end
+        for _, it in ipairs(FT_CachedItemList) do
+            if it.id then
+                FT_CustomTargets[it.id] = FT_CustomTargets[it.id] or {}
+                FT_CustomTargets[it.id].enabled = true
             end
         end
         FT_RefreshUIPanel(true)
-        FT_Print("Все цели включены.")
+        FT_Print("Все цели в текущем списке включены.")
     end)
 
     local btnDisableAll = CreateFrame("Button", "FTSniperBtnDisableAll", frame, "UIPanelButtonTemplate")
-    btnDisableAll:SetSize(115, 22)
-    btnDisableAll:SetPoint("LEFT", btnEnableAll, "RIGHT", 8, 0)
+    btnDisableAll:SetSize(105, 22)
+    btnDisableAll:SetPoint("LEFT", btnEnableAll, "RIGHT", 6, 0)
     btnDisableAll:SetText("Отключить все")
     btnDisableAll:SetScript("OnClick", function()
         FT_CustomTargets = FT_CustomTargets or {}
-        if FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.targets then
-            for id in pairs(FT_SNIPER_CONFIG.targets) do
-                local numId = tonumber(id)
-                if numId then
-                    FT_CustomTargets[numId] = FT_CustomTargets[numId] or {}
-                    FT_CustomTargets[numId].enabled = false
+        for _, it in ipairs(FT_CachedItemList) do
+            if it.id then
+                FT_CustomTargets[it.id] = FT_CustomTargets[it.id] or {}
+                FT_CustomTargets[it.id].enabled = false
+            end
+        end
+        FT_RefreshUIPanel(true)
+        FT_Print("Все цели в текущем списке отключены.")
+    end)
+
+    local btnResetPrices = CreateFrame("Button", "FTSniperBtnResetDefault", frame, "UIPanelButtonTemplate")
+    btnResetPrices:SetSize(90, 22)
+    btnResetPrices:SetPoint("LEFT", btnDisableAll, "RIGHT", 6, 0)
+    btnResetPrices:SetText("Сброс цен")
+    btnResetPrices:SetScript("OnClick", function()
+        if FT_CustomTargets then
+            for _, it in ipairs(FT_CachedItemList) do
+                if it.id and FT_CustomTargets[it.id] then
+                    FT_CustomTargets[it.id].customPrice = nil
                 end
             end
         end
         FT_RefreshUIPanel(true)
-        FT_Print("Все цели отключены.")
-    end)
-
-    local btnResetDefault = CreateFrame("Button", "FTSniperBtnResetDefault", frame, "UIPanelButtonTemplate")
-    btnResetDefault:SetSize(135, 22)
-    btnResetDefault:SetPoint("LEFT", btnDisableAll, "RIGHT", 8, 0)
-    btnResetDefault:SetText("Сброс к дефолту")
-    btnResetDefault:SetScript("OnClick", function()
-        FT_CustomTargets = {}
-        FT_RefreshUIPanel(true)
-        FT_Print("Настройки сброшены к значениям по умолчанию.")
+        FT_Print("Кастомные цены сброшены.")
     end)
 
     -- Search box
     local searchBox = CreateFrame("EditBox", "FTSniperSearchBox", frame, "InputBoxTemplate")
-    searchBox:SetSize(140, 20)
-    searchBox:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -32, -40)
+    searchBox:SetSize(130, 20)
+    searchBox:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -36, -66)
     searchBox:SetAutoFocus(false)
     searchBox:SetMaxLetters(40)
 
@@ -773,9 +1166,9 @@ local function FT_CreateMainUI()
         self:ClearFocus()
     end)
 
-    -- Column Headers
+    -- Column Headers (Y = -94)
     local headerEn = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    headerEn:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -70)
+    headerEn:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -94)
     headerEn:SetText("Вкл")
 
     local headerItem = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -783,17 +1176,17 @@ local function FT_CreateMainUI()
     headerItem:SetText("Предмет")
 
     local headerDef = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    headerDef:SetPoint("TOPLEFT", frame, "TOPLEFT", 350, -70)
+    headerDef:SetPoint("TOPLEFT", frame, "TOPLEFT", 350, -94)
     headerDef:SetText("Дефолт. потолок")
 
     local headerCust = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    headerCust:SetPoint("TOPLEFT", frame, "TOPLEFT", 520, -70)
+    headerCust:SetPoint("TOPLEFT", frame, "TOPLEFT", 520, -94)
     headerCust:SetText("Своя цена (медь / 1з 20с)")
 
-    -- ScrollFrame
+    -- ScrollFrame (Y = -112)
     local scrollFrame = CreateFrame("ScrollFrame", "FTSniperScrollFrame", frame, "FauxScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -88)
-    scrollFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -34, 16)
+    scrollFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -112)
+    scrollFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -34, 12)
 
     scrollFrame:SetScript("OnVerticalScroll", function(self, offset)
         if FauxScrollFrame_OnVerticalScroll then
@@ -878,7 +1271,7 @@ local function FT_CreateMainUI()
     for i = 1, NUM_ROWS do
         local row = CreateFrame("Frame", "FTSniperRow" .. i, frame)
         row:SetHeight(ROW_HEIGHT)
-        row:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -88 - (i - 1) * ROW_HEIGHT)
+        row:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -112 - (i - 1) * ROW_HEIGHT)
         row:SetPoint("RIGHT", frame, "RIGHT", -36, 0)
         row:EnableMouseWheel(true)
         row:SetScript("OnMouseWheel", function(_, delta)
@@ -887,7 +1280,7 @@ local function FT_CreateMainUI()
 
         -- Checkbox
         local cb = CreateFrame("CheckButton", "FTSniperRow" .. i .. "CB", row, "UICheckButtonTemplate")
-        cb:SetSize(20, 20)
+        cb:SetSize(18, 18)
         cb:SetPoint("LEFT", row, "LEFT", 0, 0)
         cb:SetScript("OnClick", function(self)
             local r = self:GetParent()
@@ -1028,7 +1421,21 @@ function FT_SelectSniperTab(tabIndex)
     if AuctionatorSellingFrame then AuctionatorSellingFrame:Hide() end
     if AuctionatorCancellingFrame then AuctionatorCancellingFrame:Hide() end
 
-    FT_ShowUIPanel(true)
+    if not FTSniperMainFrame then
+        FT_CreateMainUI()
+    end
+
+    FTSniperMainFrame:SetParent(AuctionFrame)
+    FTSniperMainFrame:ClearAllPoints()
+    FTSniperMainFrame:SetPoint("TOPLEFT", AuctionFrame, "TOPLEFT", 18, -68)
+    FTSniperMainFrame:SetPoint("BOTTOMRIGHT", AuctionFrame, "BOTTOMRIGHT", -18, 36)
+    if FTSniperMainFrame.closeBtn then
+        FTSniperMainFrame.closeBtn:Hide()
+    end
+
+    FTSniperMainFrame:Show()
+    FT_RebuildItemList()
+    FT_RefreshUIPanel()
 end
 
 function FT_ToggleUI()
@@ -1060,7 +1467,10 @@ local function FT_RegisterAuctionTab()
     if not tab then return end
 
     tab:SetID(tabIndex)
-    tab:SetText("Снайпер FT")
+    tab:SetText("Snipe")
+    if PanelTemplates_TabResize then
+        PanelTemplates_TabResize(tab, 0)
+    end
     if PanelTemplates_SetNumTabs then
         PanelTemplates_SetNumTabs(AuctionFrame, tabIndex)
     end
@@ -1104,6 +1514,17 @@ local function FT_RegisterAuctionTab()
         end)
         AuctionFrameTab_OnClick._ftHooked = true
     end
+
+    if type(PanelTemplates_SetTab) == "function" and not PanelTemplates_SetTab._ftHooked then
+        hooksecurefunc("PanelTemplates_SetTab", function(frame, id)
+            if frame == AuctionFrame and id ~= FTSniperAuctionTabIndex then
+                if FTSniperMainFrame and FTSniperMainFrame:IsShown() and FTSniperMainFrame:GetParent() == AuctionFrame then
+                    FTSniperMainFrame:Hide()
+                end
+            end
+        end)
+        PanelTemplates_SetTab._ftHooked = true
+    end
 end
 
 local function FT_UpdateToggleButton()
@@ -1118,6 +1539,9 @@ end
 function FT_SetEnabled(enable)
     FT_IsEnabled = enable
     FT_UpdateToggleButton()
+    if FT_UpdateSniperControlsUI then
+        FT_UpdateSniperControlsUI()
+    end
     if not enable then
         FT_DisarmSniperBuy()
         FT_AwaitingResults = false
@@ -1126,7 +1550,8 @@ function FT_SetEnabled(enable)
         FT_TargetPage = 0
         FT_CheckPrevPageNext = false
         timeSinceLastQuery = 1.2
-        FT_Print(string.format("Sniper ACTIVE. Watching %s (min profit: %dc).", FT_IsModernAH() and "Modern AH feed" or "last AH page", FT_GetEffectiveMinProfit()))
+        local modeDesc = (FT_SniperSettings and FT_SniperSettings.mode == "ALL") and "ВСЕ ЛОТЫ" or ("Список [" .. FT_GetSelectedListDisplayName() .. "]")
+        FT_Print(string.format("Sniper ACTIVE (%s). Watching %s (min profit: %dc).", modeDesc, FT_IsModernAH() and "Modern AH feed" or "last AH page", FT_GetEffectiveMinProfit()))
     end
 end
 
@@ -1244,8 +1669,24 @@ SlashCmdList["FOREVERTRADESNIPER"] = function(msg)
     msg = (msg or ""):lower():match("^%s*(.-)%s*$")
     local profitArg = msg:match("^profit%s+(%d+)") or msg:match("^min%s+(%d+)")
     if profitArg then
-        FT_CustomMinProfit = tonumber(profitArg)
-        FT_Print(string.format("Минимальный профит изменён на: |cffffd100%d|r мед. (%.2fs)", FT_CustomMinProfit, FT_CustomMinProfit / 100))
+        local val = tonumber(profitArg)
+        FT_CustomMinProfit = val
+        FT_SniperSettings = FT_SniperSettings or {}
+        FT_SniperSettings.minProfit = val
+        if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
+        FT_Print(string.format("Минимальный профит изменён на: |cffffd100%d|r мед. (%.2fs)", val, val / 100))
+    elseif msg:match("^mode%s+(%w+)") then
+        local modeArg = msg:match("^mode%s+(%w+)")
+        FT_SniperSettings = FT_SniperSettings or {}
+        if modeArg == "all" or modeArg == "все" then
+            FT_SniperSettings.mode = "ALL"
+            if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
+            FT_Print("Режим снайпера переключен на: |cffffd100Снайпить всё|r")
+        elseif modeArg == "list" or modeArg == "список" then
+            FT_SniperSettings.mode = "LIST"
+            if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
+            FT_Print("Режим снайпера переключен на: |cff00ff00Только список покупок|r")
+        end
     elseif msg == "ui" or msg == "config" or msg == "menu" then
         FT_ToggleUI()
     elseif msg == "on" or msg == "start" or msg == "1" then
@@ -1265,6 +1706,7 @@ SlashCmdList["FOREVERTRADESNIPER"] = function(msg)
         FT_Print("Команды ForeverTrade Sniper:")
         FT_Print("  /fts ui (или /fts config) - открыть панель настроек целей")
         FT_Print("  /fts on|off - включить / выключить снайпер")
+        FT_Print("  /fts mode list|all - переключить режим (список покупок / всё)")
         FT_Print("  /fts status - текущий статус и статистика")
         FT_Print("  /fts sound - проверка звука тревоги на Master канале")
         FT_Print("  /fts profit <мед> - задать мин. порог выгоды в меди")
@@ -1346,6 +1788,10 @@ local function FT_OnEvent(self, event, ...)
     local arg1 = ...
     if event == "PLAYER_LOGIN" then
         FT_CustomTargets = FT_CustomTargets or {}
+        FT_SniperSettings = FT_SniperSettings or {}
+        if FT_SniperSettings.mode == nil then FT_SniperSettings.mode = "LIST" end
+        if FT_SniperSettings.minProfit == nil then FT_SniperSettings.minProfit = 5000 end
+        if FT_SniperSettings.selectedList == nil then FT_SniperSettings.selectedList = 1 end
         FT_HookAuctionFrame()
         local count = 0
         if FT_SNIPER_CONFIG and FT_SNIPER_CONFIG.targets then
@@ -1358,14 +1804,24 @@ local function FT_OnEvent(self, event, ...)
         if genAt > 0 and type(date) == "function" then
             pcall(function() dateStr = date("%Y-%m-%d %H:%M:%S", genAt) end)
         end
-        FT_Print(string.format("Loaded v%s with %d targets (generated: %s).", VERSION, count, dateStr))
+        FT_Print(string.format("Loaded v%s with %d targets (mode: %s, min profit: %dc).", VERSION, count, FT_SniperSettings.mode, FT_GetEffectiveMinProfit()))
 
     elseif event == "VARIABLES_LOADED" then
         FT_CustomTargets = FT_CustomTargets or {}
+        FT_SniperSettings = FT_SniperSettings or {}
+        if FT_SniperSettings.mode == nil then FT_SniperSettings.mode = "LIST" end
+        if FT_SniperSettings.minProfit == nil then FT_SniperSettings.minProfit = 5000 end
+        if FT_SniperSettings.selectedList == nil then FT_SniperSettings.selectedList = 1 end
+        if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
 
     elseif event == "ADDON_LOADED" then
         if arg1 == ADDON_NAME then
             FT_CustomTargets = FT_CustomTargets or {}
+            FT_SniperSettings = FT_SniperSettings or {}
+            if FT_SniperSettings.mode == nil then FT_SniperSettings.mode = "LIST" end
+            if FT_SniperSettings.minProfit == nil then FT_SniperSettings.minProfit = 5000 end
+            if FT_SniperSettings.selectedList == nil then FT_SniperSettings.selectedList = 1 end
+            if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
         end
         if arg1 == "Blizzard_AuctionHouseUI" or arg1 == "Blizzard_AuctionUI" or arg1 == "Auctionator" or arg1 == ADDON_NAME then
             FT_HookAuctionFrame()
@@ -1373,6 +1829,7 @@ local function FT_OnEvent(self, event, ...)
             if ah and ah:IsShown() then
                 FT_CreateToggleButton()
                 FT_RegisterAuctionTab()
+                if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
             end
         end
 
@@ -1382,6 +1839,7 @@ local function FT_OnEvent(self, event, ...)
         FT_CreateToggleButton()
         FT_SetEnabled(false) -- Default OFF: never interferes with manual buying/selling
         FT_DisarmSniperBuy()
+        if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
 
     elseif event == "AUCTION_HOUSE_CLOSED" then
         FT_SetEnabled(false)
@@ -1393,6 +1851,7 @@ local function FT_OnEvent(self, event, ...)
         if FTSniperMainFrame and FTSniperMainFrame:GetParent() == AuctionFrame then
             FTSniperMainFrame:Hide()
         end
+        if FT_UpdateSniperControlsUI then FT_UpdateSniperControlsUI() end
 
     elseif event == "AUCTION_HOUSE_BROWSE_FAILURE" then
         FT_AwaitingResults = false

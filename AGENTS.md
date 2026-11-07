@@ -10,7 +10,7 @@
 | `pip install -r requirements.txt` | Установить зависимости проекта |
 | `python run_watcher.py` | Запустить фоновый мониторинг файлов, ETL и генератор дашборда |
 | `python run_watcher.py --run-once --realm "Everlook"` | Разовый запуск ETL и генерация дашборда для указанного реалма |
-| `python -m pytest` | Запустить полный тестовый набор (196 тестов) |
+| `python -m pytest` | Запустить полный тестовый набор (229 тестов) |
 | `python -m pytest tests/test_database.py` | Запустить тесты схемы БД, каталога и ротации |
 | `python -m pytest tests/test_etl.py` | Запустить тесты ETL, парсинга luadata и дедупликации |
 | `python -m pytest tests/test_analytics.py` | Запустить тесты арбитража, Z-score снайпинга и ящиков |
@@ -33,7 +33,7 @@
 - [`docs/adr/0009-strong-buy-breakeven-exit-validation.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0009-strong-buy-breakeven-exit-validation.md) — Валидация выхода для снайпинга по историческому среднему $\mu$, комиссии 5% и депозиту.
 - [`docs/adr/0010-disable-character-perks-by-default.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0010-disable-character-perks-by-default.md) — Выключение персональных перков Bartering и Master Chef по умолчанию.
 - [`docs/adr/0011-unified-portal-crafting-display.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0011-unified-portal-crafting-display.md) — Dual-crafting: отображение стандартного крафта наряду с Waylaid Crates на портале.
-- [`docs/adr/0012-goblin-terminal-ui-and-vendor-ceiling.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0012-goblin-terminal-ui-and-vendor-ceiling.md) — Goblin Terminal UI (100vh), Wowhead Forever tooltips, Vendor Floor/Ceiling, Vendor Shuffle, автоопределение реалма и Shopping List экспорт.
+- [`docs/adr/0012-goblin-terminal-ui-and-vendor-ceiling.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0012-goblin-terminal-ui-and-vendor-ceiling.md) — Goblin Terminal UI (100vh), левая sidebar, desktop CSS grid 65/35, DeFiLlama токены, Wowhead Forever tooltips, Vendor Floor/Ceiling, Vendor Shuffle, автоопределение реалма и Shopping List экспорт.
 - [`docs/adr/0013-forevertrade-sniper-standalone-stack.md`](file:///d:/ai%20project/Forever%20Trade/docs/adr/0013-forevertrade-sniper-standalone-stack.md) — Автономный стек микро-аддона ForeverTrade_Sniper, Disenchant Shuffle, Hampel filter и рекурсивный DAG Make-vs-Buy.
 
 ## Где что
@@ -42,14 +42,14 @@
 - `src/database.py` — Схема SQLite (`market.db`, WAL, foreign keys), таблицы `items` (поддержка `vendor_*_copper`), `price_snapshots`, `recipes`, `recipe_reagents`, `_etl_metadata`, загрузка выверенного каталога Era 1.15, ротация старых снимков (`prune_snapshots` с настраиваемым TTL).
 - `src/etl.py` — Мониторинг файлов (`watchdog`), безопасный парсер `luadata` без `eval()`, дебаунс 500мс со стабилизацией размера и проверкой символа `}`, автоопределение реалма при отсутствии целевого ключа, отказоустойчивый fallback на `.bak`, нормализация составных ключей (`g:...`, `p:...`), дедупликация снапшотов по SHA-256 и 10-минутному окну.
 - `src/analytics.py` — Аналитический движок: вендорный арбитраж ($\ge 50$ меди), Vendor Shuffle (`P_AH < P_vendor_sell`), Vendor Floor/Ceiling (ограничение себестоимости реагентов вендора сверху ценой NPC $\min(P_{\text{AH}}, P_{\text{vendor\_buy}})$), Dual-crafting (стандартные рецепты с $\text{ROI} \ge 25\%$ и сдача Waylaid Crates NPC со 100% закупкой комплекта на AH), Z-score снайпинг со строгой блокировкой ложных сигналов на вендорных товарах и Day-1 hardening ($N < 5$), динамическая перезагрузка `forever_overrides.json` по mtime.
-- `src/dashboard.py` — Генератор автономного HTML-дашборда `portal.html` в формате Goblin Terminal UI: 100vh одноэкранный интерфейс (65% таблица сигналов, 35% инспектор с единым динамическим графиком Plotly), тултипы Wowhead Forever (`tooltips.js`), 1-клик копирование названия в буфер обмена с тостом, экспорт сигналов в Shopping List Auctionator (`ForeverTrade^...`), сохранение состояния в `localStorage` (таб, поиск, язык RU/EN, выбранный предмет) при 30с автообновлении.
+- `src/dashboard.py` — Генератор автономного HTML-дашборда `portal.html` в формате Goblin Terminal UI: одноэкранный десктопный интерфейс с левой sidebar, CSS grid 65/35 (таблица сигналов с внутренней прокруткой и инспектор с единым динамическим графиком Plotly), токенами DeFiLlama, responsive breakpoints (1279/1023/767), клавиатурной сортировкой, тултипами Wowhead Forever (`tooltips.js`), 1-клик копированием названия в буфер обмена с тостом, экспортом сигналов в Shopping List Auctionator (`ForeverTrade^...`), сохранением состояния в `localStorage` (таб, поиск, язык RU/EN, выбранный предмет) при 30с автообновлении.
 - `src/ai_advisor.py` — Тактический AI-ассистент: отбор топ-3 возможностей рынка, клиент `AntigravityManagerClient` (`gemini-3.8-flash-high`) и надежный детерминированный эвристический fallback при отсутствии API-ключа или сети.
 - `data/items_era_1_15.json` — Базовый каталог предметов Classic Era 1.15 с выверенными идентификаторами и полями `vendor_sell_copper` / `vendor_buy_copper`.
 - `forever_overrides.json` — Специфичные данные сервера Forever (контейнеры Waylaid Crates, целевые предметы, награды и кастомные цены).
 - `addons/ForeverTrade_Sniper/` — Легковесный микро-аддон (<50 КБ, без Ace3): TOC, Lua-сканер последней страницы с защитой от сдвига, аппаратный выкуп лота по колесу мыши с верификацией слота, сгенерированный `config.lua`.
 - `data/disenchant_tables_era.json` — Матрицы матожидания распыления экипировки Classic Era 1.15 и сервера Forever.
 - `docs/adr/` — Каталог архитектурных решений проекта (ADR 0001–0013).
-- `tests/` — Полный набор из 196 модульных тестов pytest (`test_database.py`, `test_etl.py`, `test_analytics.py`, `test_dashboard.py`, `test_ai_advisor.py`).
+- `tests/` — Полный набор из 229 модульных тестов pytest (`test_database.py`, `test_etl.py`, `test_analytics.py`, `test_dashboard.py`, `test_ai_advisor.py`, `test_sniper_addon.py`).
 
 ## Подводные камни
 

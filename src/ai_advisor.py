@@ -21,6 +21,7 @@ try:
         get_zscore_anomalies,
     )
     from src.dashboard import format_currency
+    from src.database import get_item_name
 except ImportError:
     from analytics import (
         get_crafting_margins,
@@ -28,6 +29,11 @@ except ImportError:
         get_zscore_anomalies,
     )
     from dashboard import format_currency
+    try:
+        from database import get_item_name
+    except ImportError:
+        def get_item_name(conn: Any, item_id: int, lang: str = "en") -> str:
+            return f"Item #{item_id}"
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +44,48 @@ __all__ = [
     "_safe_int",
     "_safe_float",
     "_sanitize_name",
+    "PROFESSION_RU",
+    "CATEGORY_RU",
 ]
+
+PROFESSION_RU: dict[str, str] = {
+    "Engineering": "Инженерное дело",
+    "Tailoring": "Портняжное дело",
+    "Leatherworking": "Кожевничество",
+    "Alchemy": "Алхимия",
+    "Cooking": "Кулинария",
+    "Blacksmithing": "Кузнечное дело",
+    "Enchanting": "Наложение чар",
+    "Gathering": "Сбор ресурсов",
+    "Mining": "Горное дело",
+    "Herbalism": "Травничество",
+    "Skinning": "Снятие шкур",
+    "First Aid": "Первая помощь",
+    "Fishing": "Рыбная ловля",
+}
+
+CATEGORY_RU: dict[str, str] = {
+    "vendor_arbitrage": "Вендорный арбитраж",
+    "waylaid_crafting": "Крафт под ящики",
+    "price_dump": "Скупка сырья",
+    "market_action": "Действие на рынке",
+}
+
+
+def _localize_crate_name(crate_name: Optional[str], item_name_ru: str) -> Optional[str]:
+    """Translate English Waylaid Supplies / Shipment crate name into Russian format."""
+    if not crate_name:
+        return None
+    crate_str = str(crate_name).strip()
+    prefix_patterns = (
+        "Waylaid Supplies:",
+        "Waylaid Shipment:",
+        "Waylaid Supply:",
+    )
+    for prefix in prefix_patterns:
+        if crate_str.startswith(prefix):
+            return f"Запасы снабжения: {item_name_ru}"
+    return crate_str
 
 
 def _safe_int(val: Any, default: int = 0) -> int:
@@ -81,12 +128,15 @@ def _sanitize_context(context: dict) -> dict:
             for it in items:
                 if isinstance(it, dict):
                     it_copy = dict(it)
-                    for name_field in ("name", "crafted_item_name", "target"):
+                    for name_field in ("name", "name_ru", "name_en", "crafted_item_name", "target", "target_ru", "target_en"):
                         if name_field in it_copy and it_copy[name_field] is not None:
                             it_copy[name_field] = _sanitize_name(it_copy[name_field])
-                    for crate_field in ("crate_name", "waylaid_crate_name"):
+                    for crate_field in ("crate_name", "crate_name_ru", "crate_name_en", "waylaid_crate_name", "waylaid_crate_name_ru"):
                         if crate_field in it_copy and it_copy[crate_field] is not None:
                             it_copy[crate_field] = _sanitize_name(it_copy[crate_field])
+                    for prof_field in ("profession", "profession_ru"):
+                        if prof_field in it_copy and it_copy[prof_field] is not None:
+                            it_copy[prof_field] = _sanitize_name(it_copy[prof_field])
                     sanitized_items.append(it_copy)
                 else:
                     sanitized_items.append(it)
@@ -104,11 +154,16 @@ def _build_context_whitelist(context: Optional[dict]) -> set[str]:
         if isinstance(items, list):
             for it in items:
                 if isinstance(it, dict):
-                    for field in ("name", "crafted_item_name", "target", "crate_name", "waylaid_crate_name"):
+                    for field in (
+                        "name", "name_ru", "name_en",
+                        "crafted_item_name", "target", "target_ru", "target_en",
+                        "crate_name", "crate_name_ru", "crate_name_en",
+                        "waylaid_crate_name", "waylaid_crate_name_ru",
+                    ):
                         val = it.get(field)
                         if val:
                             whitelist.add(str(val).strip().lower())
-                    for id_field in ("item_id", "recipe_id", "target_item_id"):
+                    for id_field in ("item_id", "recipe_id", "target_item_id", "crafted_item_id"):
                         val = it.get(id_field)
                         if val is not None:
                             val_str = str(val).strip().lower()
@@ -157,10 +212,34 @@ def build_compact_context(
         buyout = _safe_int(item.get("buyout_price") if item.get("buyout_price") is not None else item.get("price"), 0)
         v_sell = _safe_int(item.get("vendor_sell_price"), 0)
         profit = _safe_int(item.get("profit_copper") if item.get("profit_copper") is not None else item.get("profit"), 0)
-        name = _sanitize_name(item.get("name", f"Item #{item['item_id']}"))
+        item_id = int(item["item_id"])
+        name_raw = item.get("name", f"Item #{item_id}")
+
+        name_ru = item.get("name_ru")
+        if not name_ru and conn:
+            cand_ru = get_item_name(conn, item_id, "ru")
+            if cand_ru and not cand_ru.lower().startswith("item "):
+                name_ru = cand_ru
+        if not name_ru:
+            name_ru = name_raw
+
+        name_en = item.get("name_en")
+        if not name_en and conn:
+            cand_en = get_item_name(conn, item_id, "en")
+            if cand_en and not cand_en.lower().startswith("item "):
+                name_en = cand_en
+        if not name_en:
+            name_en = name_raw
+
+        name = _sanitize_name(name_raw)
+        name_ru = _sanitize_name(name_ru)
+        name_en = _sanitize_name(name_en)
+
         top_vendor.append({
-            "item_id": int(item["item_id"]),
+            "item_id": item_id,
             "name": name,
+            "name_ru": name_ru,
+            "name_en": name_en,
             "buyout_price": buyout,
             "vendor_sell_price": v_sell,
             "profit_copper": profit,
@@ -191,15 +270,49 @@ def build_compact_context(
         else:
             roi_val = round(_safe_float(roi_val, 0.0), 2)
 
-        name = _sanitize_name(recipe.get("crafted_item_name") or recipe.get("name", f"Recipe #{recipe.get('recipe_id')}"))
+        name_raw = recipe.get("crafted_item_name") or recipe.get("name", f"Recipe #{recipe.get('recipe_id')}")
+        crafted_id = recipe.get("crafted_item_id") or recipe.get("target_item_id")
+
+        name_ru = recipe.get("name_ru")
+        if not name_ru and conn and crafted_id is not None:
+            cand_ru = get_item_name(conn, int(crafted_id), "ru")
+            if cand_ru and not cand_ru.lower().startswith("item "):
+                name_ru = cand_ru
+        if not name_ru:
+            name_ru = name_raw
+
+        name_en = recipe.get("name_en")
+        if not name_en and conn and crafted_id is not None:
+            cand_en = get_item_name(conn, int(crafted_id), "en")
+            if cand_en and not cand_en.lower().startswith("item "):
+                name_en = cand_en
+        if not name_en:
+            name_en = name_raw
+
+        name = _sanitize_name(name_raw)
+        name_ru = _sanitize_name(name_ru)
+        name_en = _sanitize_name(name_en)
+
+        prof_raw = str(recipe.get("profession", ""))
+        prof_ru = PROFESSION_RU.get(prof_raw, prof_raw)
+
         crate_name = _sanitize_name(recipe["waylaid_crate_name"]) if recipe.get("waylaid_crate_name") else None
+        crate_name_ru = _localize_crate_name(crate_name, name_ru) if crate_name else None
 
         top_crafting.append({
             "recipe_id": _safe_int(recipe.get("recipe_id")) if recipe.get("recipe_id") is not None else None,
+            "crafted_item_id": _safe_int(crafted_id) if crafted_id is not None else None,
             "name": name,
-            "profession": str(recipe.get("profession", "")),
+            "name_ru": name_ru,
+            "name_en": name_en,
+            "profession": prof_raw,
+            "profession_ru": prof_ru,
             "crate_name": crate_name,
+            "crate_name_ru": crate_name_ru,
+            "crate_name_en": crate_name,
             "waylaid_crate_name": crate_name,
+            "waylaid_crate_name_ru": crate_name_ru,
+            "waylaid_crate_name_en": crate_name,
             "cost_copper": cost,
             "revenue_copper": rev,
             "profit_copper": profit,
@@ -222,10 +335,34 @@ def build_compact_context(
         curr = _safe_int(item.get("current_price") if item.get("current_price") is not None else item.get("price"), 0)
         mean = round(_safe_float(item.get("mean_price") if item.get("mean_price") is not None else item.get("mean"), 0.0), 2)
         z = round(_safe_float(item.get("z_score") if item.get("z_score") is not None else item.get("z"), 0.0), 2)
-        name = _sanitize_name(item.get("name", f"Item #{item['item_id']}"))
+        item_id = int(item["item_id"])
+        name_raw = item.get("name", f"Item #{item_id}")
+
+        name_ru = item.get("name_ru")
+        if not name_ru and conn:
+            cand_ru = get_item_name(conn, item_id, "ru")
+            if cand_ru and not cand_ru.lower().startswith("item "):
+                name_ru = cand_ru
+        if not name_ru:
+            name_ru = name_raw
+
+        name_en = item.get("name_en")
+        if not name_en and conn:
+            cand_en = get_item_name(conn, item_id, "en")
+            if cand_en and not cand_en.lower().startswith("item "):
+                name_en = cand_en
+        if not name_en:
+            name_en = name_raw
+
+        name = _sanitize_name(name_raw)
+        name_ru = _sanitize_name(name_ru)
+        name_en = _sanitize_name(name_en)
+
         top_anomalies.append({
-            "item_id": int(item["item_id"]),
+            "item_id": item_id,
             "name": name,
+            "name_ru": name_ru,
+            "name_en": name_en,
             "current_price": curr,
             "price": curr,
             "mean_price": mean,
@@ -303,8 +440,12 @@ class AntigravityManagerClient:
         url = f"{self.base_url}/{self.model}:generateContent"
         system_prompt = (
             "Ты — тактический рыночный AI-ассистент World of Warcraft: Forever.\n"
+            "Игрок играет на РУССКОЯЗЫЧНОМ клиенте игры (ruRU).\n"
             "На основе входного рыночного среза (вендорный арбитраж, маржинальный крафт под ящики Waylaid Crates, "
             "ценовые сбросы сырья) сформируй строгий оперативный чек-лист действий игрока на сессию.\n"
+            "ВАЖНО: Все названия предметов ('target'), профессий и ящиков ОБЯЗАТЕЛЬНО пиши на русском языке "
+            "(используй поле name_ru / profession_ru / crate_name_ru, например: 'Горсть медных винтов', "
+            "'Инженерное дело', 'Запасы снабжения: Горсть медных винтов').\n"
             "Верни ответ строго в формате JSON:\n"
             "{\n"
             '  "title": "Тактический план торговой сессии",\n'
@@ -314,8 +455,8 @@ class AntigravityManagerClient:
             '    {\n'
             '      "step": 1,\n'
             '      "category": "vendor_arbitrage" | "waylaid_crafting" | "price_dump",\n'
-            '      "action": "Конкретное действие (выкуп, крафт, закупка впрок)",\n'
-            '      "target": "Название предмета",\n'
+            '      "action": "Конкретное действие на русском (выкуп, крафт, заготовка впрок)",\n'
+            '      "target": "Название предмета на русском (поле name_ru)",\n'
             '      "expected_profit": "Ожидаемая выгода",\n'
             '      "priority": "HIGH" | "MEDIUM" | "LOW"\n'
             '    }\n'
@@ -380,8 +521,12 @@ class AntigravityManagerClient:
         """Call local Antigravity CLI (agy) to generate market advice via stdin (avoids WinError 206)."""
         system_prompt = (
             "Ты — тактический рыночный AI-ассистент World of Warcraft: Forever.\n"
+            "Игрок играет на РУССКОЯЗЫЧНОМ клиенте игры (ruRU).\n"
             "На основе входного рыночного среза (вендорный арбитраж, маржинальный крафт под ящики Waylaid Crates, "
             "ценовые сбросы сырья) сформируй строгий оперативный чек-лист действий игрока на сессию.\n"
+            "ВАЖНО: Все названия предметов ('target'), профессий и ящиков ОБЯЗАТЕЛЬНО пиши на русском языке "
+            "(используй поле name_ru / profession_ru / crate_name_ru, например: 'Горсть медных винтов', "
+            "'Инженерное дело', 'Запасы снабжения: Горсть медных винтов').\n"
             "Верни ответ строго в формате JSON:\n"
             "{\n"
             '  "title": "Тактический план торговой сессии",\n'
@@ -391,8 +536,8 @@ class AntigravityManagerClient:
             '    {\n'
             '      "step": 1,\n'
             '      "category": "vendor_arbitrage" | "waylaid_crafting" | "price_dump",\n'
-            '      "action": "Конкретное действие (выкуп, крафт, закупка впрок)",\n'
-            '      "target": "Название предмета",\n'
+            '      "action": "Конкретное действие на русском (выкуп, крафт, заготовка впрок)",\n'
+            '      "target": "Название предмета на русском (поле name_ru)",\n'
             '      "expected_profit": "Ожидаемая выгода",\n'
             '      "priority": "HIGH" | "MEDIUM" | "LOW"\n'
             '    }\n'
@@ -457,30 +602,59 @@ class AntigravityManagerClient:
         anomaly_items = context.get("price_anomalies") or context.get("anomalies") or []
 
         actions: list[dict] = []
+        checklist_ru: list[str] = []
+        checklist_en: list[str] = []
         step = 1
 
         # 1. Vendor Arbitrage
         for it in vendor_items:
-            name = _sanitize_name(it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
+            name_ru = _sanitize_name(it.get("name_ru") or it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
+            name_en = _sanitize_name(it.get("name_en") or it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
             profit = _safe_int(it.get("profit_copper"), _safe_int(it.get("profit"), 0))
             buyout = _safe_int(it.get("buyout_price"), _safe_int(it.get("price"), 0))
+            exp_profit = f"+{format_currency(profit)}"
+
+            act_ru = f"Выкупить лот за {format_currency(buyout)} и сдать торговцу"
+            act_en = f"Buy buyout lot for {format_currency(buyout)} and sell to vendor"
+
             actions.append({
                 "step": step,
                 "category": "vendor_arbitrage",
-                "action": f"Выкупить лот за {format_currency(buyout)} и сдать торговцу",
-                "target": name,
-                "expected_profit": f"+{format_currency(profit)}",
+                "action": act_ru,
+                "action_ru": act_ru,
+                "action_en": act_en,
+                "target": name_ru,
+                "target_ru": name_ru,
+                "target_en": name_en,
+                "expected_profit": exp_profit,
                 "priority": "HIGH",
             })
+            checklist_ru.append(
+                f"[{CATEGORY_RU['vendor_arbitrage']}] {act_ru} (Цель: {name_ru}, Выгода: {exp_profit})"
+            )
+            checklist_en.append(
+                f"[Vendor arbitrage] {act_en} (Target: {name_en}, Profit: {exp_profit})"
+            )
             step += 1
 
         # 2. Waylaid Crates Crafting
         for it in crafting_items:
-            name = _sanitize_name(it.get("name") or it.get("crafted_item_name") or f"Recipe #{it.get('recipe_id', 'unknown')}")
-            prof = str(it.get("profession") or "Ремесло")
-            crate = it.get("crate_name") or it.get("waylaid_crate_name")
-            if crate:
-                crate = _sanitize_name(crate)
+            name_ru = _sanitize_name(it.get("name_ru") or it.get("name") or it.get("crafted_item_name") or f"Recipe #{it.get('recipe_id', 'unknown')}")
+            name_en = _sanitize_name(it.get("name_en") or it.get("name") or it.get("crafted_item_name") or f"Recipe #{it.get('recipe_id', 'unknown')}")
+            prof_raw = str(it.get("profession") or "Craft")
+            prof_ru = it.get("profession_ru") or PROFESSION_RU.get(prof_raw, prof_raw)
+
+            crate_raw = it.get("crate_name") or it.get("waylaid_crate_name")
+            crate_ru = it.get("crate_name_ru") or it.get("waylaid_crate_name_ru")
+            if not crate_ru and crate_raw:
+                crate_ru = _localize_crate_name(crate_raw, name_ru)
+            crate_en = it.get("crate_name_en") or crate_raw
+
+            if crate_ru:
+                crate_ru = _sanitize_name(crate_ru)
+            if crate_en:
+                crate_en = _sanitize_name(crate_en)
+
             profit = _safe_int(it.get("profit_copper"), _safe_int(it.get("profit"), 0))
             roi_val = it.get("roi_percent")
             if roi_val is None:
@@ -488,64 +662,106 @@ class AntigravityManagerClient:
             else:
                 roi = _safe_float(roi_val, 0.0)
 
-            if crate:
-                act = f"Скрафтить {name} ({prof}) под сдачу ящика {crate}"
+            exp_profit = f"+{format_currency(profit)} (ROI +{roi:.0f}%)"
+            is_gathering = prof_raw.lower() == "gathering" or it.get("recipe_id") is None
+
+            if crate_ru:
+                if is_gathering:
+                    act_ru = f"Заготовить {name_ru} ({prof_ru}) под сдачу ящика {crate_ru}"
+                    act_en = f"Gather or buyout {name_en} ({prof_raw}) for crate turn-in {crate_en}"
+                else:
+                    act_ru = f"Скрафтить {name_ru} ({prof_ru}) под сдачу ящика {crate_ru}"
+                    act_en = f"Craft {name_en} ({prof_raw}) for crate turn-in {crate_en}"
             else:
-                act = f"Скрафтить {name} ({prof}) для реализации на аукционе"
+                act_ru = f"Скрафтить {name_ru} ({prof_ru}) для реализации на аукционе"
+                act_en = f"Craft {name_en} ({prof_raw}) for auction house sale"
 
             actions.append({
                 "step": step,
                 "category": "waylaid_crafting",
-                "action": act,
-                "target": name,
-                "expected_profit": f"+{format_currency(profit)} (ROI +{roi:.0f}%)",
+                "action": act_ru,
+                "action_ru": act_ru,
+                "action_en": act_en,
+                "target": name_ru,
+                "target_ru": name_ru,
+                "target_en": name_en,
+                "expected_profit": exp_profit,
                 "priority": "HIGH" if roi >= 50.0 else "MEDIUM",
             })
+            checklist_ru.append(
+                f"[{CATEGORY_RU['waylaid_crafting']}] {act_ru} (Цель: {name_ru}, Выгода: {exp_profit})"
+            )
+            checklist_en.append(
+                f"[Waylaid crafting] {act_en} (Target: {name_en}, Profit: {exp_profit})"
+            )
             step += 1
 
         # 3. Price Dumps / Sniping
         for it in anomaly_items:
-            name = _sanitize_name(it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
+            name_ru = _sanitize_name(it.get("name_ru") or it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
+            name_en = _sanitize_name(it.get("name_en") or it.get("name") or f"Item #{it.get('item_id', 'unknown')}")
             z = _safe_float(it.get("z_score"), _safe_float(it.get("z"), 0.0))
             curr = _safe_int(it.get("current_price"), _safe_int(it.get("price"), 0))
             mean = _safe_float(it.get("mean_price"), _safe_float(it.get("mean"), 0.0))
             diff = max(0, int(round(mean - curr)))
 
-            profit_desc = f"Экономия {format_currency(diff)}" if diff > 0 else f"Скидка при Z={z:.1f}"
+            profit_desc_ru = f"Экономия {format_currency(diff)}" if diff > 0 else f"Скидка при Z={z:.1f}"
+            profit_desc_en = f"Save {format_currency(diff)}" if diff > 0 else f"Discount at Z={z:.1f}"
+
+            act_ru = f"Скупить сырье по аномально низкой цене (Z={z:+.1f}) для резерва или реселла"
+            act_en = f"Snipe raw material at anomalous low price (Z={z:+.1f}) for stock or flip"
 
             actions.append({
                 "step": step,
                 "category": "price_dump",
-                "action": f"Скупить сырье по аномально низкой цене (Z={z:+.1f}) для резерва или реселла",
-                "target": name,
-                "expected_profit": profit_desc,
+                "action": act_ru,
+                "action_ru": act_ru,
+                "action_en": act_en,
+                "target": name_ru,
+                "target_ru": name_ru,
+                "target_en": name_en,
+                "expected_profit": profit_desc_ru,
                 "priority": "HIGH" if z <= -2.5 else "MEDIUM",
             })
+            checklist_ru.append(
+                f"[{CATEGORY_RU['price_dump']}] {act_ru} (Цель: {name_ru}, Выгода: {profit_desc_ru})"
+            )
+            checklist_en.append(
+                f"[Price dump] {act_en} (Target: {name_en}, Profit: {profit_desc_en})"
+            )
             step += 1
 
+        title_ru = "Тактический чек-лист торговой сессии"
+        title_en = "Tactical session checklist"
         if actions:
-            title = "Тактический чек-лист торговой сессии"
-            summary = (
+            summary_ru = (
                 f"Сформирован оперативный план из {len(actions)} действий: "
                 f"{len(vendor_items)} вендорных арбитражей, "
-                f"{len(crafting_items)} крафтов под Waylaid Crates, "
+                f"{len(crafting_items)} крафтов под ящики снабжения (Waylaid Crates), "
                 f"{len(anomaly_items)} снайпинг-закупок сырья."
             )
+            summary_en = (
+                f"Operational plan formed with {len(actions)} actions: "
+                f"{len(vendor_items)} vendor arbitrage, "
+                f"{len(crafting_items)} Waylaid Crates crafts, "
+                f"{len(anomaly_items)} raw material snipes."
+            )
         else:
-            title = "Тактический чек-лист торговой сессии"
-            summary = "Актуальных рыночных сигналов в текущем снимке не обнаружено. Рекомендуется продолжать мониторинг."
-
-        checklist = [
-            f"[{a['category'].replace('_', ' ').capitalize()}] {a['action']} (Цель: {a['target']}, Выгода: {a['expected_profit']})"
-            for a in actions
-        ]
+            summary_ru = "Актуальных рыночных сигналов в текущем снимке не обнаружено. Рекомендуется продолжать мониторинг."
+            summary_en = "No actionable market signals detected in current snapshot. Continue monitoring."
 
         return {
-            "title": title,
-            "summary": summary,
+            "title": title_ru,
+            "title_ru": title_ru,
+            "title_en": title_en,
+            "summary": summary_ru,
+            "summary_ru": summary_ru,
+            "summary_en": summary_en,
             "model": self.model,
             "actions": actions,
-            "checklist": checklist,
+            "checklist": checklist_ru,
+            "checklist_ru": checklist_ru,
+            "checklist_en": checklist_en,
         }
 
     # Alias for consistency
@@ -610,7 +826,7 @@ class AntigravityManagerClient:
         checklist = data.get("checklist")
         if not checklist or not isinstance(checklist, list) or len(actions) != len(raw_actions):
             checklist = [
-                f"[{a['category'].replace('_', ' ').capitalize()}] {a['action']} (Цель: {a['target']}, Выгода: {a['expected_profit']})"
+                f"[{CATEGORY_RU.get(a['category'], a['category'].replace('_', ' ').capitalize())}] {a['action']} (Цель: {a['target']}, Выгода: {a['expected_profit']})"
                 for a in actions
             ]
         else:
@@ -618,10 +834,16 @@ class AntigravityManagerClient:
 
         return {
             "title": title,
+            "title_ru": data.get("title_ru") or title,
+            "title_en": data.get("title_en") or "Tactical session plan",
             "summary": summary,
+            "summary_ru": data.get("summary_ru") or summary,
+            "summary_en": data.get("summary_en") or summary,
             "model": model,
             "actions": actions,
             "checklist": checklist,
+            "checklist_ru": data.get("checklist_ru") or checklist,
+            "checklist_en": data.get("checklist_en") or checklist,
         }
 
 
